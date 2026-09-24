@@ -20,9 +20,10 @@ Layout under the app data dir (``~/.kiro/crew/apps/slack-radar/data/``):
 * ``events.jsonl``  — append-only work log, capped by :data:`MAX_EVENTS_BYTES`.
 * ``crew.json``     — the crew record (enabled / paused / unattended / agent / model).
 
-Nothing in these files carries authority. The bot token and the settings that
-decide WHICH channels the bot reads and WHERE it posts live in the keystone-floor
-vault (``secrets.py``), because this directory is readable and writable by agents.
+Nothing in these files carries authority. The settings that decide WHICH channels are
+read, WHICH Slack MCP binary is spawned and WHETHER a digest is DMed live in the
+keystone-floor vault (``settings.py``), because this directory is readable and writable
+by agents.
 """
 
 from __future__ import annotations
@@ -65,10 +66,11 @@ _KEY_RE = re.compile(r"^[CGD][A-Z0-9]{2,20}:\d{9,11}\.\d{6}$")
 _CHANNEL_RE = re.compile(r"^[CGD][A-Z0-9]{2,20}$")
 _URL_RE = re.compile(r"^https://[^\s<>\"']{1,500}$")
 
-# Token-shaped strings are masked before anything is stored. Slack messages are
-# user content and people paste credentials into channels; the ledger is readable
-# by every agent on this box and feeds the digest, so it must never hold one.
-_TOKEN_PATTERNS = (
+# Credential-shaped strings in MESSAGE CONTENT are masked before anything is stored.
+# This has nothing to do with how Slack Radar authenticates (it holds no credential):
+# channel members paste secrets into channels, the ledger is readable by every agent
+# on this box, and it feeds the digest, so it must never hold one.
+_CREDENTIAL_PATTERNS = (
     re.compile(r"xox[abprs]-[A-Za-z0-9-]{10,}"),
     re.compile(r"xapp-[A-Za-z0-9-]{10,}"),
     re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),
@@ -122,7 +124,7 @@ def now() -> float:
 
 def redact(text: str) -> str:
     out = text or ""
-    for pat in _TOKEN_PATTERNS:
+    for pat in _CREDENTIAL_PATTERNS:
         out = pat.sub(REDACTED, out)
     return out
 
@@ -209,8 +211,8 @@ def _read_json(path: Path) -> Any:
 def empty_ledger() -> dict[str, Any]:
     return {
         "schema": SCHEMA,
-        "workspace_url": "",
-        "bot_user_id": "",
+        "source_state": "ok",
+        "source_error": "",
         "channels": {},
         "items": {},
         "crew_memory": {
@@ -225,6 +227,8 @@ def empty_ledger() -> dict[str, Any]:
             "pending": None,
             "last_posted_at": 0.0,
             "last_posted_date": "",
+            "last_destination": "",
+            "last_text": "",
             "last_error": "",
         },
         "last_poll_at": 0.0,
@@ -318,7 +322,7 @@ def permalink(workspace_url: str, channel: str, ts: str, thread_ts: str = "") ->
     Same shape Slack's own permalinks use: ``<workspace>/archives/<C>/p<ts no dot>``,
     plus ``thread_ts``/``cid`` query for a reply so it opens inside the thread.
     """
-    base = (workspace_url or "https://slack.com/").rstrip("/")
+    base = (workspace_url or "https://slack.com").rstrip("/")
     link = f"{base}/archives/{channel}/p{ts.replace('.', '')}"
     if thread_ts and thread_ts != ts:
         link += f"?thread_ts={thread_ts}&cid={channel}"
@@ -326,14 +330,12 @@ def permalink(workspace_url: str, channel: str, ts: str, thread_ts: str = "") ->
 
 
 def normalize_message(
-    channel: str, msg: dict[str, Any], workspace_url: str, bot_user_id: str = ""
+    channel: str, msg: dict[str, Any], workspace_url: str = ""
 ) -> dict[str, Any] | None:
     """One Slack ``conversations.history`` message → a ledger item, or None to skip."""
     ts = str(msg.get("ts") or "")
     if not ts or msg.get("subtype") in SKIP_SUBTYPES:
         return None
-    if bot_user_id and msg.get("user") == bot_user_id:
-        return None  # our own digest posts
     thread_ts = str(msg.get("thread_ts") or "")
     if thread_ts and thread_ts != ts:
         return None  # a reply: history only surfaces these when broadcast; the parent owns it
@@ -350,7 +352,8 @@ def normalize_message(
         "user": str(msg.get("user") or msg.get("bot_id") or ""),
         "is_bot": bool(msg.get("bot_id")),
         "text": clip(msg.get("text"), MAX_TEXT),
-        "permalink": permalink(workspace_url, channel, ts),
+        "permalink": str(msg.get("permalink") or "") if _URL_RE.match(str(msg.get("permalink") or ""))
+        else permalink(workspace_url, channel, ts),
         "reply_count": int(msg.get("reply_count") or 0),
         "latest_reply": str(msg.get("latest_reply") or ""),
         "reactions": sorted({str(r.get("name")) for r in msg.get("reactions") or [] if r.get("name")}),

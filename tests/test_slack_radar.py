@@ -1,7 +1,9 @@
-"""Unit tests for the deterministic parts: ledger, poll cycle, digest, MCP write path.
+"""Unit tests for the deterministic parts: MCP client guard, ledger, poll cycle, digest, crew tools.
 
-Run from the app root: ``python3 -m pytest tests -q`` (stdlib + pytest only; the
-gateway is not needed).
+Run from the app root: ``python3 -m pytest tests -q`` (stdlib + pytest only; no gateway, no
+Slack). The Slack MCP subprocess is faked by overriding ``SlackMcpClient._call_tool`` — the
+single funnel every tools/call goes through — so the allowlist in ``call()`` and the
+separate ``send_self_dm()`` path are exercised exactly as in production.
 """
 
 from __future__ import annotations
@@ -11,15 +13,16 @@ import json
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from backend import store, watch  # noqa: E402
-from backend.secrets import DEFAULT_SETTINGS, validate_settings  # noqa: E402
-from backend.slack_api import SlackApiError  # noqa: E402
+from backend import slack_mcp, store, watch  # noqa: E402
+from backend.settings import DEFAULT_SETTINGS, validate_settings  # noqa: E402
+from backend.slack_mcp import NeedsLogin, SlackMcpClient, ToolNotAllowed  # noqa: E402
 
 C1 = "C0AAAAAAA"
 C2 = "C0BBBBBBB"
@@ -29,88 +32,186 @@ def ts(n: float) -> str:
     return f"{n:.6f}"
 
 
-class FakeSlack:
+class FakeMcp(SlackMcpClient):
+    """No subprocess: answers tools/call in the Slack MCP's real response shapes."""
+
     def __init__(self) -> None:
+        super().__init__("fake-slack-mcp")
+        self.calls: list[tuple[str, dict]] = []
         self.history_msgs: dict[str, list[dict]] = {}
         self.threads: dict[tuple[str, str], list[dict]] = {}
-        self.history_calls: list[tuple[str, str]] = []
-        self.posted: list[tuple[str, str]] = []
-        self.fail_history: dict[str, str] = {}
-        self.post_error = ""
-        self.deleted: set[tuple[str, str]] = set()
+        self.channel_errors: dict[str, str] = {}
+        self.auth_expired = False
+        self.dm_error: Exception | None = None
 
-    def auth_test(self) -> dict:
-        return {"ok": True, "url": "https://acme.slack.com/", "user_id": "UBOT"}
-
-    def history(self, channel, oldest, cursor="", limit=200):
-        self.history_calls.append((channel, oldest))
-        if channel in self.fail_history:
-            raise SlackApiError(self.fail_history[channel], retry_after=30)
-        msgs = [m for m in self.history_msgs.get(channel, []) if float(m["ts"]) > float(oldest)]
-        return {"ok": True, "messages": sorted(msgs, key=lambda m: -float(m["ts"])), "has_more": False}
-
-    def replies(self, channel, ts_, limit=50):
-        if (channel, ts_) in self.deleted:
-            raise SlackApiError("thread_not_found")
-        msgs = self.threads.get((channel, ts_), [{"ts": ts_, "text": "parent"}])
-        return {"ok": True, "messages": msgs}
-
-    def post_message(self, channel, text):
-        if self.post_error:
-            raise SlackApiError(self.post_error)
-        self.posted.append((channel, text))
-        return {"ok": True}
+    def _call_tool(self, name: str, args: dict[str, Any]) -> Any:
+        self.calls.append((name, args))
+        if self.auth_expired:
+            raise NeedsLogin("invalid_auth")
+        if name == "batch_get_channel_info":
+            return [{"channelId": c, "result": {"ok": True}} for c in args["channelIds"]]
+        if name == "batch_get_conversation_history":
+            out = []
+            for req in args["channels"]:
+                cid = req["channelId"]
+                if cid in self.channel_errors:
+                    out.append({"channelId": cid, "error": f'bad response: {{"ok":false,"error":"{self.channel_errors[cid]}"}}'})
+                    continue
+                oldest = float(watch.iso_to_ts(req["oldest"]))
+                msgs = [m for m in self.history_msgs.get(cid, []) if float(m["ts"]) > oldest]
+                out.append({"channelId": cid, "result": {"ok": True, "messages": sorted(msgs, key=lambda m: -float(m["ts"])), "has_more": False}})
+            return out
+        if name == "batch_get_thread_replies":
+            out = []
+            for req in args["threads"]:
+                key = (req["channelId"], req["threadTs"])
+                if key in self.threads and self.threads[key] is None:
+                    out.append({**req, "error": 'bad response: {"ok":false,"error":"thread_not_found"}'})
+                else:
+                    msgs = self.threads.get(key) or [{"ts": req["threadTs"], "text": "parent"}]
+                    out.append({**req, "result": {"ok": True, "messages": msgs}})
+            return out
+        if name == "self_dm":
+            if self.dm_error:
+                raise self.dm_error
+            return {"ok": True}
+        raise AssertionError(f"unexpected tool {name}")
 
 
 def settings(**kw) -> dict:
     s = dict(DEFAULT_SETTINGS)
-    s.update({"channels": [C1, C2], "digest_channel": "C0DIGEST1", "backfill_hours": 24})
+    s.update({"channels": [C1, C2], "backfill_hours": 24, "slack_login": "jdoe",
+              "workspace_url": "https://acme.slack.com"})
     s.update(kw)
     return s
 
 
+# ── MCP client guard ───────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("tool", ["post_message", "create_draft", "reaction_tool", "self_dm", "search", "add_channel_members"])
+def test_allowlist_refuses_non_read_tools_before_the_process(tool: str) -> None:
+    fake = FakeMcp()
+    with pytest.raises(ToolNotAllowed):
+        fake.call(tool, {})
+    assert fake.calls == []  # nothing reached the (fake) subprocess
+
+
+def test_allowlist_admits_read_tools() -> None:
+    fake = FakeMcp()
+    fake.call("batch_get_channel_info", {"channelIds": [C1]})
+    assert [c[0] for c in fake.calls] == ["batch_get_channel_info"]
+    assert slack_mcp.READ_TOOLS == {
+        "list_channels", "batch_get_conversation_history", "batch_get_thread_replies",
+        "batch_get_channel_info", "batch_get_user_info",
+    }
+
+
+def test_parse_tool_text_classifies_auth_errors() -> None:
+    with pytest.raises(NeedsLogin):
+        slack_mcp.parse_tool_text({"isError": True, "content": [{"type": "text", "text": "Midway session expired, run mwinit"}]})
+    with pytest.raises(slack_mcp.ToolError):
+        slack_mcp.parse_tool_text({"isError": True, "content": [{"type": "text", "text": "channel_not_found"}]})
+    assert slack_mcp.parse_tool_text({"content": [{"type": "text", "text": "[1]"}]}) == [1]
+
+
+def test_binary_not_found_and_bad_command() -> None:
+    with pytest.raises(slack_mcp.BinaryNotFound):
+        slack_mcp.resolve_command("definitely-not-a-real-slack-mcp-binary")
+    assert slack_mcp.validate_command("slack-mcp --flag") is not None
+    assert slack_mcp.validate_command("ai-community-slack-mcp") is None
+
+
+# ── ts <-> ISO ─────────────────────────────────────────────────────────────
+
+
+def test_ts_iso_round_trip_floors_to_milliseconds() -> None:
+    assert watch.ts_to_iso("1727184000.123456") == "2024-09-24T13:20:00.123Z"
+    assert watch.iso_to_ts("2024-09-24T13:20:00.123Z") == "1727184000.123000"
+    for raw in ("1727184000.000000", "1788220800.999999", "1600000000.5"):
+        back = float(watch.iso_to_ts(watch.ts_to_iso(raw)))
+        assert back <= float(raw) < back + 0.001  # never later than the cursor: nothing skipped
+    assert watch.iso_to_ts("2024-09-24T15:20:00+02:00") == "1727184000.000000"
+
+
+# ── poll cycle ─────────────────────────────────────────────────────────────
+
+
 def test_poll_ingests_advances_cursor_and_skips_noise(tmp_path: Path) -> None:
     now = time.time()
-    fake = FakeSlack()
+    fake = FakeMcp()
     fake.history_msgs[C1] = [
         {"ts": ts(now - 100), "user": "U1", "text": "Login is broken since v2"},
         {"ts": ts(now - 90), "subtype": "channel_join", "user": "U2", "text": "joined"},
-        {"ts": ts(now - 80), "user": "UBOT", "text": "our own digest"},
         {"ts": ts(now - 70), "user": "U3", "text": "token xoxb-1234567890-abcdefghij leaked"},
     ]
     summary = watch.run_cycle(tmp_path, fake, settings())
-    assert summary["new"] == 2
+    assert summary["new"] == 2 and summary["source_state"] == "ok"
     led = store.read_ledger(tmp_path)
-    assert led["workspace_url"] == "https://acme.slack.com/"
     assert led["channels"][C1]["cursor_ts"] == ts(now - 70)
-    texts = sorted(it["text"] for it in led["items"].values())
-    assert "xoxb-" not in "".join(texts) and store.REDACTED in "".join(texts)
+    texts = "".join(it["text"] for it in led["items"].values())
+    assert "xoxb-" not in texts and store.REDACTED in texts  # pasted credentials never stored
     key = store.item_key(C1, ts(now - 100))
     assert led["items"][key]["permalink"] == f"https://acme.slack.com/archives/{C1}/p{ts(now - 100).replace('.', '')}"
-    assert led["items"][key]["needs_triage"] is True
+    # one batched history call for both channels, oldest sent as ISO
+    hist = [a for n, a in fake.calls if n == "batch_get_conversation_history"]
+    assert len(hist) == 1 and {c["channelId"] for c in hist[0]["channels"]} == {C1, C2}
+    assert hist[0]["channels"][0]["oldest"].endswith("Z")
 
-    # second cycle: cursor used, nothing re-ingested
-    fake.history_calls.clear()
+    fake.calls.clear()
     assert watch.run_cycle(tmp_path, fake, settings())["new"] == 0
-    assert (C1, ts(now - 70)) in fake.history_calls
+    sent = next(c for c in fake.calls[0][1]["channels"] if c["channelId"] == C1)
+    assert sent["oldest"] == watch.ts_to_iso(ts(now - 70))
 
 
-def test_ratelimit_records_backoff_and_stops_cycle(tmp_path: Path) -> None:
-    fake = FakeSlack()
-    fake.fail_history[C1] = "ratelimited"
+def test_per_channel_error_does_not_stop_other_channels(tmp_path: Path) -> None:
+    now = time.time()
+    fake = FakeMcp()
+    fake.channel_errors[C1] = "channel_not_found"
+    fake.history_msgs[C2] = [{"ts": ts(now - 5), "user": "U1", "text": "hi"}]
     summary = watch.run_cycle(tmp_path, fake, settings())
-    assert summary["errors"] == {C1: "ratelimited"}
+    assert summary["errors"] == {C1: "channel_not_found"} and summary["new"] == 1
+    assert store.read_ledger(tmp_path)["channels"][C1]["last_error"] == "channel_not_found"
+
+
+def test_auth_error_sets_needs_login_without_moving_cursors(tmp_path: Path) -> None:
+    now = time.time()
+    fake = FakeMcp()
+    fake.history_msgs[C1] = [{"ts": ts(now - 10), "user": "U1", "text": "first"}]
+    watch.run_cycle(tmp_path, fake, settings())
+    before = store.read_ledger(tmp_path)["channels"][C1]["cursor_ts"]
+
+    fake.history_msgs[C1].append({"ts": ts(now - 1), "user": "U1", "text": "second"})
+    fake.auth_expired = True
+    summary = watch.run_cycle(tmp_path, fake, settings())
     led = store.read_ledger(tmp_path)
-    assert led["channels"][C1]["backoff_until"] > time.time()
-    assert C2 not in led["channels"]  # cycle stopped after the 429
+    assert summary["source_state"] == "needs_login" and summary["new"] == 0
+    assert led["source_state"] == "needs_login" and "login" in led["source_error"].lower()
+    assert led["channels"][C1]["cursor_ts"] == before  # never read as "no new messages"
+
+    # next cycle: still expired -> one cheap probe read only, then skip
+    fake.calls.clear()
+    watch.run_cycle(tmp_path, fake, settings())
+    assert [n for n, _ in fake.calls] == ["batch_get_channel_info"]
+
+    # re-login: probe passes, poll resumes, the held-back message arrives
+    fake.auth_expired = False
+    summary = watch.run_cycle(tmp_path, fake, settings())
+    assert summary["source_state"] == "ok" and summary["new"] == 1
+    assert store.read_ledger(tmp_path)["source_state"] == "ok"
+
+
+def test_per_channel_auth_error_is_needs_login(tmp_path: Path) -> None:
+    fake = FakeMcp()
+    fake.channel_errors[C2] = "invalid_auth"
+    assert watch.run_cycle(tmp_path, fake, settings())["source_state"] == "needs_login"
 
 
 def test_thread_recheck_flags_possibly_resolved_never_resolves(tmp_path: Path) -> None:
     now = time.time()
-    fake = FakeSlack()
+    fake = FakeMcp()
     parent_ts = ts(now - 5000)
     fake.history_msgs[C1] = [{"ts": parent_ts, "user": "U1", "text": "CI is red on main"}]
-    # ingest cycle does not re-read the thread (first re-check is one gap later)
     assert watch.run_cycle(tmp_path, fake, settings(channels=[C1]))["possibly_resolved"] == 0
     key = store.item_key(C1, parent_ts)
     store.mutate(tmp_path, lambda led: led["items"][key].update(last_thread_check_at=0.0))
@@ -121,29 +222,30 @@ def test_thread_recheck_flags_possibly_resolved_never_resolves(tmp_path: Path) -
     summary = watch.run_cycle(tmp_path, fake, settings(channels=[C1]))
     assert summary["possibly_resolved"] == 1 and summary["thread_changed"] == 1
     item = store.read_ledger(tmp_path)["items"][key]
-    assert item["possibly_resolved"]["reason"]
-    assert item["status"] == "new"  # code never resolves
-    # the 30-minute gap means an immediate third cycle does not re-read the thread
+    assert item["possibly_resolved"]["reason"] and item["status"] == "new"  # code never resolves
     fake.threads[(C1, parent_ts)].append({"ts": ts(now - 5), "text": "another"})
-    assert watch.run_cycle(tmp_path, fake, settings(channels=[C1]))["thread_changed"] == 0
+    assert watch.run_cycle(tmp_path, fake, settings(channels=[C1]))["thread_changed"] == 0  # 30-min gap
 
 
 def test_deleted_parent_is_flagged(tmp_path: Path) -> None:
     now = time.time()
-    fake = FakeSlack()
+    fake = FakeMcp()
     parent_ts = ts(now - 5000)
     fake.history_msgs[C1] = [{"ts": parent_ts, "user": "U1", "text": "question"}]
     watch.run_cycle(tmp_path, fake, settings(channels=[C1]))
     key = store.item_key(C1, parent_ts)
     store.mutate(tmp_path, lambda led: led["items"][key].update(last_thread_check_at=0.0))
-    fake.deleted.add((C1, parent_ts))
+    fake.threads[(C1, parent_ts)] = None  # type: ignore[assignment]
     assert watch.run_cycle(tmp_path, fake, settings(channels=[C1]))["possibly_resolved"] == 1
     assert "deleted" in store.read_ledger(tmp_path)["items"][key]["possibly_resolved"]["reason"]
 
 
+# ── crew write path + digest ───────────────────────────────────────────────
+
+
 def test_crew_record_validates_and_clears_flags(tmp_path: Path) -> None:
     now = time.time()
-    fake = FakeSlack()
+    fake = FakeMcp()
     fake.history_msgs[C1] = [{"ts": ts(now - 10), "user": "U1", "text": "please add dark mode"}]
     watch.run_cycle(tmp_path, fake, settings(channels=[C1]))
     key = store.item_key(C1, ts(now - 10))
@@ -158,23 +260,19 @@ def test_crew_record_validates_and_clears_flags(tmp_path: Path) -> None:
                     {"key": key, "priority": "p9"},
                     {"key": "C0NOPE:1.000001"},
                 ],
-                "crew": {"phase": "triaging", "next": "check dark mode dupes", "tried_add": ["gh search dark mode"]},
+                "crew": {"phase": "triaging", "next": "check dark mode dupes"},
             },
         ),
     )
     assert result["applied"] == [key, key]
     assert {r["key"] for r in result["refused"]} == {key, "C0NOPE:1.000001"}
-    led = store.read_ledger(tmp_path)
-    it = led["items"][key]
+    it = store.read_ledger(tmp_path)["items"][key]
     assert (it["category"], it["priority"], it["status"]) == ("feature-request", "p2", "triaged")
-    assert it["links"] == ["https://github.com/o/r/issues/1"]
-    assert it["needs_triage"] is False
-    assert led["crew_memory"]["next"] == "check dark mode dupes"
+    assert it["links"] == ["https://github.com/o/r/issues/1"] and it["needs_triage"] is False
 
 
-def test_digest_renders_public_fields_only_and_posts_to_configured_channel(tmp_path: Path) -> None:
+def _pending_digest(tmp_path: Path, fake: FakeMcp) -> str:
     now = time.time()
-    fake = FakeSlack()
     fake.history_msgs[C1] = [{"ts": ts(now - 10), "user": "U1", "text": "SECRET-RAW-TEXT crash on save"}]
     watch.run_cycle(tmp_path, fake, settings(channels=[C1]))
     key = store.item_key(C1, ts(now - 10))
@@ -185,21 +283,41 @@ def test_digest_renders_public_fields_only_and_posts_to_configured_channel(tmp_p
         led["digest"]["pending"] = {"headline": "One p1 bug today", "top_keys": [key]}
 
     store.mutate(tmp_path, _crew)
-    assert watch.post_pending_digest(tmp_path, fake, settings()) == "posted"
-    channel, text = fake.posted[0]
-    assert channel == "C0DIGEST1"
-    assert "Crash on save" in text and "One p1 bug today" in text
-    assert "SECRET-RAW-TEXT" not in text and "LOCAL-NOTE" not in text
-    led = store.read_ledger(tmp_path)
-    assert led["digest"]["pending"] is None and led["digest"]["last_posted_date"]
+    fake.calls.clear()
+    return key
 
 
-def test_digest_permanent_error_drops_pending(tmp_path: Path) -> None:
-    fake = FakeSlack()
-    fake.post_error = "not_in_channel"
-    store.mutate(tmp_path, lambda led: led["digest"].update(pending={"headline": "x", "top_keys": []}))
-    assert watch.post_pending_digest(tmp_path, fake, settings()) == "not_in_channel"
-    assert store.read_ledger(tmp_path)["digest"]["pending"] is None
+def test_digest_self_dm_is_the_only_write(tmp_path: Path) -> None:
+    fake = FakeMcp()
+    _pending_digest(tmp_path, fake)
+    notified: list[str] = []
+    out = watch.deliver_pending_digest(tmp_path, fake, settings(digest_destination="self_dm"),
+                                       lambda t, b: notified.append(b))
+    assert out == "sent"
+    assert [n for n, _ in fake.calls] == ["self_dm"]
+    args = fake.calls[0][1]
+    assert args["login"] == "jdoe"
+    assert "Crash on save" in args["text"] and "One p1 bug today" in args["text"]
+    assert "SECRET-RAW-TEXT" not in args["text"] and "LOCAL-NOTE" not in args["text"]
+    d = store.read_ledger(tmp_path)["digest"]
+    assert d["pending"] is None and d["last_destination"] == "self_dm" and d["last_text"]
+
+
+def test_digest_dashboard_mode_touches_no_slack_tool(tmp_path: Path) -> None:
+    fake = FakeMcp()
+    _pending_digest(tmp_path, fake)
+    notified: list[str] = []
+    assert watch.deliver_pending_digest(tmp_path, fake, settings(digest_destination="dashboard"),
+                                        lambda t, b: notified.append(b)) == "dashboard"
+    assert fake.calls == [] and "Crash on save" in notified[0]
+
+
+def test_digest_needs_login_keeps_pending_for_retry(tmp_path: Path) -> None:
+    fake = FakeMcp()
+    _pending_digest(tmp_path, fake)
+    fake.dm_error = NeedsLogin("invalid_auth")
+    assert watch.deliver_pending_digest(tmp_path, fake, settings(digest_destination="self_dm")) == "needs_login"
+    assert store.read_ledger(tmp_path)["digest"]["pending"] is not None
 
 
 def test_corrupt_ledger_is_refused_not_replaced(tmp_path: Path) -> None:
@@ -210,11 +328,19 @@ def test_corrupt_ledger_is_refused_not_replaced(tmp_path: Path) -> None:
 
 
 def test_settings_validation() -> None:
-    merged, errors = validate_settings({"channels": ["c0aaaaaaa", "C0AAAAAAA", "#general"]}, dict(DEFAULT_SETTINGS))
-    assert merged["channels"] == ["C0AAAAAAA"]
-    assert errors and "GENERAL" in errors[0]
-    merged, errors = validate_settings({"poll_interval_secs": 5, "digest_channel": "x"}, dict(DEFAULT_SETTINGS))
-    assert merged["poll_interval_secs"] == 60 and errors
+    base = dict(DEFAULT_SETTINGS, slack_login="jdoe")
+    merged, errors = validate_settings({"channels": ["c0aaaaaaa", "C0AAAAAAA", "#general"]}, base)
+    assert merged["channels"] == ["C0AAAAAAA"] and errors and "GENERAL" in errors[0]
+    _, errors = validate_settings({"slack_mcp_command": "rm -rf /"}, base)
+    assert errors
+    _, errors = validate_settings({"digest_destination": "C0CHANNEL1"}, base)
+    assert errors  # no channel posting destination exists
+    _, errors = validate_settings({"digest_destination": "self_dm", "slack_login": ""}, base)
+    assert errors
+    merged, errors = validate_settings({"workspace_url": "https://evil.example.com"}, base)
+    assert errors
+    merged, errors = validate_settings({"poll_interval_secs": 5, "slack_mcp_command": "my-slack-mcp"}, base)
+    assert not errors and merged["poll_interval_secs"] == 60 and merged["slack_mcp_command"] == "my-slack-mcp"
 
 
 def test_mcp_server_roundtrip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -232,5 +358,4 @@ def test_mcp_server_roundtrip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     read = mcp.handle({"jsonrpc": "2.0", "id": 4, "method": "tools/call",
                        "params": {"name": "slack_radar_read", "arguments": {}}})
     body = json.loads(read["result"]["content"][0]["text"])
-    assert body["digest"]["pending"]["headline"] == "hello"
-    assert mcp.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}) is None
+    assert body["digest"]["pending"]["headline"] == "hello" and body["slack_source"]["state"] == "ok"

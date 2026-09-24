@@ -120,8 +120,8 @@ def build_snapshot(data_dir: Path, settings: dict[str, Any], crew: dict[str, Any
     return {
         "name": crew.get("name") or "Slack Radar",
         "channels": list(settings.get("channels") or []),
-        "digest_channel": settings.get("digest_channel") or "",
-        "digest_send_message": bool(settings.get("digest_send_message")),
+        "digest_destination": settings.get("digest_destination") or "dashboard",
+        "source_state": ledger.get("source_state") or "ok",
         "counts": c,
         "phase": mem.get("phase") or "idle",
         "next": (mem.get("next") or "").strip(),
@@ -140,14 +140,15 @@ def compose_nudge(snap: dict[str, Any]) -> str:
         f"Your phase: {snap['phase']} — next: {snap['next'] or 'no next step recorded — decide one and record it'}",
     ]
     if snap["digest_due"]:
-        dest = []
-        if snap["digest_channel"]:
-            dest.append(f"Slack channel {snap['digest_channel']} (the gateway posts it)")
-        if snap["digest_send_message"]:
-            dest.append("send_message to the owner (you send it)")
-        lines.append("DIGEST DUE today → " + (", ".join(dest) or "record it with slack_radar_digest"))
+        where = "a DM to the owner (self_dm)" if snap["digest_destination"] == "self_dm" else "a dashboard notification"
+        lines.append(f"DIGEST DUE today → submit it with slack_radar_digest; the gateway delivers it as {where}")
+    if snap["source_state"] == "needs_login":
+        lines.append("SLACK MCP NEEDS RE-LOGIN: no new messages can be read until the owner re-authenticates "
+                     "their Slack MCP. This is NOT a quiet channel; say so in crew.next and do not report 'nothing new'.")
+    elif snap["source_state"] != "ok":
+        lines.append(f"Slack MCP unavailable ({snap['source_state']}); polling is paused until it answers.")
     if snap["last_poll_error"]:
-        lines.append(f"Last poll reported: {snap['last_poll_error']} (report it; do not try to fix Slack auth)")
+        lines.append(f"Last poll reported: {snap['last_poll_error']} (report it; do not try to fix it)")
     lines.append(
         "Call slack_radar_read first, handle needs_triage then thread_updates (oldest first), "
         "and call slack_radar_record before the turn ends."
@@ -283,7 +284,7 @@ async def wake_crew(state: Any, data_dir: Path, reason: str) -> bool:
     can land during any await), and the grant is re-derived from the LAST read in a
     ``finally`` so no exit path leaves a grant standing on a stopped crew.
     """
-    from . import secrets
+    from . import settings as settings_mod
 
     try:
         crew = await asyncio.to_thread(store.read_crew, data_dir)
@@ -295,7 +296,7 @@ async def wake_crew(state: Any, data_dir: Path, reason: str) -> bool:
         if getattr(slot, "running", False):
             logger.info("slack-radar: crew mid-turn, wake dropped (%s)", reason)
             return False
-        settings = await asyncio.to_thread(secrets.read_settings)
+        settings = await asyncio.to_thread(settings_mod.read_settings)
         snapshot = await asyncio.to_thread(build_snapshot, data_dir, settings, crew)
         prompt = f"[crew wake: {reason}]\n" + compose_turn_prompt(slot, snapshot)
         crew = await asyncio.to_thread(store.read_crew, data_dir)

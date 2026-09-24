@@ -2,7 +2,7 @@
 
 Every path is relative to ``/api/apps/slack-radar``. Reads are open to anything the
 gateway already authenticated into this app's namespace. Every WRITE that carries
-authority (token, settings, crew start/pause/unattended, poll, digest, investigate)
+authority (settings, MCP probe, crew start/pause/unattended, poll, digest, investigate)
 goes through :func:`_owner_gate`:
 
 * the dashboard owner (``is_owner_dashboard_request`` — the predicate the gateway's
@@ -13,8 +13,8 @@ and NEVER an internal-secret caller (``request["internal_auth"]``). That transpo
 how kiro-cli/MCP reach the gateway from inside an agent session, and the token
 middleware stamps such a call with the calling session's app — so the crew session
 itself would otherwise present as ``app == "slack-radar"``. The crew reads Slack text
-anyone in a channel wrote; it must not be able to repoint the bot, swap its token or
-grant itself auto-approval.
+anyone in a channel wrote; it must not be able to change which channels are read, which
+Slack MCP binary the gateway spawns, where the digest goes, or its own auto-approval.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from typing import Any, Awaitable, Callable
 
 from aiohttp import web
 
-from . import crew_runtime, secrets, store, watch
+from . import crew_runtime, settings as settings_mod, slack_mcp, store, watch
 
 logger = logging.getLogger("kirocrew.app.slack-radar")
 
@@ -98,10 +98,10 @@ def _state(request: web.Request) -> Any:
 async def _handle_state(request: web.Request, ctx: Any) -> web.Response:
     data_dir = _data_dir(ctx)
     try:
-        settings = await asyncio.to_thread(secrets.read_settings)
+        settings = await asyncio.to_thread(settings_mod.read_settings)
         vault_ok = True
-    except secrets.SecretStoreUnavailable:
-        settings, vault_ok = dict(secrets.DEFAULT_SETTINGS), False
+    except settings_mod.SettingsUnavailable:
+        settings, vault_ok = settings_mod.defaults(), False
     try:
         ledger = await asyncio.to_thread(store.read_ledger, data_dir)
     except store.StoreError as exc:
@@ -113,7 +113,6 @@ async def _handle_state(request: web.Request, ctx: Any) -> web.Response:
         {
             "ok": True,
             "vault_available": vault_ok,
-            "secrets": await asyncio.to_thread(secrets.describe_token),
             "settings": settings,
             "crew": {
                 **crew,
@@ -125,7 +124,8 @@ async def _handle_state(request: web.Request, ctx: Any) -> web.Response:
             "crew_memory": ledger.get("crew_memory"),
             "counts": store.counts(ledger),
             "channels": ledger.get("channels"),
-            "workspace_url": ledger.get("workspace_url"),
+            "source_state": ledger.get("source_state") or "ok",
+            "source_error": ledger.get("source_error") or "",
             "last_poll_at": ledger.get("last_poll_at"),
             "last_poll_error": ledger.get("last_poll_error"),
             "digest": ledger.get("digest"),
@@ -170,54 +170,41 @@ async def _handle_put_settings(request: web.Request, ctx: Any) -> web.Response:
     if body is None:
         return _err(400, "body_not_object", "request body must be a JSON object")
     try:
-        current = await asyncio.to_thread(secrets.read_settings)
-    except secrets.SecretStoreUnavailable:
+        current = await asyncio.to_thread(settings_mod.read_settings)
+    except settings_mod.SettingsUnavailable:
         return _err(503, "vault_unavailable", "the gateway secret vault is unavailable")
-    merged, errors = secrets.validate_settings(body, current)
+    merged, errors = settings_mod.validate_settings(body, current)
     if errors:
         return _err(400, "invalid_settings", "; ".join(errors))
-    await asyncio.to_thread(secrets.write_settings, merged)
+    try:
+        await asyncio.to_thread(settings_mod.write_settings, merged)
+    except (settings_mod.SettingsUnavailable, OSError):
+        return _err(503, "vault_unwritable", "the secret vault could not be written; retry")
     store.append_event(_data_dir(ctx), "settings", f"settings saved ({len(merged['channels'])} channels)")
     return web.json_response({"ok": True, "settings": merged})
 
 
-async def _handle_put_token(request: web.Request, ctx: Any) -> web.Response:
-    body = await _json_body(request)
-    if body is None:
-        return _err(400, "body_not_object", "request body must be a JSON object")
-    value = str(body.get("value") or "").strip()
-    if not value:
-        return _err(400, "missing_required_field", "value must not be empty")
-    if len(value) > secrets.MAX_TOKEN_LEN:
-        return _err(400, "value_too_long", "value is too long")
-    if not value.startswith("xoxb-"):
-        # A user token (xoxp-) would read every channel THAT PERSON can see, not the
-        # channels the bot was invited to — refuse rather than silently widen reach.
-        return _err(400, "not_a_bot_token", "paste the Bot User OAuth Token (starts with xoxb-)")
+async def _handle_mcp_status(request: web.Request, ctx: Any) -> web.Response:
+    """Lightweight probe: initialize + tools/list on the configured Slack MCP. No tool call."""
     try:
-        await asyncio.to_thread(secrets.put_token, value)
-    except secrets.SecretStoreUnavailable:
+        settings = await asyncio.to_thread(settings_mod.read_settings)
+    except settings_mod.SettingsUnavailable:
         return _err(503, "vault_unavailable", "the gateway secret vault is unavailable")
-    except OSError:
-        return _err(503, "vault_unwritable", "the secret vault could not be written; retry")
-
-    def _reset(led: dict[str, Any]) -> None:
-        # A new token may be a different workspace or bot: re-run auth.test.
-        led["workspace_url"] = ""
-        led["bot_user_id"] = ""
-
-    await asyncio.to_thread(store.mutate, _data_dir(ctx), _reset)
-    store.append_event(_data_dir(ctx), "settings", "bot token updated")
-    return web.json_response({"ok": True, "secrets": await asyncio.to_thread(secrets.describe_token)})
-
-
-async def _handle_delete_token(request: web.Request, ctx: Any) -> web.Response:
+    command = settings["slack_mcp_command"]
+    ledger = await asyncio.to_thread(store.read_ledger, _data_dir(ctx))
     try:
-        await asyncio.to_thread(secrets.delete_token)
-    except (secrets.SecretStoreUnavailable, OSError):
-        return _err(503, "vault_unavailable", "the secret vault could not be written; the token may still be stored")
-    store.append_event(_data_dir(ctx), "settings", "bot token removed")
-    return web.json_response({"ok": True, "secrets": await asyncio.to_thread(secrets.describe_token)})
+        info = await asyncio.to_thread(slack_mcp.get_client(command).probe)
+    except slack_mcp.BinaryNotFound as exc:
+        return web.json_response({"ok": True, "status": "binary_not_found", "command": command, "detail": str(exc)})
+    except slack_mcp.SlackMcpError as exc:
+        return web.json_response({"ok": True, "status": "error", "command": command, "detail": f"{exc.code}: {exc}"[:300]})
+    # The handshake cannot see an expired login (tools/list needs no session), so the
+    # last poll's verdict is what decides "needs re-login".
+    status = "needs_login" if ledger.get("source_state") == "needs_login" else "connected"
+    if info["missing_read_tools"]:
+        status = "incompatible"
+    return web.json_response({"ok": True, "status": status, "command": command, **info,
+                              "detail": ledger.get("source_error") or ""})
 
 
 async def _handle_poll(request: web.Request, ctx: Any) -> web.Response:
@@ -331,8 +318,7 @@ def register_routes(ctx: Any) -> list[Any]:
         r("GET", "/items", _handle_items),
         r("GET", "/events", _handle_events),
         r("PUT", "/settings", _owner_only(_handle_put_settings)),
-        r("PUT", "/token", _owner_only(_handle_put_token)),
-        r("DELETE", "/token", _owner_only(_handle_delete_token)),
+        r("GET", "/mcp/status", _owner_only(_handle_mcp_status)),
         r("POST", "/poll", _owner_only(_handle_poll)),
         r("POST", "/crew/start", _owner_only(_handle_crew_start)),
         r("POST", "/crew/pause", _owner_only(_handle_crew_pause)),

@@ -1,40 +1,62 @@
 {
   "name": "slack-radar",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "displayName": "Slack Radar",
-  "description": "A Slack triage crew that remembers. Watches the channels you choose, classifies every new message as a bug report, feature request, question, already-answered or noise with a priority, links clusters to existing GitHub issues and PRs, notices when a thread looks resolved, and posts a daily digest — keeping everything in a local ledger so nothing is triaged twice.",
+  "description": "A Slack triage crew that remembers, reading with your own Slack identity through your Slack MCP — no bot, no invite. Watches the channels you choose, classifies every new message as a bug report, feature request, question, already-answered or noise with a priority, links clusters to existing GitHub issues and PRs, notices when a thread looks resolved, and sends you a daily digest — keeping everything in a local ledger so nothing is triaged twice.",
   "author": "iamwhatever",
   "license": "MIT",
   "iconPath": "assets/icon.png",
-  "tags": ["slack", "triage", "support", "developer-tools"],
+  "tags": [
+    "slack",
+    "triage",
+    "support",
+    "developer-tools"
+  ],
   "highlights": [
+    "Reads with your own Slack identity via your Slack MCP: no bot, no invite, nothing visible in the channel",
+    "Read-only by construction: a hard allowlist of five read tools; the only write is an optional digest DM to yourself",
     "One crew for every channel you configure: new messages are classified by category and priority with a one-line summary",
     "Its own per-channel cursor, independent of your Slack read state",
     "Flags threads that look resolved for the crew to judge; code never closes an item on its own",
-    "Clusters of reports are investigated by a read-only subagent that links matching GitHub issues and PRs",
-    "Daily digest posted to a channel you choose, built from the ledger's public fields",
-    "The bot token and channel settings live in the gateway's encrypted vault, out of every agent's reach"
+    "An expired Slack MCP login shows as 'needs re-login', never as 'no new messages'",
+    "Clusters of reports are investigated by a read-only subagent that links matching GitHub issues and PRs"
   ],
   "defaultEnabled": false,
   "platform": {
-    "os": ["macos", "linux", "windows"]
+    "os": [
+      "macos",
+      "linux",
+      "windows"
+    ]
   },
-  "agents": ["agents/slack-radar-investigator.json"],
+  "agents": [
+    "agents/slack-radar-investigator.json"
+  ],
   "permissions": {
-    "api": ["/api/apps/slack-radar", "/api/apps/slack-radar/*"],
-    "events": ["slots"],
+    "api": [
+      "/api/apps/slack-radar",
+      "/api/apps/slack-radar/*"
+    ],
+    "events": [
+      "slots",
+      "notification"
+    ],
     "mcpTools": [
-      "send_message",
       "spawn_run",
       "slack_radar_read",
       "slack_radar_record",
       "slack_radar_digest",
       "slack_radar_request_digest"
     ],
-    "network": true,
     "storage": true,
     "cron": true,
     "spawn": true
+  },
+  "dependencies": {
+    "optionalCommands": [
+      "ai-community-slack-mcp",
+      "gh"
+    ]
   },
   "mcpServers": {
     "ledger": {
@@ -74,9 +96,9 @@
     ]
   },
   "useCases": [
-    "Triage support and feedback channels continuously, link reports to existing GitHub work, and get one daily summary instead of reading every channel."
+    "Triage support and feedback channels continuously with your own Slack identity, link reports to existing GitHub work, and get one daily summary instead of reading every channel."
   ],
   "configuration": [
-    "Create a Slack app with a bot user, grant channels:history, groups:history, channels:read and chat:write, install it to your workspace, invite the bot to each channel, then paste its xoxb- Bot User OAuth Token and the channel IDs in Settings."
+    "Install and log in to a Slack MCP server on the gateway host (default command: ai-community-slack-mcp; configurable in Settings), then list the channel IDs to watch and pick a digest destination (self-DM or dashboard notification)."
   ]
 }

@@ -1,27 +1,30 @@
 """Slack Radar — the zero-LLM poll cycle and the in-gateway scheduler.
 
-Deterministic Python, same role as issue-radar's ``watch.py``: it is the only
-always-on loop in this app, it spends no credits, and it decides WHEN the crew gets
-a turn. Per cycle:
+Deterministic Python, same role as issue-radar's ``watch.py``: the only always-on loop in
+this app, no credits spent, and it decides WHEN the crew gets a turn. Slack is read with
+the USER's own identity through their Slack MCP server (``slack_mcp.py``), not a bot.
 
-1. For every configured channel, fetch messages newer than that channel's cursor
-   (``conversations.history``), normalize them into ledger items, advance the
-   cursor. The cursor is the app's own (``ledger.channels.<id>.cursor_ts``) and is
-   independent of Slack's per-user read marker, so reading a channel in Slack never
-   hides a message from the radar and vice versa.
-2. Re-check a BOUNDED window of open items for thread activity
-   (``conversations.replies``) and flag "possibly resolved" candidates. A flag is a
-   question for the crew, never a verdict: no code path here sets ``resolved``.
-3. Post a digest the crew has submitted (``chat.postMessage`` to the owner-set
-   digest channel), rendered from the ledger's public fields.
-4. Wake the crew when something moved — new items, thread changes, a flag, or a
-   digest request — and re-derive its auto-approve grant (``crew_runtime``).
+Per cycle:
 
-Why an in-gateway loop and not a manifest ``crons`` entry for polling: a manifest
-cron runs either as an agent turn (an LLM call every five minutes for work that is
-pure I/O) or as a sandboxed subprocess (``cron_script.run_script_sandboxed``), which
-by design cannot read the keystone-floor vault holding the bot token. The daily
-digest IS judgement work, so that one is a manifest cron (see ``app.json``).
+1. One ``batch_get_conversation_history`` call for every configured channel, ``oldest`` =
+   that channel's stored cursor converted to ISO-8601; channels with more pages are
+   followed by cursor (bounded). New messages become ledger items and the cursor
+   advances. The cursor is the app's own Slack ts string, independent of the user's
+   Slack read marker, so reading a channel in Slack never hides a message from the radar.
+2. One ``batch_get_thread_replies`` call for a BOUNDED window of open items, flagging
+   "possibly resolved" candidates. A flag is a question for the crew, never a verdict.
+3. The pending digest, if the crew submitted one: a self-DM (``self_dm``) or a dashboard
+   notification, per the owner's setting. Nothing is ever posted to a channel.
+4. Wake the crew when something moved (``crew_runtime.after_poll``).
+
+**Login expiry is a state, never "no new messages".** The MCP authenticates with the
+user's browser/Midway session. An auth error anywhere stops the cycle before any cursor
+moves and persists ``source_state = "needs_login"``; the board shows it and the next
+cycle retries with one cheap read before polling again.
+
+Why an in-gateway loop and not a manifest cron for polling: an agent cron spends an LLM
+turn per poll on pure I/O, and a script cron is sandboxed away from the vault that holds
+the settings (including which MCP binary to spawn).
 """
 
 from __future__ import annotations
@@ -35,7 +38,15 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import store
-from .slack_api import SlackApiError, SlackOps
+from .slack_mcp import (
+    BinaryNotFound,
+    McpTransportError,
+    NeedsLogin,
+    SlackMcpClient,
+    SlackMcpError,
+    ToolError,
+    is_auth_error,
+)
 
 logger = logging.getLogger("kirocrew.app.slack-radar")
 
@@ -45,6 +56,11 @@ PAGE_LIMIT = 200
 RECHECK_MIN_GAP_SECS = 1800
 #: Floor between loop iterations regardless of settings (a bad value must not spin).
 MIN_LOOP_SECS = 60
+
+SOURCE_OK = "ok"
+SOURCE_NEEDS_LOGIN = "needs_login"
+SOURCE_NOT_FOUND = "binary_not_found"
+SOURCE_ERROR = "error"
 
 _RESOLVED_WORDS = re.compile(
     r"\b(fixed|resolved|done|merged|shipped|deployed|released|closing|closed|answered|"
@@ -56,24 +72,115 @@ _RESOLVED_REACTIONS = frozenset(
 )
 
 
-def _fmt_ts(t: float) -> str:
-    return f"{t:.6f}"
+# ── Slack ts <-> ISO-8601 ──────────────────────────────────────────────────
 
 
-# ── cycle (sync, testable with a fake client) ──────────────────────────────
+def ts_to_iso(ts: str | float) -> str:
+    """Slack ts → ISO-8601 UTC, floored to MILLISECONDS.
+
+    The MCP converts ISO to a Slack ts at millisecond precision (verified:
+    ``…00.123Z`` → ``….123000``). Flooring means the boundary can only move EARLIER, so
+    a message is never skipped; a re-delivered one is dropped by its item key.
+    """
+    ms = int(float(ts) * 1000)
+    dt = datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{ms % 1000:03d}Z"
 
 
-def _fetch_channel(client: SlackOps, channel: str, oldest: str) -> tuple[list[dict[str, Any]], bool]:
-    """All messages newer than ``oldest``, bounded; returns (messages, truncated)."""
-    msgs: list[dict[str, Any]] = []
-    cursor = ""
-    for _ in range(MAX_PAGES_PER_CHANNEL):
-        page = client.history(channel, oldest=oldest, cursor=cursor, limit=PAGE_LIMIT)
-        msgs.extend(m for m in page.get("messages") or [] if isinstance(m, dict))
-        cursor = str(((page.get("response_metadata") or {}).get("next_cursor")) or "")
-        if not page.get("has_more") or not cursor:
-            return msgs, False
-    return msgs, True
+def iso_to_ts(iso: str) -> str:
+    """ISO-8601 (``Z`` or offset) → Slack ts string ``"<secs>.<6 digits>"``."""
+    text = iso.strip().replace("Z", "+00:00")
+    dt = datetime.fromisoformat(text)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return f"{dt.timestamp():.6f}"
+
+
+# ── reads over the MCP ─────────────────────────────────────────────────────
+
+
+def _entry_error(entry: dict[str, Any]) -> str:
+    err = entry.get("error")
+    if not err and isinstance(entry.get("result"), dict) and entry["result"].get("ok") is False:
+        err = entry["result"].get("error")
+    return str(err or "")
+
+
+def _short_error(text: str) -> str:
+    """``bad response: {"ok":false,"error":"channel_not_found"}`` → ``channel_not_found``."""
+    m = re.search(r'"error"\s*:\s*"([^"]{1,80})"', text)
+    return m.group(1) if m else text[:120]
+
+
+def fetch_history(
+    client: SlackMcpClient, oldest_by_channel: dict[str, str]
+) -> dict[str, dict[str, Any]]:
+    """Messages newer than each channel's cursor. ``{channel: {messages, truncated, error}}``.
+
+    Raises :class:`NeedsLogin` if ANY channel's answer is an auth failure: an expired
+    session must stop the whole cycle, not read as one quiet channel.
+    """
+    out: dict[str, dict[str, Any]] = {
+        c: {"messages": [], "truncated": False, "error": ""} for c in oldest_by_channel
+    }
+    pending = {c: "" for c in oldest_by_channel}  # channel -> cursor
+    for _page in range(MAX_PAGES_PER_CHANNEL):
+        if not pending:
+            break
+        req = [
+            {"channelId": c, "oldest": ts_to_iso(oldest_by_channel[c]), "limit": PAGE_LIMIT,
+             **({"cursor": cur} if cur else {})}
+            for c, cur in pending.items()
+        ]
+        payload = client.call("batch_get_conversation_history", {"channels": req})
+        if not isinstance(payload, list):
+            raise ToolError("unexpected batch_get_conversation_history payload")
+        nxt: dict[str, str] = {}
+        for entry in payload:
+            if not isinstance(entry, dict):
+                continue
+            cid = str(entry.get("channelId") or "")
+            if cid not in out:
+                continue
+            err = _entry_error(entry)
+            if err:
+                if is_auth_error(err):
+                    raise NeedsLogin(_short_error(err))
+                out[cid]["error"] = _short_error(err)
+                continue
+            result = entry.get("result") or {}
+            out[cid]["messages"].extend(m for m in result.get("messages") or [] if isinstance(m, dict))
+            cursor = str((result.get("response_metadata") or {}).get("next_cursor") or "")
+            if result.get("has_more") and cursor:
+                nxt[cid] = cursor
+        pending = nxt
+    for cid in pending:
+        out[cid]["truncated"] = True
+    return out
+
+
+def fetch_replies(client: SlackMcpClient, threads: list[tuple[str, str]]) -> list[dict[str, Any]]:
+    """``[{messages, error}]`` aligned with ``threads`` (channel, parent ts)."""
+    if not threads:
+        return []
+    payload = client.call(
+        "batch_get_thread_replies",
+        {"threads": [{"channelId": c, "threadTs": t} for c, t in threads]},
+    )
+    entries = payload if isinstance(payload, list) else []
+    out: list[dict[str, Any]] = []
+    for i, (c, t) in enumerate(threads):
+        entry = next(
+            (e for e in entries if isinstance(e, dict) and e.get("threadTs") == t and e.get("channelId") == c),
+            entries[i] if i < len(entries) and isinstance(entries[i], dict) else {},
+        )
+        err = _entry_error(entry)
+        if err and is_auth_error(err):
+            raise NeedsLogin(_short_error(err))
+        result = entry.get("result") if isinstance(entry.get("result"), dict) else entry
+        msgs = [m for m in (result or {}).get("messages") or [] if isinstance(m, dict)]
+        out.append({"messages": msgs, "error": _short_error(err) if err else ("" if entry else "missing")})
+    return out
 
 
 def _resolution_signal(parent: dict[str, Any], replies: list[dict[str, Any]], since: str) -> str:
@@ -91,93 +198,101 @@ def _resolution_signal(parent: dict[str, Any], replies: list[dict[str, Any]], si
     return ""
 
 
+def _set_source(data_dir: Path, state: str, error: str, t0: float) -> None:
+    def _apply(led: dict[str, Any]) -> None:
+        led["source_state"] = state
+        led["source_error"] = error[:300]
+        led["last_poll_at"] = t0
+        led["last_poll_error"] = error[:300] if state != SOURCE_OK else led.get("last_poll_error", "")
+
+    store.mutate(data_dir, _apply)
+
+
+# ── cycle (sync, testable with a stubbed client) ───────────────────────────
+
+
 def run_cycle(
-    data_dir: Path, client: SlackOps, settings: dict[str, Any], *, clock: Callable[[], float] = time.time
+    data_dir: Path, client: SlackMcpClient, settings: dict[str, Any], *, clock: Callable[[], float] = time.time
 ) -> dict[str, Any]:
     """One full poll cycle. Blocking. Returns a summary the async layer acts on."""
     summary: dict[str, Any] = {"new": 0, "thread_changed": 0, "possibly_resolved": 0, "errors": {}}
     t0 = clock()
+    try:
+        _run_cycle_body(data_dir, client, settings, summary, t0)
+    except NeedsLogin as exc:
+        summary["source_state"] = SOURCE_NEEDS_LOGIN
+        _set_source(data_dir, SOURCE_NEEDS_LOGIN, f"Slack MCP login expired: {exc}", t0)
+        store.append_event(data_dir, "source", "Slack MCP needs re-login; polling paused until it answers")
+        return summary
+    except BinaryNotFound as exc:
+        summary["source_state"] = SOURCE_NOT_FOUND
+        _set_source(data_dir, SOURCE_NOT_FOUND, str(exc), t0)
+        return summary
+    except (McpTransportError, ToolError) as exc:
+        summary["source_state"] = SOURCE_ERROR
+        _set_source(data_dir, SOURCE_ERROR, f"{exc.code}: {exc}", t0)
+        return summary
+    summary["source_state"] = SOURCE_OK
+    return summary
+
+
+def _run_cycle_body(
+    data_dir: Path, client: SlackMcpClient, settings: dict[str, Any], summary: dict[str, Any], t0: float
+) -> None:
     ledger = store.read_ledger(data_dir)
+    channels = list(settings.get("channels") or [])
+    workspace_url = str(settings.get("workspace_url") or "")
 
-    if not ledger.get("workspace_url"):
-        try:
-            info = client.auth_test()
-        except SlackApiError as exc:
-            summary["errors"]["auth.test"] = exc.code
+    # 0. After a login failure, one cheap read decides whether the session is back.
+    if ledger.get("source_state") == SOURCE_NEEDS_LOGIN and channels:
+        client.call("batch_get_channel_info", {"channelIds": channels[:1]})
+        store.append_event(data_dir, "source", "Slack MCP login restored")
 
-            def _auth_err(led: dict[str, Any]) -> None:
-                led["last_poll_at"] = t0
-                led["last_poll_error"] = f"auth.test: {exc.code}"
-
-            store.mutate(data_dir, _auth_err)
-            return summary
-
-        def _auth(led: dict[str, Any]) -> None:
-            led["workspace_url"] = str(info.get("url") or "")
-            led["bot_user_id"] = str(info.get("user_id") or "")
-
-        store.mutate(data_dir, _auth)
-        ledger = store.read_ledger(data_dir)
-
-    workspace_url = ledger.get("workspace_url") or ""
-    bot_user = ledger.get("bot_user_id") or ""
+    # 1. new messages, all channels in one batched call
     backfill = float(settings.get("backfill_hours") or 0) * 3600
-    rate_limited = False
-
-    # 1. new messages per channel
-    for channel in settings.get("channels") or []:
-        if rate_limited:
-            break
+    oldest: dict[str, str] = {}
+    for channel in channels:
         state = (ledger.get("channels") or {}).get(channel) or {}
-        if float(state.get("backoff_until") or 0) > t0:
-            continue
-        oldest = str(state.get("cursor_ts") or "") or _fmt_ts(t0 - backfill)
-        try:
-            msgs, truncated = _fetch_channel(client, channel, oldest)
-            error, retry = "", 0.0
-        except SlackApiError as exc:
-            msgs, truncated, error, retry = [], False, exc.code, exc.retry_after
-            summary["errors"][channel] = exc.code
-            rate_limited = exc.code == "ratelimited"
+        oldest[channel] = str(state.get("cursor_ts") or "") or f"{t0 - backfill:.6f}"
+    fetched = fetch_history(client, oldest) if oldest else {}
 
-        def _apply(led: dict[str, Any], channel: str = channel, msgs: list = msgs,
-                   truncated: bool = truncated, error: str = error, retry: float = retry,
-                   oldest: str = oldest) -> int:
+    for channel, res in fetched.items():
+        def _apply(led: dict[str, Any], channel: str = channel, res: dict = res) -> int:
             ch = led["channels"].setdefault(channel, {})
             ch["last_polled_at"] = t0
-            ch["last_error"] = error
-            ch["backoff_until"] = t0 + retry if retry else 0.0
-            if error:
+            ch["last_error"] = res["error"]
+            if res["error"]:
                 return 0
             added = 0
-            max_ts = str(ch.get("cursor_ts") or oldest)
-            for m in sorted(msgs, key=lambda m: float(m.get("ts") or 0)):
+            max_ts = str(ch.get("cursor_ts") or oldest[channel])
+            for m in sorted(res["messages"], key=lambda m: float(m.get("ts") or 0)):
                 ts = str(m.get("ts") or "")
                 if ts and float(ts) > float(max_ts or 0):
                     max_ts = ts
-                item = store.normalize_message(channel, m, workspace_url, bot_user)
-                if item is None:
-                    continue
-                if item["key"] in led["items"]:
+                item = store.normalize_message(channel, m, workspace_url)
+                if item is None or item["key"] in led["items"]:
                     continue
                 led["items"][item["key"]] = item
                 added += 1
             ch["cursor_ts"] = max_ts
-            ch["truncated_at"] = t0 if truncated else ch.get("truncated_at", 0.0)
+            if res["truncated"]:
+                ch["truncated_at"] = t0
             return added
 
-        added = store.mutate(data_dir, _apply)
-        summary["new"] += added
-        if truncated:
+        summary["new"] += store.mutate(data_dir, _apply)
+        if res["error"]:
+            summary["errors"][channel] = res["error"]
+        if res["truncated"]:
             store.append_event(
-                data_dir, "backlog", f"{channel}: more than {MAX_PAGES_PER_CHANNEL * PAGE_LIMIT} "
-                "new messages in one cycle; older ones in that burst were skipped"
+                data_dir, "backlog",
+                f"{channel}: more than {MAX_PAGES_PER_CHANNEL * PAGE_LIMIT} new messages in one cycle; "
+                "the rest are read on the next cycle",
             )
 
-    # 2. bounded thread re-check of open items
+    # 2. bounded thread re-check of open items, one batched call
     ledger = store.read_ledger(data_dir)
     horizon = t0 - float(settings.get("recheck_days") or 7) * 86400
-    watched = set(settings.get("channels") or [])
+    watched = set(channels)
     due = [
         it
         for it in (ledger.get("items") or {}).values()
@@ -187,28 +302,21 @@ def run_cycle(
         and t0 - float(it.get("last_thread_check_at") or 0) >= RECHECK_MIN_GAP_SECS
     ]
     due.sort(key=lambda it: float(it.get("last_thread_check_at") or 0))
-    for it in due[: int(settings.get("recheck_max_per_cycle") or 0)]:
-        if rate_limited:
-            break
-        try:
-            page = client.replies(it["channel"], it["ts"], limit=100)
-            msgs = [m for m in page.get("messages") or [] if isinstance(m, dict)]
-            error = ""
-        except SlackApiError as exc:
-            msgs, error = [], exc.code
-            rate_limited = exc.code == "ratelimited"
-            if rate_limited:
-                break
-        parent = msgs[0] if msgs else {}
-        replies = msgs[1:]
+    due = due[: int(settings.get("recheck_max_per_cycle") or 0)]
+    answers = fetch_replies(client, [(it["channel"], it["ts"]) for it in due])
+
+    for it, ans in zip(due, answers):
+        msgs = ans["messages"]
+        parent = msgs[0] if msgs and str(msgs[0].get("ts")) == it["ts"] else {}
+        replies = msgs[1:] if parent else msgs
 
         def _recheck(led: dict[str, Any], key: str = it["key"], parent: dict = parent,
-                     replies: list = replies, error: str = error) -> tuple[bool, bool]:
+                     replies: list = replies, error: str = ans["error"]) -> tuple[bool, bool]:
             item = led["items"].get(key)
             if item is None:
                 return False, False
             item["last_thread_check_at"] = t0
-            changed = flagged = False
+            changed = False
             if error in ("thread_not_found", "message_not_found"):
                 reason = "parent message was deleted"
             elif error:
@@ -221,9 +329,11 @@ def run_cycle(
                 reason = _resolution_signal(parent, replies, item.get("latest_reply") or "")
                 item["reply_count"] = len(replies)
                 item["latest_reply"] = latest or item.get("latest_reply", "")
-                item["reactions"] = sorted(
-                    {str(r.get("name")) for r in parent.get("reactions") or [] if r.get("name")}
-                )
+                if parent:
+                    item["reactions"] = sorted(
+                        {str(r.get("name")) for r in parent.get("reactions") or [] if r.get("name")}
+                    )
+            flagged = False
             if reason and not item.get("possibly_resolved"):
                 item["possibly_resolved"] = {"reason": reason, "at": t0}
                 flagged = True
@@ -238,12 +348,13 @@ def run_cycle(
     def _finish(led: dict[str, Any]) -> None:
         led["last_poll_at"] = t0
         led["last_poll_error"] = "; ".join(f"{k}: {v}" for k, v in summary["errors"].items())
+        led["source_state"] = SOURCE_OK
+        led["source_error"] = ""
 
     store.mutate(data_dir, _finish)
-    return summary
 
 
-# ── digest rendering + posting ─────────────────────────────────────────────
+# ── digest rendering + delivery ────────────────────────────────────────────
 
 _PRIORITY_ORDER = {p: i for i, p in enumerate(store.PRIORITIES)}
 
@@ -251,8 +362,7 @@ _PRIORITY_ORDER = {p: i for i, p in enumerate(store.PRIORITIES)}
 def render_digest(ledger: dict[str, Any], headline: str, top_keys: list[str], limit: int = 10) -> str:
     """The digest text, built only from PUBLIC fields (see crew_ledger_spec.md).
 
-    ``note``/``investigation``/raw ``text`` never appear: they are local-only fields
-    and may hold another channel's content or investigation detail.
+    ``note``/``investigation``/raw ``text`` never appear: they are local-only fields.
     """
     items = ledger.get("items") or {}
     c = store.counts(ledger)
@@ -286,42 +396,58 @@ def render_digest(ledger: dict[str, Any], headline: str, top_keys: list[str], li
     return store.redact("\n".join(lines))[:3900]
 
 
-def post_pending_digest(data_dir: Path, client: SlackOps, settings: dict[str, Any]) -> str:
-    """Post a crew-submitted digest if one is pending. Returns "posted", "" or an error."""
+def deliver_pending_digest(
+    data_dir: Path,
+    client: SlackMcpClient | None,
+    settings: dict[str, Any],
+    notify: Callable[[str, str], None] | None = None,
+) -> str:
+    """Deliver a crew-submitted digest. Returns "", "sent", "dashboard" or an error code.
+
+    ``self_dm`` is the ONLY Slack write in the app and this is its only caller.
+    """
     ledger = store.read_ledger(data_dir)
     pending = (ledger.get("digest") or {}).get("pending")
     if not pending:
         return ""
-    channel = settings.get("digest_channel") or ""
-    if not channel:
-        def _no_dest(led: dict[str, Any]) -> None:
-            led["digest"]["pending"] = None
-            led["digest"]["last_posted_at"] = time.time()
-            led["digest"]["last_posted_date"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            led["digest"]["last_error"] = "no digest channel configured; Slack post skipped"
-
-        store.mutate(data_dir, _no_dest)
-        return "skipped"
     text = render_digest(ledger, str(pending.get("headline") or ""), list(pending.get("top_keys") or []))
-    try:
-        client.post_message(channel, text)
-        err = ""
-    except SlackApiError as exc:
-        err = exc.code
+    dest = settings.get("digest_destination") or "dashboard"
+    err, outcome = "", "dashboard"
+    retryable = False
+    if dest == "self_dm":
+        login = str(settings.get("slack_login") or "")
+        if client is None or not login:
+            err = "self_dm needs a Slack MCP and slack_login"
+        else:
+            try:
+                client.send_self_dm(login, text)
+                outcome = "sent"
+            except NeedsLogin:
+                err, retryable = SOURCE_NEEDS_LOGIN, True
+            except McpTransportError as exc:
+                err, retryable = exc.code, True
+            except SlackMcpError as exc:
+                err = f"{exc.code}: {str(exc)[:120]}"
+    if not err and notify is not None:
+        try:
+            notify("Slack Radar digest", text)
+        except Exception:  # noqa: BLE001 - the ledger copy is the record
+            logger.debug("slack-radar: dashboard notification failed", exc_info=True)
 
     def _done(led: dict[str, Any]) -> None:
         d = led["digest"]
         d["last_error"] = err
-        retryable = err == "ratelimited" or err.startswith(("transport", "http_5"))
         if not retryable:
-            d["pending"] = None  # success, or a permanent error (not_in_channel…) that must not retry forever
+            d["pending"] = None
         if not err:
+            d["last_text"] = text
             d["last_posted_at"] = time.time()
             d["last_posted_date"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            d["last_destination"] = dest
 
     store.mutate(data_dir, _done)
-    store.append_event(data_dir, "digest", "digest posted" if not err else f"digest post failed: {err}")
-    return "posted" if not err else err
+    store.append_event(data_dir, "digest", f"digest delivered ({dest})" if not err else f"digest delivery failed: {err}")
+    return outcome if not err else err
 
 
 # ── async layer: the loop ──────────────────────────────────────────────────
@@ -331,33 +457,32 @@ _poll_lock = asyncio.Lock()
 _ctx: Any = None
 
 
-def _default_client_factory() -> SlackOps | None:
-    from . import secrets
-    from .slack_api import SlackWebClient
-
-    token = secrets.get_token()
-    return SlackWebClient(token) if token else None
+def _notify_dashboard(title: str, body: str) -> None:
+    events = getattr(_ctx, "events", None)
+    if events is not None:
+        events.publish("notification", {"title": title, "body": body[:1500], "app": "slack-radar"})
 
 
 async def poll_once(data_dir: Path, *, reason: str = "timer",
-                    client_factory: Callable[[], SlackOps | None] | None = None) -> dict[str, Any]:
-    """One cycle end to end: poll, post digest, reconcile + wake the crew."""
-    from . import crew_runtime, secrets
+                    client_factory: Callable[[dict[str, Any]], SlackMcpClient] | None = None) -> dict[str, Any]:
+    """One cycle end to end: poll, deliver digest, reconcile + wake the crew."""
+    from . import crew_runtime, settings as settings_mod, slack_mcp
 
     async with _poll_lock:
         try:
-            settings = await asyncio.to_thread(secrets.read_settings)
-            client = await asyncio.to_thread(client_factory or _default_client_factory)
-        except secrets.SecretStoreUnavailable as exc:
+            settings = await asyncio.to_thread(settings_mod.read_settings)
+        except settings_mod.SettingsUnavailable as exc:
             logger.warning("slack-radar: vault unavailable, poll skipped (%s)", exc)
             return {"skipped": "vault unavailable"}
-        if client is None:
-            return {"skipped": "no bot token configured"}
+        factory = client_factory or (lambda s: slack_mcp.get_client(s["slack_mcp_command"]))
+        client = factory(settings)
         if not settings.get("channels"):
             summary: dict[str, Any] = {"skipped": "no channels configured"}
         else:
             summary = await asyncio.to_thread(run_cycle, data_dir, client, settings)
-        summary["digest"] = await asyncio.to_thread(post_pending_digest, data_dir, client, settings)
+        summary["digest"] = await asyncio.to_thread(
+            deliver_pending_digest, data_dir, client, settings, _notify_dashboard
+        )
         if summary.get("new") or summary.get("thread_changed") or summary.get("possibly_resolved"):
             store.append_event(
                 data_dir, "poll",
@@ -369,12 +494,12 @@ async def poll_once(data_dir: Path, *, reason: str = "timer",
 
 
 async def _loop(data_dir: Path) -> None:
-    from . import secrets
+    from . import settings as settings_mod
 
     while True:
         interval = MIN_LOOP_SECS
         try:
-            settings = await asyncio.to_thread(secrets.read_settings)
+            settings = await asyncio.to_thread(settings_mod.read_settings)
             interval = max(MIN_LOOP_SECS, int(settings.get("poll_interval_secs") or 300))
             await poll_once(data_dir)
         except asyncio.CancelledError:
@@ -401,3 +526,6 @@ async def stop() -> None:
             await task
         except (asyncio.CancelledError, Exception):  # noqa: BLE001
             pass
+    from . import slack_mcp
+
+    await asyncio.to_thread(slack_mcp.shutdown)
