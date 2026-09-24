@@ -1,0 +1,82 @@
+{
+  "name": "slack-radar",
+  "version": "0.1.0",
+  "displayName": "Slack Radar",
+  "description": "A Slack triage crew that remembers. Watches the channels you choose, classifies every new message as a bug report, feature request, question, already-answered or noise with a priority, links clusters to existing GitHub issues and PRs, notices when a thread looks resolved, and posts a daily digest — keeping everything in a local ledger so nothing is triaged twice.",
+  "author": "iamwhatever",
+  "license": "MIT",
+  "iconPath": "assets/icon.png",
+  "tags": ["slack", "triage", "support", "developer-tools"],
+  "highlights": [
+    "One crew for every channel you configure: new messages are classified by category and priority with a one-line summary",
+    "Its own per-channel cursor, independent of your Slack read state",
+    "Flags threads that look resolved for the crew to judge; code never closes an item on its own",
+    "Clusters of reports are investigated by a read-only subagent that links matching GitHub issues and PRs",
+    "Daily digest posted to a channel you choose, built from the ledger's public fields",
+    "The bot token and channel settings live in the gateway's encrypted vault, out of every agent's reach"
+  ],
+  "defaultEnabled": false,
+  "platform": {
+    "os": ["macos", "linux", "windows"]
+  },
+  "agents": ["agents/slack-radar-investigator.json"],
+  "permissions": {
+    "api": ["/api/apps/slack-radar", "/api/apps/slack-radar/*"],
+    "events": ["slots"],
+    "mcpTools": [
+      "send_message",
+      "spawn_run",
+      "slack_radar_read",
+      "slack_radar_record",
+      "slack_radar_digest",
+      "slack_radar_request_digest"
+    ],
+    "network": true,
+    "storage": true,
+    "cron": true,
+    "spawn": true
+  },
+  "mcpServers": {
+    "ledger": {
+      "command": "python3",
+      "args": [
+        "-c",
+        "import os,runpy,sys;h=[os.environ.get('KIROCREW_HOME',''),os.path.expanduser('~/.kiro/crew'),os.path.expanduser('~/.kirocrew')];p=next((os.path.join(d,'apps','slack-radar','backend','mcp_server.py') for d in h if d and os.path.isfile(os.path.join(d,'apps','slack-radar','backend','mcp_server.py'))),None);p or sys.exit('slack-radar: mcp_server.py not found under the crew home');runpy.run_path(p,run_name='__main__')"
+      ]
+    }
+  },
+  "crons": [
+    {
+      "name": "daily-digest",
+      "cron_expr": "0 16 * * 1-5",
+      "timezone": "UTC",
+      "silent": true,
+      "persistent_session": false,
+      "enabled": false,
+      "message": "Call the slack_radar_request_digest tool exactly once with no arguments, then stop. Do not read the ledger, do not compose anything, and produce NO other output - the Slack Radar crew composes the digest in its own session."
+    }
+  ],
+  "backend": {
+    "hooks": {
+      "routes": "backend.routes:register_routes",
+      "on_startup": "backend.hooks:on_startup",
+      "on_shutdown": "backend.hooks:on_shutdown"
+    }
+  },
+  "ui": {
+    "entry": "dist/index.mjs",
+    "pages": [
+      {
+        "route": "/apps/slack-radar",
+        "label": "Slack Radar",
+        "icon": "Radar"
+      }
+    ]
+  },
+  "useCases": [
+    "Triage support and feedback channels continuously, link reports to existing GitHub work, and get one daily summary instead of reading every channel."
+  ],
+  "configuration": [
+    "Create a Slack app with a bot user, grant channels:history, groups:history, channels:read and chat:write, install it to your workspace, invite the bot to each channel, then paste its xoxb- Bot User OAuth Token and the channel IDs in Settings."
+  ]
+}
