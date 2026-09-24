@@ -24,8 +24,10 @@ type Item = {
 
 type Settings = {
   channels: string[]
-  digest_channel: string
-  digest_send_message: boolean
+  digest_destination: 'self_dm' | 'dashboard'
+  slack_login: string
+  slack_mcp_command: string
+  workspace_url: string
   poll_interval_secs: number
   backfill_hours: number
   recheck_days: number
@@ -34,7 +36,8 @@ type Settings = {
 
 type State = {
   vault_available: boolean
-  secrets: { bot_token: string }
+  source_state: string
+  source_error: string
   settings: Settings
   crew: {
     enabled: boolean
@@ -58,7 +61,17 @@ type State = {
   channels: Record<string, { cursor_ts?: string; last_polled_at?: number; last_error?: string }>
   last_poll_at: number
   last_poll_error: string
-  digest: { last_posted_date: string; last_error: string; pending: unknown }
+  digest: { last_posted_date: string; last_error: string; pending: unknown; last_text?: string }
+}
+
+type McpStatus = { status: string; command: string; detail?: string; missing_read_tools?: string[] }
+
+const MCP_LABEL: Record<string, string> = {
+  connected: 'connected',
+  needs_login: 'needs re-login',
+  binary_not_found: 'binary not found',
+  incompatible: 'connected, but missing read tools',
+  error: 'error',
 }
 
 type EventRow = { at: number; kind: string; text: string; key: string }
@@ -82,6 +95,19 @@ export default function SlackRadar() {
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [busy, setBusy] = useState('')
   const [message, setMessage] = useState('')
+  const [mcp, setMcp] = useState<McpStatus | null>(null)
+
+  const probe = useCallback(async () => {
+    try {
+      setMcp(await api.get<McpStatus>(`${BASE}/mcp/status`))
+    } catch (err) {
+      setMcp({ status: 'error', command: '', detail: (err as Error).message })
+    }
+  }, [api])
+
+  useEffect(() => {
+    probe()
+  }, [probe])
 
   const load = useCallback(async () => {
     try {
@@ -118,7 +144,7 @@ export default function SlackRadar() {
     }
   }
 
-  const configured = !!state && !!state.secrets.bot_token && state.settings.channels.length > 0
+  const configured = !!state && state.settings.channels.length > 0
 
   return (
     <>
@@ -148,6 +174,7 @@ export default function SlackRadar() {
             state={state}
             items={items}
             configured={configured}
+            mcp={mcp}
             filter={filter}
             setFilter={setFilter}
             selected={selected}
@@ -167,7 +194,7 @@ export default function SlackRadar() {
         ) : tab === 'activity' ? (
           <Activity events={events} />
         ) : (
-          <SettingsTab state={state} busy={busy} act={act} />
+          <SettingsTab state={state} busy={busy} act={act} mcp={mcp} onProbe={probe} />
         )}
       </div>
     </>
@@ -178,6 +205,7 @@ function Board(props: {
   state: State
   items: Item[]
   configured: boolean
+  mcp: McpStatus | null
   filter: string
   setFilter: (f: string) => void
   selected: Set<string>
@@ -211,11 +239,14 @@ function Board(props: {
         <StatCard label="Tracked items" value={state.counts.total} />
       </div>
 
+      <McpLine mcp={props.mcp} sourceState={state.source_state} sourceError={state.source_error} />
+
       {!props.configured && (
         <Card className="mb-4">
           <CardTitle>Finish setup</CardTitle>
           <p className="text-sm text-muted">
-            Paste a Slack bot token and at least one channel ID in Settings. Nothing is polled until both are set.
+            Add at least one channel ID in Settings. Slack Radar reads with your own Slack identity through your Slack
+            MCP, so there is no bot to invite.
           </p>
         </Card>
       )}
@@ -245,6 +276,12 @@ function Board(props: {
           {state.digest.last_posted_date || 'never'}
           {state.digest.last_error ? ` · ${state.digest.last_error}` : ''}
         </p>
+        {state.digest.last_text && (
+          <details className="mt-2 text-sm">
+            <summary className="cursor-pointer">Last digest</summary>
+            <pre className="whitespace-pre-wrap text-xs mt-1">{state.digest.last_text}</pre>
+          </details>
+        )}
       </Card>
 
       <Card className="mb-4">
@@ -347,6 +384,22 @@ function Board(props: {
   )
 }
 
+function McpLine({ mcp, sourceState, sourceError }: { mcp: McpStatus | null; sourceState: string; sourceError: string }) {
+  const status = sourceState === 'needs_login' ? 'needs_login' : mcp?.status || 'checking'
+  const variant = status === 'connected' ? 'ok' : status === 'checking' ? 'muted' : 'err'
+  return (
+    <p role="status" className="text-sm mb-4 flex flex-wrap items-center gap-2">
+      <span>Slack MCP:</span>
+      <Badge variant={variant}>{MCP_LABEL[status] || status}</Badge>
+      {mcp?.command && <span className="font-mono text-muted">{mcp.command}</span>}
+      {status === 'needs_login' && (
+        <span className="text-muted">Re-authenticate your Slack MCP (e.g. refresh its browser/Midway login). Polling resumes on the next cycle.</span>
+      )}
+      {status !== 'connected' && (sourceError || mcp?.detail) && <span className="text-muted">{sourceError || mcp?.detail}</span>}
+    </p>
+  )
+}
+
 function Activity({ events }: { events: EventRow[] }) {
   return (
     <Card>
@@ -370,18 +423,23 @@ function SettingsTab({
   state,
   busy,
   act,
+  mcp,
+  onProbe,
 }: {
   state: State
   busy: string
   act: (label: string, fn: () => Promise<unknown>) => Promise<void>
+  mcp: McpStatus | null
+  onProbe: () => void
 }) {
   const api = useAppApi()
   const [channels, setChannels] = useState(state.settings.channels.join('\n'))
-  const [digestChannel, setDigestChannel] = useState(state.settings.digest_channel)
-  const [sendMessage, setSendMessage] = useState(state.settings.digest_send_message)
+  const [destination, setDestination] = useState(state.settings.digest_destination)
+  const [login, setLogin] = useState(state.settings.slack_login)
+  const [command, setCommand] = useState(state.settings.slack_mcp_command)
+  const [workspaceUrl, setWorkspaceUrl] = useState(state.settings.workspace_url)
   const [pollSecs, setPollSecs] = useState(String(state.settings.poll_interval_secs))
   const [backfill, setBackfill] = useState(String(state.settings.backfill_hours))
-  const [token, setToken] = useState('')
   const [unattended, setUnattended] = useState(state.crew.unattended)
   const [agent, setAgent] = useState(state.crew.agent)
   const [model, setModel] = useState(state.crew.model)
@@ -390,8 +448,10 @@ function SettingsTab({
     act('Save settings', () =>
       api.put(`${BASE}/settings`, {
         channels: channels.split(/[\s,]+/).map((c) => c.trim()).filter(Boolean),
-        digest_channel: digestChannel.trim(),
-        digest_send_message: sendMessage,
+        digest_destination: destination,
+        slack_login: login.trim(),
+        slack_mcp_command: command.trim(),
+        workspace_url: workspaceUrl.trim(),
         poll_interval_secs: Number(pollSecs),
         backfill_hours: Number(backfill),
       }),
@@ -401,49 +461,33 @@ function SettingsTab({
     <>
       {!state.vault_available && (
         <Card className="mb-4">
-          <p className="text-sm">The gateway secret vault is unavailable, so settings and the token cannot be saved.</p>
+          <p className="text-sm">The gateway secret vault is unavailable, so settings cannot be saved.</p>
         </Card>
       )}
       <Card className="mb-4">
-        <CardTitle>Slack bot token</CardTitle>
-        <p className="text-sm text-muted mb-2">
-          Stored in the gateway&apos;s encrypted vault. Agents cannot read it, and it is never shown again after saving.
-          Status: {state.secrets.bot_token ? 'set' : 'not set'}.
-        </p>
-        <div className="flex flex-wrap gap-2">
-          <Input
-            type="password"
-            autoComplete="off"
-            aria-label="Slack Bot User OAuth Token"
-            placeholder="xoxb-…"
-            value={token}
-            onChange={(e) => setToken(e.target.value)}
-            className="w-80"
-          />
-          <Btn
-            primary
-            disabled={!token || !!busy}
-            onClick={() =>
-              act('Save token', async () => {
-                await api.put(`${BASE}/token`, { value: token })
-                setToken('')
-              })
-            }
-          >
-            Save token
-          </Btn>
-          {state.secrets.bot_token && (
-            <Btn danger disabled={!!busy} onClick={() => act('Remove token', () => api.del(`${BASE}/token`))}>
-              Remove token
-            </Btn>
-          )}
+        <CardTitle>Slack MCP</CardTitle>
+        <McpLine mcp={mcp} sourceState={state.source_state} sourceError={state.source_error} />
+        <div className="grid gap-3 grid-cols-[repeat(auto-fit,minmax(220px,1fr))]">
+          <label className="text-sm">
+            MCP server command (a single executable on PATH)
+            <Input value={command} onChange={(e) => setCommand(e.target.value)} placeholder="ai-community-slack-mcp" />
+          </label>
+          <label className="text-sm">
+            Workspace URL (for permalinks, optional)
+            <Input value={workspaceUrl} onChange={(e) => setWorkspaceUrl(e.target.value)} placeholder="https://yourteam.slack.com" />
+          </label>
         </div>
+        <p className="text-xs text-muted mt-2">
+          Slack is read with your own identity through this MCP server: read-only tools only, no bot, no invite. The
+          one write is the optional digest DM to yourself.
+        </p>
+        <Btn className="mt-2" disabled={!!busy} onClick={onProbe}>Check connection</Btn>
       </Card>
 
       <Card className="mb-4">
         <CardTitle>Channels and digest</CardTitle>
         <label className="block text-sm mb-1" htmlFor="sr-channels">
-          Channel IDs to watch (one per line; e.g. C0123ABCD). Invite the bot to each one.
+          Channel IDs to watch (one per line; e.g. C0123ABCD). Any channel you can read works.
         </label>
         <textarea
           id="sr-channels"
@@ -454,8 +498,19 @@ function SettingsTab({
         />
         <div className="grid gap-3 grid-cols-[repeat(auto-fit,minmax(220px,1fr))] mt-3">
           <label className="text-sm">
-            Digest channel ID (empty = no Slack post)
-            <Input value={digestChannel} onChange={(e) => setDigestChannel(e.target.value)} placeholder="C0DIGEST1" />
+            Digest destination
+            <select
+              className="block w-full text-sm bg-transparent border rounded px-2 py-1"
+              value={destination}
+              onChange={(e) => setDestination(e.target.value as 'self_dm' | 'dashboard')}
+            >
+              <option value="dashboard">Dashboard notification only</option>
+              <option value="self_dm">DM to myself (self_dm)</option>
+            </select>
+          </label>
+          <label className="text-sm">
+            Your Slack login (for the self-DM)
+            <Input value={login} onChange={(e) => setLogin(e.target.value)} placeholder="jdoe" />
           </label>
           <label className="text-sm">
             Poll interval (seconds, 60–3600)
@@ -465,9 +520,6 @@ function SettingsTab({
             First-poll backfill (hours, 0–168)
             <Input type="number" min={0} max={168} value={backfill} onChange={(e) => setBackfill(e.target.value)} />
           </label>
-        </div>
-        <div className="mt-3">
-          <Toggle checked={sendMessage} onChange={setSendMessage} label="Also send the digest to me with send_message" />
         </div>
         <Btn primary className="mt-3" disabled={!!busy} onClick={saveSettings}>
           Save settings

@@ -4,11 +4,11 @@ Why an app MCP server and not HTTP: an agent session reaches the gateway's HTTP 
 only through core-owned MCP tools that carry the internal credential; an installed
 app cannot add one. The ledger is an ordinary app-data file, so the crew reads and
 writes it through this server, which applies the SAME validation (enums, length
-caps, token redaction, "annotate only items the poller recorded") under the SAME
+caps, credential redaction, "annotate only items the poller recorded") under the SAME
 cross-process lock the gateway's poller uses (``store.mutate``).
 
-What this server can NOT touch, by construction: the bot token and the settings
-(keystone vault, gateway-only), Slack itself (no client here), and the crew record
+What this server can NOT touch, by construction: the settings (keystone vault,
+gateway-only), Slack itself (no Slack MCP client here), and the crew record
 (start/pause/unattended are owner routes). The worst a prompt-injected crew can do
 through these tools is write wrong triage into its own ledger.
 
@@ -91,8 +91,8 @@ TOOLS: list[dict[str, Any]] = [
         "name": "slack_radar_digest",
         "description": (
             "Submit today's digest. The gateway renders counts and top items from the ledger's "
-            "public fields, prefixes your headline, and posts it to the owner-configured digest "
-            "channel on its next poll. You cannot choose the channel. top_keys orders the items "
+            "public fields, prefixes your headline, and delivers it on its next poll as the "
+            "owner chose (a self-DM or a dashboard notification). You cannot choose where. top_keys orders the items "
             "you consider most important (max 10)."
         ),
         "inputSchema": {
@@ -128,6 +128,7 @@ def tool_read(args: dict[str, Any]) -> dict[str, Any]:
             "crew": {k: crew.get(k) for k in ("name", "enabled", "paused_reason")},
             "crew_memory": ledger.get("crew_memory"),
             "counts": store.counts(ledger),
+            "slack_source": {"state": ledger.get("source_state") or "ok", "error": ledger.get("source_error") or ""},
             "digest": {k: (ledger.get("digest") or {}).get(k) for k in ("requested_at", "pending", "last_posted_date", "last_error")},
             "channels": {
                 cid: {k: st.get(k) for k in ("last_polled_at", "last_error")}
