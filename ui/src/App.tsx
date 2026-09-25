@@ -531,7 +531,11 @@ function SettingsTab({
         <div className="grid gap-3 grid-cols-[repeat(auto-fit,minmax(220px,1fr))]">
           <label className="text-sm">
             Agent
-            <Input value={agent} onChange={(e) => setAgent(e.target.value)} />
+            <Input value={agent} onChange={(e) => setAgent(e.target.value)} placeholder="slack-radar-crew" />
+            <span className="block text-xs text-muted mt-1">
+              Default: the shipped slack-radar-crew agent, which already carries the ledger tools. Your own agents are
+              never modified.
+            </span>
           </label>
           <label className="text-sm">
             Model (empty = agent default)

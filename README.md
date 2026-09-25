@@ -108,7 +108,7 @@ Nothing is polled until at least one channel is set, and the crew never runs unt
 - **Slack MCP client** (`backend/slack_mcp.py`): the gateway spawns your Slack MCP server as a subprocess and speaks MCP over stdio (initialize, then `tools/call`), with no LLM involved. It restarts the process after a crash or timeout. A hard allowlist admits only `list_channels`, `batch_get_conversation_history`, `batch_get_thread_replies`, `batch_get_channel_info` and `batch_get_user_info`; any other tool name raises before it reaches the process. The one write, `self_dm`, is a separate method called only from the digest path.
 - **Poller** (`backend/watch.py`): an in-gateway loop, zero LLM. One batched `batch_get_conversation_history` call per cycle for all channels, `oldest` = the app's own per-channel cursor converted to ISO-8601, paginated by cursor. Then one batched `batch_get_thread_replies` for a bounded window of open threads, flagging *possibly resolved* candidates (✅ reaction, "fixed"/"merged"/"thanks" replies, deleted parent). Code never marks an item resolved.
 - **Login expiry**: an auth error from the MCP stops the cycle before any cursor moves and shows *needs re-login* on the board. Each later cycle makes one cheap read; polling resumes as soon as it succeeds. An expired login is never reported as "no new messages".
-- **Crew** (`backend/crew_runtime.py`): one dashboard session, slot `crew-slack-radar`, for all channels. It is woken only when a poll moved something or a digest is due, so an idle workspace costs no turns. It carries `backend/crew_brief.md` (re-injected by presence check after compaction or restart) and records through the app's own ledger MCP tools. It never talks to Slack.
+- **Crew** (`backend/crew_runtime.py`): one dashboard session, slot `crew-slack-radar`, for all channels. It is woken only when a poll moved something or a digest is due, so an idle workspace costs no turns. It carries `backend/crew_brief.md` (re-injected by presence check after compaction or restart) and records through the app's own ledger MCP tools. It never talks to Slack. It runs on the app's shipped agent `slack-radar-crew` (`agents/slack-radar-crew.json`, written by the gateway to `~/.kiro/agents/slack-radar--slack-radar-crew.json`), which mounts and auto-approves the ledger tools plus `spawn_run`/`spawn_status`/`spawn_list`, and has no shell and no file writes. Your own agents are never modified; the Settings *Agent* field is an override only.
 - **Ledger** (`data/ledger.json`, spec in `backend/crew_ledger_spec.md`): cursors, items, source state, the crew's resumable memory (`phase`, `next`, `tried`, `rejected`) and digest state.
 - **Digest**: the crew picks top items and a headline. The gateway renders the text from the ledger's public fields and delivers it as a DM to yourself or a dashboard notification. Nothing is ever posted to a channel.
 
@@ -143,6 +143,7 @@ The UI bundle `ui/dist/index.mjs` is committed so a plain install works without 
 ```
 slack-radar/
 ├── app.json                    manifest
+├── agents/slack-radar-crew.json          the crew's own agent (ledger tools, no shell)
 ├── agents/slack-radar-investigator.json   read-only GitHub investigator
 ├── backend/
 │   ├── routes.py               HTTP API (backend.hooks.routes)
