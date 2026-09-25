@@ -401,3 +401,120 @@ def test_crew_defaults_to_the_shipped_agent(tmp_path: Path) -> None:
     assert store.read_crew(tmp_path)["agent"] == "slack-radar-crew"
     store.update_crew(tmp_path, {"agent": "my-agent"})
     assert store.read_crew(tmp_path)["agent"] == "my-agent"  # explicit override kept
+
+
+
+# ── crew slot vs agent ─────────────────────────────────────────────────────
+
+
+class _FakeSlot:
+    def __init__(self, key: str, agent: str) -> None:
+        self.key = key
+        self.agent = agent
+        self.title = ""
+        self._titled = False
+        self._trust_scope = ""
+        self._trust = False
+        self.messages: list = []
+
+
+class _FakeState:
+    """The two host behaviours that matter: an existing key is RETURNED whatever
+    agent is asked for, and nothing re-binds a slot's agent."""
+
+    def __init__(self) -> None:
+        self._slots: dict[str, _FakeSlot] = {}
+        self.created: list[tuple[str, str]] = []
+
+    def get_slot(self, key: str):
+        return self._slots.get(key)
+
+    def get_or_create_slot(self, *, name: str, agent: str, **_kw):
+        if name in self._slots:
+            return self._slots[name]
+        self.created.append((name, agent))
+        self._slots[name] = _FakeSlot(name, agent)
+        return self._slots[name]
+
+
+@pytest.fixture
+def crew_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from backend import crew_runtime
+
+    state = _FakeState()
+    closed: list[tuple[str, str]] = []
+    rehydrated: dict[str, _FakeSlot] = {}
+
+    async def fake_retire(st, slot, key):
+        closed.append((key, slot.agent))
+        st._slots.pop(key, None)
+
+    async def fake_rehydrate(st, key):
+        slot = rehydrated.pop(key, None)
+        if slot is not None:
+            st._slots[key] = slot
+        return slot
+
+    monkeypatch.setattr(crew_runtime, "_retire_slot", fake_retire)
+    monkeypatch.setattr(crew_runtime, "_rehydrate", fake_rehydrate)
+    return crew_runtime, state, closed, rehydrated, tmp_path
+
+
+def test_live_slot_on_wrong_agent_is_retired_and_crew_moves(crew_env) -> None:
+    import asyncio
+
+    crew_runtime, state, closed, _, data = crew_env
+    state._slots["crew-slack-radar"] = _FakeSlot("crew-slack-radar", "kirocrew")  # made under v0.2.0
+    crew = store.read_crew(data)
+    slot, crew = asyncio.run(crew_runtime.ensure_crew_session(state, data, crew))
+    assert slot.agent == "slack-radar-crew" and slot.key == "crew-slack-radar-g2"
+    assert closed == [("crew-slack-radar", "kirocrew")]
+    assert store.read_crew(data)["slot_key"] == "crew-slack-radar-g2"  # persisted
+    assert any("moved from agent kirocrew to slack-radar-crew" in e["text"] for e in store.read_events(data))
+    # idempotent: a second resolve keeps the healthy slot
+    slot2, _ = asyncio.run(crew_runtime.ensure_crew_session(state, data, store.read_crew(data)))
+    assert slot2 is slot and len(closed) == 1
+
+
+def test_rehydrated_slot_on_wrong_agent_is_never_used(crew_env) -> None:
+    import asyncio
+
+    crew_runtime, state, closed, rehydrated, data = crew_env
+    rehydrated["crew-slack-radar"] = _FakeSlot("crew-slack-radar", "kirocrew")  # jsonl line 1 agent
+    slot, _ = asyncio.run(crew_runtime.ensure_crew_session(state, data, store.read_crew(data)))
+    assert slot.agent == "slack-radar-crew" and slot.key == "crew-slack-radar-g2"
+    assert closed == [("crew-slack-radar", "kirocrew")]
+    assert state.created == [("crew-slack-radar-g2", "slack-radar-crew")]
+
+
+def test_after_poll_self_heals_without_a_wake(crew_env, monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+
+    crew_runtime, state, closed, _, data = crew_env
+    store.update_crew(data, {"enabled": True})
+    state._slots["crew-slack-radar"] = _FakeSlot("crew-slack-radar", "kirocrew")
+    monkeypatch.setattr(crew_runtime, "_gateway_state", lambda: state)
+    assert asyncio.run(crew_runtime.after_poll(data, {}, reason="timer")) is False  # nothing moved
+    assert closed == [("crew-slack-radar", "kirocrew")]
+    assert store.read_crew(data)["slot_key"] == "crew-slack-radar-g2"
+
+
+def test_matching_agent_slot_is_untouched(crew_env) -> None:
+    import asyncio
+
+    crew_runtime, state, closed, _, data = crew_env
+    existing = _FakeSlot("crew-slack-radar", "slack-radar-crew")
+    state._slots["crew-slack-radar"] = existing
+    slot, crew = asyncio.run(crew_runtime.ensure_crew_session(state, data, store.read_crew(data)))
+    assert slot is existing and closed == [] and state.created == []
+    assert store.read_crew(data)["slot_key"] == "crew-slack-radar"
+
+
+def test_slot_key_generations_and_validation(tmp_path: Path) -> None:
+    assert store.next_slot_key("crew-slack-radar") == "crew-slack-radar-g2"
+    assert store.next_slot_key("crew-slack-radar-g2") == "crew-slack-radar-g3"
+    assert store.is_crew_slot_key("crew-slack-radar-g9") and not store.is_crew_slot_key("crew-notes")
+    store.crew_path(tmp_path).write_text(json.dumps({"slot_key": "chat-1-evil"}), encoding="utf-8")
+    assert store.read_crew(tmp_path)["slot_key"] == "crew-slack-radar"  # a foreign key is never adopted
+    with pytest.raises(store.StoreError):
+        store.update_crew(tmp_path, {"slot_key": "chat-1-evil"})

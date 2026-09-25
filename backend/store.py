@@ -380,7 +380,29 @@ def normalize_message(
 
 # ── crew record ────────────────────────────────────────────────────────────
 
+#: The crew's FIRST slot key. The live key lives in the crew record (``slot_key``) and
+#: gains a generation suffix (``crew-slack-radar-g2`` …) each time the session has to be
+#: moved to a different agent: the host never re-binds an existing slot's agent, and a
+#: closed key's transcript/tombstone would follow a same-key recreate. Always read the
+#: current key with :func:`slot_key` — never this constant — outside this module.
 SLOT_KEY = "crew-slack-radar"
+_SLOT_KEY_RE = re.compile(r"^crew-slack-radar(?:-g([1-9][0-9]{0,5}))?$")
+
+
+def is_crew_slot_key(value: Any) -> bool:
+    return isinstance(value, str) and bool(_SLOT_KEY_RE.match(value))
+
+
+def next_slot_key(current: str) -> str:
+    """``crew-slack-radar`` -> ``crew-slack-radar-g2`` -> ``…-g3``."""
+    m = _SLOT_KEY_RE.match(current or "")
+    gen = int(m.group(1)) if m and m.group(1) else 1
+    return f"{SLOT_KEY}-g{gen + 1}"
+
+
+def slot_key(crew: dict[str, Any]) -> str:
+    key = crew.get("slot_key")
+    return key if is_crew_slot_key(key) else SLOT_KEY
 #: The crew agent this app ships (agents/slack-radar-crew.json). The gateway writes it
 #: to ~/.kiro/agents/slack-radar--slack-radar-crew.json with the app's ledger MCP server
 #: already mounted and auto-approved; kiro-cli dispatches it by this declared name. The
@@ -410,8 +432,10 @@ def read_crew(data_dir: Path) -> dict[str, Any]:
     rec = dict(DEFAULT_CREW)
     if isinstance(raw, dict):
         for key in DEFAULT_CREW:
-            if key in raw and key not in ("id", "slot_key"):
+            if key in raw and key != "id":
                 rec[key] = raw[key]
+    if not is_crew_slot_key(rec.get("slot_key")):
+        rec["slot_key"] = SLOT_KEY
     if not str(rec.get("agent") or "").strip() or rec.get("agent") == _LEGACY_DEFAULT_AGENT:
         rec["agent"] = CREW_AGENT
     rec["enabled"] = rec.get("enabled") is True
@@ -429,6 +453,10 @@ def update_crew(data_dir: Path, patch: dict[str, Any]) -> dict[str, Any]:
         for key in ("enabled", "unattended"):
             if key in patch:
                 rec[key] = patch[key] is True
+        if "slot_key" in patch:
+            if not is_crew_slot_key(patch["slot_key"]):
+                raise StoreError("slot_key must be crew-slack-radar or crew-slack-radar-g<N>")
+            rec["slot_key"] = patch["slot_key"]
         if not rec["created_at"]:
             rec["created_at"] = now()
         rec["updated_at"] = now()

@@ -23,7 +23,7 @@ Nothing in the ledger authorises anything. A prompt-injected crew that corrupts 
 
 | Field | Type | Notes |
 |---|---|---|
-| `id` / `slot_key` | str | fixed: `slack-radar` / `crew-slack-radar`. One crew per install, for all channels |
+| `id` / `slot_key` | str | `id` is fixed (`slack-radar`); `slot_key` starts as `crew-slack-radar` and becomes `crew-slack-radar-g<N>` each time the session moves to a different agent (the host never re-binds a slot's agent; the old slot is archived). One crew per install, for all channels |
 | `name` | str | shown as the session title |
 | `agent` / `model` / `workspace` | str | session config; `model: ""` = the agent's default |
 | `enabled` / `paused_reason` | bool / str | live = enabled and no reason |
