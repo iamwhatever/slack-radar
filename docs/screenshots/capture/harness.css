@@ -1,0 +1,3 @@
+/* The host dashboard's Tailwind entry (aliased by shoot.mjs), plus this app's own sources. */
+@import "@host/index.css";
+@source "../../../ui/src";

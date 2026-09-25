@@ -2,6 +2,83 @@
 
 A Slack triage crew that remembers, reading with your own Slack identity through your Slack MCP server. No bot, no invite, nothing visible in the channel. Slack Radar watches the channels you choose, and one crew classifies every new message as a bug report, feature request, question, already-answered or noise with a priority, links clusters to existing GitHub issues and PRs through a read-only investigator, notices when a thread looks resolved, and sends you a daily digest. Everything it learns lives in a local ledger, so nothing is triaged twice. Modeled on the built-in Issue Radar app.
 
+## Architecture
+
+```mermaid
+flowchart LR
+  subgraph host["Gateway host"]
+    MCP["Your Slack MCP<br/>ai-community-slack-mcp<br/>(stdio subprocess)"]
+    subgraph gw["Kiro Crew gateway (in-process)"]
+      W["watch.py poll loop<br/>zero LLM · read-only allowlist<br/>per-channel cursor"]
+      L[("ledger.json<br/>store.py · app data dir")]
+      R["routes.py<br/>owner-only writes"]
+      V[("vault<br/>slack-radar.settings")]
+    end
+    C["Crew session<br/>slot crew-slack-radar<br/>brief + nudge"]
+    I["Investigator subagents<br/>SpawnSDK · read-only gh"]
+    T["App MCP tools<br/>slack_radar_read / record / digest"]
+  end
+  UI["Dashboard UI<br/>Board · Settings"]
+  MCP -- "history · thread replies" --> W
+  W -- "new items · flags · source_state" --> L
+  W -- "wake when something moved" --> C
+  C -- "spawn_run / Investigate" --> I
+  C --> T
+  I --> T
+  T -- "triage · memory · pending digest" --> L
+  L -- "pending digest" --> W
+  W -- "self_dm (only write)" --> MCP
+  W -- "or notification" --> UI
+  UI -- "settings" --> R --> V
+  V -- "channels · MCP command · digest dest" --> W
+  CRON["daily-digest cron"] -- "slack_radar_request_digest" --> T
+```
+
+One poll cycle:
+
+```mermaid
+sequenceDiagram
+  participant W as watch.py
+  participant M as Slack MCP
+  participant L as Ledger
+  participant C as Crew
+  W->>L: read cursors + source_state
+  opt source_state == needs_login
+    W->>M: batch_get_channel_info (1 channel)
+    alt still an auth error
+      W->>L: keep needs_login, cursors unchanged, cycle ends
+      Note over W,L: board shows "needs re-login", retry next cycle
+    else login restored
+      W->>L: continue with the normal cycle
+    end
+  end
+  W->>M: batch_get_conversation_history (oldest = cursor as ISO)
+  M-->>W: messages (paged by cursor)
+  W->>L: new items, advance cursors
+  W->>M: batch_get_thread_replies (bounded window)
+  W->>L: thread_changed / possibly_resolved flags
+  W->>L: deliver pending digest (self_dm or notification)
+  W->>C: wake if anything moved or a digest is due
+```
+
+An auth error at any read in the cycle takes the `needs_login` branch before any cursor moves.
+
+## What it looks like
+
+Rendered from fake demo data (`docs/screenshots/capture/`); no real Slack content.
+
+**Board**: MCP status, crew phase and next step, per-channel health, and the triaged ledger.
+
+![Board tab](docs/screenshots/board.png)
+
+**Settings**: Slack MCP command and connection check, watched channels, digest destination.
+
+![Settings tab](docs/screenshots/settings.png)
+
+**Login expired**: polling pauses and the board says so instead of showing an empty queue.
+
+![Needs re-login state](docs/screenshots/needs-login.png)
+
 ## Quick start
 
 1. Have a Slack MCP server installed and logged in on the gateway host. The default is `ai-community-slack-mcp` on `PATH`; any server exposing the same read tools works (set its command in Settings).
@@ -55,6 +132,7 @@ Nothing is polled until at least one channel is set, and the crew never runs unt
 
 ```bash
 python3 -m pytest tests -q          # MCP guard, ts<->ISO, poll cycle, needs-login, digest, ledger tools
+KIROCREW_WEBSITE=/path/to/KiroCrew/website node docs/screenshots/capture/shoot.mjs   # regenerate screenshots from fake data
 cd ui && npm install --legacy-peer-deps && npx vite build   # rebuilds ui/dist/index.mjs
 ```
 
