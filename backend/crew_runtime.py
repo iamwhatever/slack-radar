@@ -4,8 +4,12 @@ Modeled on issue-radar's ``crew_runtime.py``, cut to what one crew over N channe
 needs:
 
 1. **Session launch/attach** (:func:`ensure_crew_session`). The crew is ONE
-   app-owned dashboard slot, key ``crew-slack-radar``, for every configured channel.
-   Explicit title with ``_titled = True`` so the auto-titler never renames it.
+   app-owned dashboard slot for every configured channel, keyed by the crew record's
+   ``slot_key`` (``crew-slack-radar``, then ``-g2``… after an agent move). Every path
+   that obtains the slot — live, rehydrated or created — goes through
+   :func:`_resolve_slot`, which refuses a slot bound to any agent other than the
+   crew's: the host never re-binds a slot's agent, so a mismatched slot is archived
+   and the crew moves to a fresh key. Explicit title with ``_titled = True``.
 2. **Brief injection by presence check** (:func:`brief_is_present`). Same rule as
    issue-radar: the brief rides on the next prompt whenever no message in the
    session both carries the sentinel AND is at least as long as the brief — which
@@ -214,24 +218,89 @@ def revoke(state: Any, crew: dict[str, Any] | None = None) -> None:
             so.deactivate_scope(TRUST_SCOPE)
         except Exception:  # noqa: BLE001
             logger.warning("slack-radar: could not deactivate grant", exc_info=True)
-    slot = state.get_slot(store.SLOT_KEY) if state is not None and hasattr(state, "get_slot") else None
-    if slot is not None:
-        slot._trust_scope = ""
-        if getattr(slot, "_trust", False):
-            slot._trust = False
+    if state is None or not hasattr(state, "get_slot"):
+        return
+    # The current key AND every earlier generation still open: a moved-away slot must
+    # not keep a grant either.
+    keys = {store.slot_key(crew or {}), store.SLOT_KEY}
+    for key in list(getattr(state, "_slots", {}) or {}):
+        if store.is_crew_slot_key(key):
+            keys.add(key)
+    for key in keys:
+        slot = state.get_slot(key)
+        if slot is not None:
+            slot._trust_scope = ""
+            if getattr(slot, "_trust", False):
+                slot._trust = False
 
 
 # ── session launch / attach ────────────────────────────────────────────────
 
 
-async def ensure_crew_session(state: Any, crew: dict[str, Any]) -> Any:
-    slot = state.get_or_create_slot(
-        name=store.SLOT_KEY,
-        agent=str(crew.get("agent") or store.CREW_AGENT),
-        workspace=str(crew.get("workspace") or "default"),
-        model=str(crew.get("model") or ""),
-        app=APP_NAME,
-    )
+def desired_agent(crew: dict[str, Any]) -> str:
+    return str(crew.get("agent") or store.CREW_AGENT)
+
+
+#: How many generations one resolution may advance. A second mismatch in a row means
+#: the NEW key also holds a stale slot (a leftover from an earlier move); a third means
+#: something outside this app keeps rebinding it, and looping further would only mint
+#: keys.
+_MAX_MOVES_PER_RESOLVE = 3
+
+
+async def _retire_slot(state: Any, slot: Any, key: str) -> None:
+    """Archive a crew slot the way the tab ✕ does. Best-effort: a refused close still
+    leaves the crew moved (the old slot is de-trusted and never driven again)."""
+    slot._trust_scope = ""
+    if getattr(slot, "_trust", False):
+        slot._trust = False
+    try:
+        from kiro_crew.dashboard.chat_handlers import close_slot
+
+        await close_slot(state, slot, key)
+    except Exception:  # noqa: BLE001 - SlotCloseError or an import/host change
+        logger.warning("slack-radar: could not archive old crew slot %s", key, exc_info=True)
+
+
+async def _resolve_slot(state: Any, data_dir: Path, crew: dict[str, Any], *, create: bool) -> tuple[Any, dict[str, Any]]:
+    """The crew's slot bound to the crew's agent, or ``(None, crew)`` when ``create`` is
+    False and no usable slot exists. Returns the (possibly updated) crew record.
+
+    A live or rehydrated slot on a different agent is never driven: it is archived,
+    the record moves to :func:`store.next_slot_key`, and one event line records the
+    move. ``get_or_create_slot`` ignores ``agent`` for an existing key, so the created
+    slot is checked by the same rule.
+    """
+    want = desired_agent(crew)
+    for _ in range(_MAX_MOVES_PER_RESOLVE + 1):
+        key = store.slot_key(crew)
+        slot = state.get_slot(key) if hasattr(state, "get_slot") else None
+        if slot is None:
+            slot = await _rehydrate(state, key)
+        if slot is None and create:
+            slot = state.get_or_create_slot(
+                name=key,
+                agent=want,
+                workspace=str(crew.get("workspace") or "default"),
+                model=str(crew.get("model") or ""),
+                app=APP_NAME,
+            )
+        if slot is None or str(getattr(slot, "agent", "") or "") == want:
+            return slot, crew
+        old_agent = str(getattr(slot, "agent", "") or "?")
+        new_key = store.next_slot_key(key)
+        await _retire_slot(state, slot, key)
+        crew = await asyncio.to_thread(store.update_crew, data_dir, {"slot_key": new_key})
+        await asyncio.to_thread(
+            store.append_event, data_dir, "crew",
+            f"crew session moved from agent {old_agent} to {want} ({key} -> {new_key})",
+        )
+        logger.info("slack-radar: crew session moved from agent %s to %s (%s -> %s)", old_agent, want, key, new_key)
+    raise RuntimeError(f"slack-radar: crew slot kept resolving to the wrong agent; wanted {want}")
+
+
+async def ensure_crew_session(state: Any, data_dir: Path, crew: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
+    slot, crew = await _resolve_slot(state, data_dir, crew, create=True)
     title = f"{crew.get('name') or 'Slack Radar'} · crew"
     if slot.title != title or not getattr(slot, "_titled", False):
         slot.title = title
@@ -247,14 +316,15 @@ async def ensure_crew_session(state: Any, crew: dict[str, Any]) -> Any:
         _call_if_present(state, "push_slot_title", slot.key, title)
     await asyncio.to_thread(sync_trust, slot, crew)
     _call_if_present(state, "push_slots_update")
-    return slot
+    return slot, crew
 
 
-async def _rehydrate(state: Any) -> Any:
+async def _rehydrate(state: Any, key: str) -> Any:
+    """Rebuild a slot the gateway no longer holds. The caller agent-checks the result."""
     try:
         from kiro_crew.dashboard.chat_persistence import rehydrate_slot_from_history_async
 
-        return await rehydrate_slot_from_history_async(state, store.SLOT_KEY)
+        return await rehydrate_slot_from_history_async(state, key)
     except Exception:  # noqa: BLE001
         logger.debug("slack-radar: rehydrate failed", exc_info=True)
         return None
@@ -290,9 +360,7 @@ async def wake_crew(state: Any, data_dir: Path, reason: str) -> bool:
         crew = await asyncio.to_thread(store.read_crew, data_dir)
         if not is_live(crew):
             return False
-        slot = state.get_slot(store.SLOT_KEY) or await _rehydrate(state)
-        if slot is None:
-            slot = await ensure_crew_session(state, crew)
+        slot, crew = await ensure_crew_session(state, data_dir, crew)
         if getattr(slot, "running", False):
             logger.info("slack-radar: crew mid-turn, wake dropped (%s)", reason)
             return False
@@ -309,7 +377,9 @@ async def wake_crew(state: Any, data_dir: Path, reason: str) -> bool:
         return started
     finally:
         latest = await asyncio.to_thread(store.read_crew, data_dir)
-        live_slot = state.get_slot(store.SLOT_KEY) if hasattr(state, "get_slot") else None
+        live_slot = state.get_slot(store.slot_key(latest)) if hasattr(state, "get_slot") else None
+        if live_slot is not None and str(getattr(live_slot, "agent", "") or "") != desired_agent(latest):
+            live_slot = None  # never grant trust to a slot on the wrong agent
         if not is_live(latest):
             revoke(state, latest)
         elif live_slot is not None:
@@ -325,9 +395,12 @@ async def after_poll(data_dir: Path, summary: dict[str, Any], *, reason: str = "
     if not is_live(crew):
         revoke(state, crew)
         return False
-    slot = state.get_slot(store.SLOT_KEY) if hasattr(state, "get_slot") else None
+    # The watchdog renewal, and the self-heal for a slot left on an old agent (e.g.
+    # created before the app shipped its own crew agent): resolution moves it now,
+    # not only when a wake happens to come along.
+    slot, crew = await _resolve_slot(state, data_dir, crew, create=False)
     if slot is not None:
-        await asyncio.to_thread(sync_trust, slot, crew)  # the watchdog renewal
+        await asyncio.to_thread(sync_trust, slot, crew)
     ledger = await asyncio.to_thread(store.read_ledger, data_dir)
     c = store.counts(ledger)
     digest = ledger.get("digest") or {}
@@ -356,7 +429,7 @@ async def after_poll(data_dir: Path, summary: dict[str, Any], *, reason: str = "
 
 async def start_crew(state: Any, data_dir: Path) -> dict[str, Any]:
     crew = await asyncio.to_thread(store.update_crew, data_dir, {"enabled": True, "paused_reason": ""})
-    await ensure_crew_session(state, crew)
+    await ensure_crew_session(state, data_dir, crew)
     store.append_event(data_dir, "crew", "crew started")
     await wake_crew(state, data_dir, "started")
     return crew

@@ -108,7 +108,7 @@ async def _handle_state(request: web.Request, ctx: Any) -> web.Response:
         return _err(500, "ledger_corrupt", str(exc))
     crew = await asyncio.to_thread(store.read_crew, data_dir)
     state = _state(request)
-    slot = state.get_slot(store.SLOT_KEY) if state is not None and hasattr(state, "get_slot") else None
+    slot = state.get_slot(store.slot_key(crew)) if state is not None and hasattr(state, "get_slot") else None
     return web.json_response(
         {
             "ok": True,
@@ -118,6 +118,7 @@ async def _handle_state(request: web.Request, ctx: Any) -> web.Response:
                 **crew,
                 "live": crew_runtime.is_live(crew),
                 "session_open": slot is not None,
+                "session_agent": str(getattr(slot, "agent", "") or "") if slot is not None else "",
                 "running": bool(getattr(slot, "running", False)),
                 "trusted": bool(getattr(slot, "_trust_scope", "")),
             },
@@ -236,9 +237,12 @@ async def _handle_crew_update(request: web.Request, ctx: Any) -> web.Response:
         return _err(400, "invalid_field", "unattended must be true or false")
     crew = await asyncio.to_thread(store.update_crew, _data_dir(ctx), patch)
     state = _state(request)
-    slot = state.get_slot(store.SLOT_KEY) if state is not None and hasattr(state, "get_slot") else None
-    if slot is not None:
-        await asyncio.to_thread(crew_runtime.sync_trust, slot, crew)
+    if state is not None and hasattr(state, "get_slot"):
+        # A changed agent moves the session now (the old slot cannot be re-bound);
+        # an unchanged one just re-derives the grant.
+        slot, crew = await crew_runtime._resolve_slot(state, _data_dir(ctx), crew, create=False)
+        if slot is not None:
+            await asyncio.to_thread(crew_runtime.sync_trust, slot, crew)
     store.append_event(_data_dir(ctx), "crew", f"crew settings updated ({', '.join(sorted(patch)) or 'nothing'})")
     return web.json_response({"ok": True, "crew": crew})
 
