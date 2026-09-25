@@ -381,12 +381,20 @@ def normalize_message(
 # ── crew record ────────────────────────────────────────────────────────────
 
 SLOT_KEY = "crew-slack-radar"
+#: The crew agent this app ships (agents/slack-radar-crew.json). The gateway writes it
+#: to ~/.kiro/agents/slack-radar--slack-radar-crew.json with the app's ledger MCP server
+#: already mounted and auto-approved; kiro-cli dispatches it by this declared name. The
+#: user's own agents are never modified to carry the ledger tools.
+CREW_AGENT = "slack-radar-crew"
+#: The pre-0.3 default. A crew record still holding it was never a user choice worth
+#: keeping: that agent does not carry the ledger tools, so the crew could not work.
+_LEGACY_DEFAULT_AGENT = "kirocrew"
 
 DEFAULT_CREW: dict[str, Any] = {
     "id": "slack-radar",
     "name": "Slack Radar",
     "slot_key": SLOT_KEY,
-    "agent": "kirocrew",
+    "agent": CREW_AGENT,
     "model": "",
     "workspace": "default",
     "enabled": False,
@@ -404,6 +412,8 @@ def read_crew(data_dir: Path) -> dict[str, Any]:
         for key in DEFAULT_CREW:
             if key in raw and key not in ("id", "slot_key"):
                 rec[key] = raw[key]
+    if not str(rec.get("agent") or "").strip() or rec.get("agent") == _LEGACY_DEFAULT_AGENT:
+        rec["agent"] = CREW_AGENT
     rec["enabled"] = rec.get("enabled") is True
     rec["unattended"] = rec.get("unattended") is True
     return rec

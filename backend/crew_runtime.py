@@ -227,7 +227,7 @@ def revoke(state: Any, crew: dict[str, Any] | None = None) -> None:
 async def ensure_crew_session(state: Any, crew: dict[str, Any]) -> Any:
     slot = state.get_or_create_slot(
         name=store.SLOT_KEY,
-        agent=str(crew.get("agent") or "kirocrew"),
+        agent=str(crew.get("agent") or store.CREW_AGENT),
         workspace=str(crew.get("workspace") or "default"),
         model=str(crew.get("model") or ""),
         app=APP_NAME,

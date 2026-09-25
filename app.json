@@ -1,6 +1,6 @@
 {
   "name": "slack-radar",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "displayName": "Slack Radar",
   "description": "A Slack triage crew that remembers, reading with your own Slack identity through your Slack MCP — no bot, no invite. Watches the channels you choose, classifies every new message as a bug report, feature request, question, already-answered or noise with a priority, links clusters to existing GitHub issues and PRs, notices when a thread looks resolved, and sends you a daily digest — keeping everything in a local ledger so nothing is triaged twice.",
   "author": "iamwhatever",
@@ -30,6 +30,7 @@
     ]
   },
   "agents": [
+    "agents/slack-radar-crew.json",
     "agents/slack-radar-investigator.json"
   ],
   "permissions": {

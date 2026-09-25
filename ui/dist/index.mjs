@@ -1,8 +1,8 @@
 import { jsxs as n, Fragment as E, jsx as e } from "react/jsx-runtime";
 import { useAppApi as q } from "@kirocrew/app-sdk";
-import { PageHeader as z, Btn as u, StatCard as B, Card as g, CardTitle as b, Badge as m, Input as x, EmptyState as O, Toggle as G } from "@kirocrew/app-sdk/ui";
-import { useState as r, useCallback as U, useEffect as j, useMemo as V } from "react";
-const h = "/api/apps/slack-radar", Y = {
+import { PageHeader as z, Btn as u, StatCard as B, Card as g, CardTitle as b, Badge as m, Input as x, EmptyState as O, Toggle as Y } from "@kirocrew/app-sdk/ui";
+import { useState as r, useCallback as U, useEffect as j, useMemo as G } from "react";
+const h = "/api/apps/slack-radar", V = {
   connected: "connected",
   needs_login: "needs re-login",
   binary_not_found: "binary not found",
@@ -13,7 +13,7 @@ function J(t) {
   return t === "new" ? "warn" : t === "investigating" ? "aim" : t === "resolved" ? "ok" : "muted";
 }
 function ne() {
-  const t = q(), [l, d] = r("board"), [i, N] = r(null), [f, k] = r([]), [_, C] = r([]), [p, a] = r("open"), [o, P] = r(/* @__PURE__ */ new Set()), [D, $] = r(""), [I, w] = r(""), [R, M] = r(null), A = U(async () => {
+  const t = q(), [l, d] = r("board"), [i, N] = r(null), [f, k] = r([]), [_, C] = r([]), [p, a] = r("open"), [o, P] = r(/* @__PURE__ */ new Set()), [L, $] = r(""), [I, w] = r(""), [R, M] = r(null), A = U(async () => {
     try {
       M(await t.get(`${h}/mcp/status`));
     } catch (s) {
@@ -25,12 +25,12 @@ function ne() {
   }, [A]);
   const y = U(async () => {
     try {
-      const [s, S, L] = await Promise.all([
+      const [s, S, D] = await Promise.all([
         t.get(`${h}/state`),
         t.get(`${h}/items?status=${encodeURIComponent(p)}&limit=300`),
         t.get(`${h}/events?limit=150`)
       ]);
-      N(s), k(S.items), C(L.events.slice().reverse());
+      N(s), k(S.items), C(D.events.slice().reverse());
     } catch (s) {
       w(`Could not load: ${s.message}`);
     }
@@ -44,8 +44,8 @@ function ne() {
     $(s), w("");
     try {
       await S(), w(`${s}: done`), await y();
-    } catch (L) {
-      w(`${s} failed: ${L.message}`);
+    } catch (D) {
+      w(`${s} failed: ${D.message}`);
     } finally {
       $("");
     }
@@ -72,7 +72,7 @@ function ne() {
           setFilter: a,
           selected: o,
           setSelected: P,
-          busy: D,
+          busy: L,
           onPoll: () => v("Poll", () => t.post(`${h}/poll`, {})),
           onInvestigate: (s) => v("Investigate", async () => {
             await t.post(`${h}/investigate`, { keys: [...o], repo: s }), P(/* @__PURE__ */ new Set());
@@ -81,7 +81,7 @@ function ne() {
           onPause: () => v("Pause crew", () => t.post(`${h}/crew/pause`, {})),
           onDigest: () => v("Request digest", () => t.post(`${h}/digest/request`, {}))
         }
-      ) : l === "activity" ? /* @__PURE__ */ e(Q, { events: _ }) : /* @__PURE__ */ e(X, { state: i, busy: D, act: v, mcp: R, onProbe: A }) : /* @__PURE__ */ e("p", { className: "text-sm text-muted", children: "Loading…" })
+      ) : l === "activity" ? /* @__PURE__ */ e(Q, { events: _ }) : /* @__PURE__ */ e(X, { state: i, busy: L, act: v, mcp: R, onProbe: A }) : /* @__PURE__ */ e("p", { className: "text-sm text-muted", children: "Loading…" })
     ] })
   ] });
 }
@@ -89,7 +89,7 @@ function K(t) {
   const { state: l, items: d, selected: i, setSelected: N } = t, [f, k] = r(""), _ = l.counts.open_by_priority, C = (a) => {
     const o = new Set(i);
     o.has(a) ? o.delete(a) : o.add(a), N(o);
-  }, p = V(
+  }, p = G(
     () => l.settings.channels.map((a) => ({ cid: a, ...l.channels[a] || {} })),
     [l]
   );
@@ -230,7 +230,7 @@ function H({ mcp: t, sourceState: l, sourceError: d }) {
   const i = l === "needs_login" ? "needs_login" : (t == null ? void 0 : t.status) || "checking";
   return /* @__PURE__ */ n("p", { role: "status", className: "text-sm mb-4 flex flex-wrap items-center gap-2", children: [
     /* @__PURE__ */ e("span", { children: "Slack MCP:" }),
-    /* @__PURE__ */ e(m, { variant: i === "connected" ? "ok" : i === "checking" ? "muted" : "err", children: Y[i] || i }),
+    /* @__PURE__ */ e(m, { variant: i === "connected" ? "ok" : i === "checking" ? "muted" : "err", children: V[i] || i }),
     (t == null ? void 0 : t.command) && /* @__PURE__ */ e("span", { className: "font-mono text-muted", children: t.command }),
     i === "needs_login" && /* @__PURE__ */ e("span", { className: "text-muted", children: "Re-authenticate your Slack MCP (e.g. refresh its browser/Midway login). Polling resumes on the next cycle." }),
     i !== "connected" && (d || (t == null ? void 0 : t.detail)) && /* @__PURE__ */ e("span", { className: "text-muted", children: d || (t == null ? void 0 : t.detail) })
@@ -256,7 +256,7 @@ function X({
   onProbe: N
 }) {
   const f = q(), [k, _] = r(t.settings.channels.join(`
-`)), [C, p] = r(t.settings.digest_destination), [a, o] = r(t.settings.slack_login), [P, D] = r(t.settings.slack_mcp_command), [$, I] = r(t.settings.workspace_url), [w, R] = r(String(t.settings.poll_interval_secs)), [M, A] = r(String(t.settings.backfill_hours)), [y, v] = r(t.crew.unattended), [T, s] = r(t.crew.agent), [S, L] = r(t.crew.model), W = () => d(
+`)), [C, p] = r(t.settings.digest_destination), [a, o] = r(t.settings.slack_login), [P, L] = r(t.settings.slack_mcp_command), [$, I] = r(t.settings.workspace_url), [w, R] = r(String(t.settings.poll_interval_secs)), [M, A] = r(String(t.settings.backfill_hours)), [y, v] = r(t.crew.unattended), [T, s] = r(t.crew.agent), [S, D] = r(t.crew.model), W = () => d(
     "Save settings",
     () => f.put(`${h}/settings`, {
       channels: k.split(/[\s,]+/).map((c) => c.trim()).filter(Boolean),
@@ -276,7 +276,7 @@ function X({
       /* @__PURE__ */ n("div", { className: "grid gap-3 grid-cols-[repeat(auto-fit,minmax(220px,1fr))]", children: [
         /* @__PURE__ */ n("label", { className: "text-sm", children: [
           "MCP server command (a single executable on PATH)",
-          /* @__PURE__ */ e(x, { value: P, onChange: (c) => D(c.target.value), placeholder: "ai-community-slack-mcp" })
+          /* @__PURE__ */ e(x, { value: P, onChange: (c) => L(c.target.value), placeholder: "ai-community-slack-mcp" })
         ] }),
         /* @__PURE__ */ n("label", { className: "text-sm", children: [
           "Workspace URL (for permalinks, optional)",
@@ -335,15 +335,16 @@ function X({
       /* @__PURE__ */ n("div", { className: "grid gap-3 grid-cols-[repeat(auto-fit,minmax(220px,1fr))]", children: [
         /* @__PURE__ */ n("label", { className: "text-sm", children: [
           "Agent",
-          /* @__PURE__ */ e(x, { value: T, onChange: (c) => s(c.target.value) })
+          /* @__PURE__ */ e(x, { value: T, onChange: (c) => s(c.target.value), placeholder: "slack-radar-crew" }),
+          /* @__PURE__ */ e("span", { className: "block text-xs text-muted mt-1", children: "Default: the shipped slack-radar-crew agent, which already carries the ledger tools. Your own agents are never modified." })
         ] }),
         /* @__PURE__ */ n("label", { className: "text-sm", children: [
           "Model (empty = agent default)",
-          /* @__PURE__ */ e(x, { value: S, onChange: (c) => L(c.target.value) })
+          /* @__PURE__ */ e(x, { value: S, onChange: (c) => D(c.target.value) })
         ] })
       ] }),
       /* @__PURE__ */ n("div", { className: "mt-3", children: [
-        /* @__PURE__ */ e(G, { checked: y, onChange: v, label: "Auto-approve the crew's tool calls (unattended)" }),
+        /* @__PURE__ */ e(Y, { checked: y, onChange: v, label: "Auto-approve the crew's tool calls (unattended)" }),
         /* @__PURE__ */ e("p", { className: "text-xs text-muted mt-1", children: "The crew reads messages anyone in your channels can write. With auto-approve on, a crafted message can steer an unreviewed tool call. Leave it off unless every watched channel is trusted." })
       ] }),
       /* @__PURE__ */ e(

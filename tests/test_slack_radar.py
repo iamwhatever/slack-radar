@@ -359,3 +359,45 @@ def test_mcp_server_roundtrip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
                        "params": {"name": "slack_radar_read", "arguments": {}}})
     body = json.loads(read["result"]["content"][0]["text"])
     assert body["digest"]["pending"]["headline"] == "hello" and body["slack_source"]["state"] == "ok"
+
+
+
+# ── shipped agents ─────────────────────────────────────────────────────────
+
+
+def _agent(name: str) -> dict:
+    return json.loads((ROOT / "agents" / f"{name}.json").read_text(encoding="utf-8"))
+
+
+def test_crew_agent_carries_and_auto_approves_the_ledger_tools() -> None:
+    crew = _agent("slack-radar-crew")
+    assert crew["name"] == store.CREW_AGENT
+    ledger_refs = [t for t in crew["tools"] if t.startswith("@slack-radar:")]
+    assert ledger_refs == ["@slack-radar:ledger"]
+    manifest = json.loads((ROOT / "app.json").read_text(encoding="utf-8"))
+    # the ref names the app's own server exactly as the gateway namespaces it
+    assert {f"@slack-radar:{s}" for s in manifest["mcpServers"]} == set(ledger_refs)
+    for ref in ledger_refs:
+        assert ref in crew["allowedTools"], "an unattended turn must never prompt for the ledger"
+    for banned in ("execute_bash", "fs_write", "@kirocrew-core/send_message"):
+        assert banned not in crew["tools"] and banned not in crew["allowedTools"]
+    assert "@kirocrew-core/spawn_run" in crew["allowedTools"]
+    assert "agents/slack-radar-crew.json" in manifest["agents"]
+
+
+def test_investigator_agent_is_still_shipped_and_uses_the_ledger() -> None:
+    inv = _agent("slack-radar-investigator")
+    assert "@slack-radar:ledger" in inv["tools"]
+    assert "execute_bash" not in inv.get("allowedTools", [])  # never auto-approve a shell
+
+
+def test_crew_defaults_to_the_shipped_agent(tmp_path: Path) -> None:
+    from backend import crew_runtime  # noqa: F401  (imports cleanly without a gateway)
+
+    assert store.read_crew(tmp_path)["agent"] == "slack-radar-crew"
+    store.crew_path(tmp_path).write_text(json.dumps({"agent": "kirocrew"}), encoding="utf-8")
+    assert store.read_crew(tmp_path)["agent"] == "slack-radar-crew"  # legacy default migrated
+    store.update_crew(tmp_path, {"agent": ""})
+    assert store.read_crew(tmp_path)["agent"] == "slack-radar-crew"
+    store.update_crew(tmp_path, {"agent": "my-agent"})
+    assert store.read_crew(tmp_path)["agent"] == "my-agent"  # explicit override kept
