@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<title>Slack Radar · Option A · board-first</title>
+<style>
+/* KiroCrew dark theme tokens (website/src/index.css, [data-theme="dark"]) */
+:root{--bg:#12141a;--bg-accent:#14161d;--bg-elevated:#1a1d25;--bg-hover:#262a35;--card:#181b22;--card-fg:#f4f4f5;--text:#e4e4e7;--text-strong:#fafafa;--muted:#7f7f88;--muted-strong:#52525b;--border:#27272a;--border-strong:#3f3f46;--accent:#00d492;--accent-fg:#000;--accent-subtle:rgba(4,117,88,.2);--ok:#22c55e;--ok-subtle:rgba(34,197,94,.12);--warn:#eab308;--warn-subtle:rgba(234,179,8,.12);--danger:#ef4444;--danger-subtle:rgba(239,68,68,.12);--aim:#a78bfa;--aim-subtle:rgba(167,139,250,.15);--radius-md:10px;--radius-lg:14px;--shadow-lg:0 12px 28px rgba(0,0,0,.35)}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 -apple-system,"Segoe UI",Inter,sans-serif}
+.top{display:flex;align-items:center;gap:14px;padding:14px 24px;border-bottom:1px solid var(--border)}
+.top h1{font-size:18px;margin:0;color:var(--text-strong)}.sub{color:var(--muted);font-size:12px}
+.tabs{display:flex;gap:4px;margin-left:24px}.tab{padding:6px 12px;border-radius:8px;color:var(--muted)}.tab.on{background:var(--bg-hover);color:var(--text-strong)}
+.lang{margin-left:auto;border:1px solid var(--border);border-radius:999px;padding:3px;display:flex}.lang span{padding:2px 10px;border-radius:999px;font-size:12px;color:var(--muted)}.lang .on{background:var(--accent);color:var(--accent-fg)}
+.wrap{display:grid;grid-template-columns:1fr 360px;gap:20px;padding:20px 24px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:16px}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:14px}.stat .v{font-size:24px;font-weight:600;color:var(--text-strong)}.stat .l{font-size:12px;color:var(--muted)}
+.stat.hl{border-color:var(--accent)}
+.pill{display:inline-block;font-size:11px;padding:2px 8px;border-radius:999px;background:var(--bg-hover);color:var(--muted)}
+.p1{background:var(--danger-subtle);color:#fca5a5}.p2{background:var(--warn-subtle);color:#fde68a}.new{background:var(--warn-subtle);color:var(--warn)}.inv{background:var(--aim-subtle);color:var(--aim)}.ok{background:var(--ok-subtle);color:var(--ok)}
+.row{display:flex;gap:10px;align-items:flex-start;padding:10px 0;border-top:1px solid var(--border)}.row:first-child{border-top:0}
+.row .t{color:var(--text-strong)}.row .m{color:var(--muted);font-size:12px;margin-top:2px}
+.src{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);margin-bottom:14px}.dot{width:8px;height:8px;border-radius:50%;background:var(--ok)}
+.chat{position:sticky;top:20px;display:flex;flex-direction:column;height:760px;padding:0;overflow:hidden}
+.chat .hd{padding:14px 16px;border-bottom:1px solid var(--border)}
+.roster{display:flex;gap:6px;margin-top:10px}.av{width:30px;height:30px;border-radius:50%;display:grid;place-items:center;font-size:11px;font-weight:700;background:var(--bg-hover);color:var(--text-strong);border:2px solid transparent;position:relative}
+.av.on{border-color:var(--accent)}.av .s{position:absolute;right:-2px;bottom:-2px;width:10px;height:10px;border-radius:50%;border:2px solid var(--card)}
+.av.code{background:transparent;border:1px dashed var(--border-strong);color:var(--muted)}
+.msgs{flex:1;padding:14px 16px;display:flex;flex-direction:column;gap:10px;overflow:hidden}
+.from{font-size:11px;color:var(--muted)}.b{background:var(--bg-elevated);border:1px solid var(--border);border-radius:12px;padding:9px 12px;max-width:92%}
+.b.me{align-self:flex-end;background:var(--accent-subtle);border-color:transparent}
+.chips{display:flex;flex-wrap:wrap;gap:6px;padding:0 16px 10px}.chip{font-size:12px;border:1px solid var(--border-strong);border-radius:999px;padding:4px 10px;color:var(--text)}
+.in{margin:0 12px 12px;border:1px solid var(--border-strong);border-radius:12px;padding:10px 12px;color:var(--muted);display:flex}.in b{margin-left:auto;width:26px;height:26px;border-radius:50%;background:var(--accent);color:#000;display:grid;place-items:center}
+h3{margin:0 0 8px;font-size:14px;color:var(--text-strong)}.tag{position:fixed;left:24px;bottom:12px;font-size:11px;color:var(--muted-strong)}
+</style>
+</head>
+<body>
+<div class="top">
+  <div><h1>Slack Radar</h1><div class="sub">A small crew triaging your Slack channels</div></div>
+  <div class="tabs"><span class="tab on">Board</span><span class="tab">Team</span><span class="tab">Activity</span><span class="tab">Settings</span></div>
+  <div class="lang"><span class="on">EN</span><span title="中文">ZH</span></div>
+</div>
+<div class="wrap">
+  <div>
+    <div class="src"><span class="dot"></span>Slack MCP connected · last poll 2 min ago · watching C0DEMO1, C0DEMO2</div>
+    <div class="stats">
+      <div class="card stat hl"><div class="v">3</div><div class="l">Awaiting triage</div></div>
+      <div class="card stat"><div class="v">2</div><div class="l">Possibly resolved</div></div>
+      <div class="card stat"><div class="v">2 / 1</div><div class="l">Open p1 / p2</div></div>
+      <div class="card stat"><div class="v">14</div><div class="l">Tracked this week</div></div>
+    </div>
+    <div class="card">
+      <h3>Ledger</h3>
+      <div class="row"><span class="pill p1">p1</span><div><div class="t">CSV export fails for files over ~50k rows</div><div class="m">bug-report · C0DEMO1 · alice · linked example-org/example-app#412 · 4 replies</div></div></div>
+      <div class="row"><span class="pill inv">investigating</span><div><div class="t">Dashboard renders blank after the latest update</div><div class="m">bug-report · C0DEMO2 · dave · Investigator searching example-org/example-app</div></div></div>
+      <div class="row"><span class="pill ok">possibly resolved</span><div><div class="t">How to rotate the staging API key</div><div class="m">question · C0DEMO1 · carol · reply says "thanks" · Thread Watcher to judge</div></div></div>
+      <div class="row"><span class="pill p2">p2</span><div><div class="t">Dark mode for the reports view</div><div class="m">feature-request · C0DEMO2 · bob · 2 replies</div></div></div>
+      <div class="row"><span class="pill new">new</span><div><div class="t">Search results take 10s+ when filtering by tag</div><div class="m">untriaged · C0DEMO1 · erin</div></div></div>
+      <div class="row"><span class="pill new">new</span><div><div class="t">Can we get a Slack notification when an export finishes?</div><div class="m">untriaged · C0DEMO2 · bob</div></div></div>
+    </div>
+  </div>
+  <div class="card chat">
+    <div class="hd">
+      <div style="font-weight:600;color:var(--text-strong)">Radar Lead</div>
+      <div class="sub">Talk to the lead, or pick a member</div>
+      <div class="roster">
+        <div class="av on" title="Radar Lead">RL<i class="s" style="background:var(--ok)"></i></div>
+        <div class="av" title="Thread Watcher">TW<i class="s" style="background:var(--warn)"></i></div>
+        <div class="av" title="Investigator">IN<i class="s" style="background:var(--aim)"></i></div>
+        <div class="av code" title="Poller (code, no model)">⟳</div>
+      </div>
+    </div>
+    <div class="msgs">
+      <div class="from">Radar Lead</div>
+      <div class="b">Morning. 3 new since 09:00. Two p1 bugs need an owner: the CSV export limit (matches #412) and the blank dashboard, which the Investigator is on now.</div>
+      <div class="b me">Is the blank dashboard the same as last week's CDN issue?</div>
+      <div class="from">Radar Lead</div>
+      <div class="b">Not the same so far. Last week's reports all mentioned a 403 on assets; these two don't. I'll say when the Investigator comes back.</div>
+    </div>
+    <div class="chips"><span class="chip">What needs me today?</span><span class="chip">Draft today's digest</span><span class="chip">Re-check resolved threads</span></div>
+    <div class="in">Ask the lead…<b>↑</b></div>
+  </div>
+</div>
+<div class="tag">Option A · board-first · fake demo data</div>
+</body>
+</html>
