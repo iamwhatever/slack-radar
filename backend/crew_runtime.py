@@ -122,7 +122,7 @@ def build_snapshot(data_dir: Path, settings: dict[str, Any], crew: dict[str, Any
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     digest_due = bool(digest.get("requested_at")) and digest.get("last_posted_date") != today and not digest.get("pending")
     return {
-        "name": crew.get("name") or "Slack Radar",
+        "name": crew.get("name") or store.CREW_DISPLAY_NAME,
         "channels": list(settings.get("channels") or []),
         "digest_destination": settings.get("digest_destination") or "dashboard",
         "source_state": ledger.get("source_state") or "ok",
@@ -301,7 +301,7 @@ async def _resolve_slot(state: Any, data_dir: Path, crew: dict[str, Any], *, cre
 
 async def ensure_crew_session(state: Any, data_dir: Path, crew: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
     slot, crew = await _resolve_slot(state, data_dir, crew, create=True)
-    title = f"{crew.get('name') or 'Slack Radar'} · crew"
+    title = f"{crew.get('name') or store.CREW_DISPLAY_NAME} · Slack Radar"
     if slot.title != title or not getattr(slot, "_titled", False):
         slot.title = title
         slot._titled = True
@@ -330,13 +330,13 @@ async def _rehydrate(state: Any, key: str) -> Any:
         return None
 
 
-async def _capped_run_chat(state: Any, slot: Any, prompt: str) -> None:
+async def _capped_run_chat(state: Any, slot: Any, prompt: str, *, actor: str = "crew") -> None:
     """One crew turn, charged against the gateway's background-turn cap."""
     from kiro_crew.dashboard.chat_runner import _run_chat
 
     try:
         await state.run_background_turn(
-            slot, _run_chat(state, slot, prompt, _directive_user_origin=False, _turn_actor="crew")
+            slot, _run_chat(state, slot, prompt, _directive_user_origin=False, _turn_actor=actor)
         )
     except (asyncio.TimeoutError, TimeoutError):
         logger.warning("slack-radar: crew turn never got a background-turn permit")
@@ -345,6 +345,34 @@ async def _capped_run_chat(state: Any, slot: Any, prompt: str) -> None:
         except Exception:  # noqa: BLE001
             pass
         _call_if_present(state, "push_slots_update")
+
+
+async def _owner_run_chat(state: Any, slot: Any, prompt: str) -> None:
+    await _capped_run_chat(state, slot, prompt, actor="user")
+
+
+MAX_OWNER_MESSAGE = 4000
+
+
+async def send_owner_message(state: Any, data_dir: Path, text: str) -> dict[str, Any]:
+    """The on-page chat card's send path (the embed's ``onSend``).
+
+    Used instead of the embed's default ``POST /api/chat``, which would CREATE any
+    missing slot with no app ownership. This one only ever reaches the crew's own,
+    agent-checked slot, refuses when the crew is paused, and puts the brief in
+    front when the session has lost it, exactly like a wake does. The message is
+    recorded as the user's (``_turn_actor="user"``); it is queued, not dropped, if
+    the crew is mid-turn.
+    """
+    crew = await asyncio.to_thread(store.read_crew, data_dir)
+    if not is_live(crew):
+        return {"ok": False, "code": "crew_paused"}
+    slot, crew = await ensure_crew_session(state, data_dir, crew)
+    body = text.strip()[:MAX_OWNER_MESSAGE]
+    prompt = body if brief_is_present(slot) else brief_text() + "\n\n---\n\n[owner message]\n" + body
+    started = bool(slot.enqueue_or_run_prompt(prompt, _owner_run_chat, state))
+    _call_if_present(state, "push_slots_update")
+    return {"ok": True, "slot_key": slot.key, "started": started}
 
 
 async def wake_crew(state: Any, data_dir: Path, reason: str) -> bool:

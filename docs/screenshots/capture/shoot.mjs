@@ -46,7 +46,8 @@ const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PAT
 
 const shots = [
   { name: 'board', source: 'ok', tab: null },
-  { name: 'settings', source: 'ok', tab: 'Settings' },
+  { name: 'settings', source: 'ok', tab: 'Settings', wait: 'MCP server command' },
+  { name: 'team', source: 'ok', tab: 'Team', wait: 'Only the Radar Lead has a session' },
   { name: 'needs-login', source: 'needs_login', tab: null },
 ]
 try {
@@ -58,7 +59,7 @@ try {
     await page.getByText('Slack MCP:').first().waitFor({ timeout: 30000 })
     if (s.tab) {
       await page.getByRole('button', { name: s.tab, exact: true }).click()
-      await page.getByText('MCP server command').waitFor()
+      await page.getByText(s.wait).waitFor()
     }
     await page.waitForTimeout(400)
     // The page scrolls inside its own container; capture the full content height.

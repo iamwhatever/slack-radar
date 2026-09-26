@@ -71,9 +71,11 @@ const STATE = {
     recheck_max_per_cycle: 20,
   },
   crew: {
-    enabled: true, paused_reason: '', unattended: false, agent: 'kirocrew', model: '',
+    name: 'Radar Lead', slot_key: 'crew-slack-radar', session_agent: 'slack-radar-crew',
+    enabled: true, paused_reason: '', unattended: false, agent: 'slack-radar-crew', model: '',
     live: true, session_open: true, running: false, trusted: false,
   },
+  investigations: { items: 1, running: 1 },
   crew_memory: {
     phase: 'triaging',
     next: 'triage the new search-latency report; re-check the API-key thread once it moves',
@@ -139,4 +141,31 @@ const api = {
 
 export function useAppApi() {
   return api
+}
+
+/** Stand-in for the host's ChatEmbed: a static, fake transcript. The real embed
+ *  renders the live crew session; this only shows where it sits on the page. */
+export function ChatEmbed({ placeholder }: { placeholder?: string }) {
+  const bubble = (who: string, text: string, me = false) => (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: me ? 'flex-end' : 'flex-start', gap: 2 }}>
+      {!me && <div style={{ fontSize: 11, color: 'var(--muted)' }}>{who}</div>}
+      <div style={{
+        background: me ? 'var(--accent-subtle)' : 'var(--bg-elevated)',
+        border: `1px solid ${me ? 'transparent' : 'var(--border)'}`,
+        borderRadius: 12, padding: '9px 12px', maxWidth: '92%', fontSize: 13,
+      }}>{text}</div>
+    </div>
+  )
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      <div style={{ flex: 1, padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {bubble('Radar Lead', 'Morning. 1 new since 09:00. Two p1 bugs need an owner: the CSV export limit (matches #412) and the blank dashboard, which the Investigator is on now.')}
+        {bubble('', 'Is the blank dashboard the same as last week\u2019s CDN issue?', true)}
+        {bubble('Radar Lead', 'Not so far. Last week\u2019s reports all mentioned a 403 on assets; these two don\u2019t. I\u2019ll tell you when the Investigator is back.')}
+      </div>
+      <div style={{ margin: '0 12px 12px', border: '1px solid var(--border-strong)', borderRadius: 12, padding: '10px 12px', color: 'var(--muted)', fontSize: 13 }}>
+        {placeholder}
+      </div>
+    </div>
+  )
 }

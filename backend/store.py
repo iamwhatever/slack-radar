@@ -411,10 +411,14 @@ CREW_AGENT = "slack-radar-crew"
 #: The pre-0.3 default. A crew record still holding it was never a user choice worth
 #: keeping: that agent does not carry the ledger tools, so the crew could not work.
 _LEGACY_DEFAULT_AGENT = "kirocrew"
+#: What the user sees for the crew (Team tab, chat card, session title). The agent
+#: name stays ``slack-radar-crew``.
+CREW_DISPLAY_NAME = "Radar Lead"
+_LEGACY_DISPLAY_NAME = "Slack Radar"
 
 DEFAULT_CREW: dict[str, Any] = {
     "id": "slack-radar",
-    "name": "Slack Radar",
+    "name": CREW_DISPLAY_NAME,
     "slot_key": SLOT_KEY,
     "agent": CREW_AGENT,
     "model": "",
@@ -436,6 +440,8 @@ def read_crew(data_dir: Path) -> dict[str, Any]:
                 rec[key] = raw[key]
     if not is_crew_slot_key(rec.get("slot_key")):
         rec["slot_key"] = SLOT_KEY
+    if not str(rec.get("name") or "").strip() or rec.get("name") == _LEGACY_DISPLAY_NAME:
+        rec["name"] = CREW_DISPLAY_NAME
     if not str(rec.get("agent") or "").strip() or rec.get("agent") == _LEGACY_DEFAULT_AGENT:
         rec["agent"] = CREW_AGENT
     rec["enabled"] = rec.get("enabled") is True

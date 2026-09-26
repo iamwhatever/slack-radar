@@ -123,6 +123,7 @@ async def _handle_state(request: web.Request, ctx: Any) -> web.Response:
                 "trusted": bool(getattr(slot, "_trust_scope", "")),
             },
             "crew_memory": ledger.get("crew_memory"),
+            "investigations": _investigations(ledger, ctx),
             "counts": store.counts(ledger),
             "channels": ledger.get("channels"),
             "source_state": ledger.get("source_state") or "ok",
@@ -132,6 +133,24 @@ async def _handle_state(request: web.Request, ctx: Any) -> web.Response:
             "digest": ledger.get("digest"),
         }
     )
+
+
+def _investigations(ledger: dict[str, Any], ctx: Any) -> dict[str, int]:
+    """Investigator activity for the roster, from the ledger's own spawn ids.
+
+    ``running`` asks the host whether each recorded spawn has finished; with no
+    spawn SDK it is 0 rather than a guess.
+    """
+    spawn = getattr(ctx, "spawn", None)
+    ids = {
+        str(it.get("investigation") or "")[len("spawn "):]
+        for it in (ledger.get("items") or {}).values()
+        if it.get("status") == "investigating" and str(it.get("investigation") or "").startswith("spawn ")
+    }
+    ids.discard("")
+    running = sum(1 for i in ids if spawn is not None and not spawn.is_done(i))
+    items = sum(1 for it in (ledger.get("items") or {}).values() if it.get("status") == "investigating")
+    return {"items": items, "running": running}
 
 
 async def _handle_items(request: web.Request, ctx: Any) -> web.Response:
@@ -247,6 +266,23 @@ async def _handle_crew_update(request: web.Request, ctx: Any) -> web.Response:
     return web.json_response({"ok": True, "crew": crew})
 
 
+async def _handle_crew_message(request: web.Request, ctx: Any) -> web.Response:
+    """The on-page chat card's send path; see ``crew_runtime.send_owner_message``."""
+    body = await _json_body(request)
+    if body is None:
+        return _err(400, "body_not_object", "request body must be a JSON object")
+    text = str(body.get("message") or "").strip()
+    if not text:
+        return _err(400, "missing_required_field", "message must not be empty")
+    state = _state(request)
+    if state is None:
+        return _err(503, "no_gateway_state", "the dashboard is not running on this gateway")
+    result = await crew_runtime.send_owner_message(state, _data_dir(ctx), text)
+    if not result.get("ok"):
+        return _err(409, result.get("code") or "refused", "start the crew before messaging it")
+    return web.json_response(result)
+
+
 async def _handle_digest_request(request: web.Request, ctx: Any) -> web.Response:
     def _req(led: dict[str, Any]) -> None:
         led["digest"]["requested_at"] = store.now()
@@ -327,6 +363,7 @@ def register_routes(ctx: Any) -> list[Any]:
         r("POST", "/crew/start", _owner_only(_handle_crew_start)),
         r("POST", "/crew/pause", _owner_only(_handle_crew_pause)),
         r("PUT", "/crew", _owner_only(_handle_crew_update)),
+        r("POST", "/crew/message", _owner_only(_handle_crew_message)),
         r("POST", "/digest/request", _owner_only(_handle_digest_request)),
         r("POST", "/investigate", _owner_only(_handle_investigate)),
     ]
