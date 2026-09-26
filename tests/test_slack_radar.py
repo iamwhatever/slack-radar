@@ -518,3 +518,41 @@ def test_slot_key_generations_and_validation(tmp_path: Path) -> None:
     assert store.read_crew(tmp_path)["slot_key"] == "crew-slack-radar"  # a foreign key is never adopted
     with pytest.raises(store.StoreError):
         store.update_crew(tmp_path, {"slot_key": "chat-1-evil"})
+
+
+
+# ── Phase 1: Radar Lead display name + on-page chat send path ──────────────
+
+
+def test_crew_display_name_is_radar_lead(tmp_path: Path) -> None:
+    assert store.read_crew(tmp_path)["name"] == "Radar Lead"
+    store.crew_path(tmp_path).write_text(json.dumps({"name": "Slack Radar"}), encoding="utf-8")
+    assert store.read_crew(tmp_path)["name"] == "Radar Lead"  # pre-0.4 default migrated
+    store.update_crew(tmp_path, {"name": "My Lead"})
+    assert store.read_crew(tmp_path)["name"] == "My Lead"
+    assert _agent("slack-radar-crew")["name"] == "slack-radar-crew"  # agent name unchanged
+
+
+def test_owner_message_refused_while_paused(crew_env) -> None:
+    import asyncio
+
+    crew_runtime, state, _closed, _, data = crew_env
+    out = asyncio.run(crew_runtime.send_owner_message(state, data, "hello"))
+    assert out == {"ok": False, "code": "crew_paused"} and state.created == []
+
+
+def test_owner_message_goes_to_the_agent_checked_crew_slot(crew_env) -> None:
+    import asyncio
+
+    crew_runtime, state, closed, _, data = crew_env
+    store.update_crew(data, {"enabled": True})
+    state._slots["crew-slack-radar"] = _FakeSlot("crew-slack-radar", "kirocrew")  # stale agent
+    sent: list[tuple[str, object]] = []
+    _FakeSlot.enqueue_or_run_prompt = lambda self, prompt, fn, st: sent.append((self.key, fn)) or True  # type: ignore[attr-defined]
+    try:
+        out = asyncio.run(crew_runtime.send_owner_message(state, data, "  what needs me today?  "))
+    finally:
+        del _FakeSlot.enqueue_or_run_prompt  # type: ignore[attr-defined]
+    assert out["ok"] and out["slot_key"] == "crew-slack-radar-g2"
+    assert closed == [("crew-slack-radar", "kirocrew")]  # never sent to the wrong-agent slot
+    assert sent == [("crew-slack-radar-g2", crew_runtime._owner_run_chat)]

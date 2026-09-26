@@ -1,6 +1,6 @@
-import { useAppApi } from '@kirocrew/app-sdk'
+import { ChatEmbed, useAppApi } from '@kirocrew/app-sdk'
 import { Badge, Btn, Card, CardTitle, EmptyState, Input, PageHeader, StatCard, Toggle } from '@kirocrew/app-sdk/ui'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react'
 
 const BASE = '/api/apps/slack-radar'
 
@@ -40,6 +40,9 @@ type State = {
   source_error: string
   settings: Settings
   crew: {
+    name: string
+    slot_key: string
+    session_agent: string
     enabled: boolean
     paused_reason: string
     unattended: boolean
@@ -51,6 +54,7 @@ type State = {
     trusted: boolean
   }
   crew_memory: { phase: string; next: string; updated_at: number }
+  investigations?: { items: number; running: number }
   counts: {
     total: number
     needs_triage: number
@@ -78,6 +82,132 @@ type EventRow = { at: number; kind: string; text: string; key: string }
 
 const fmtTime = (t?: number) => (t ? new Date(t * 1000).toLocaleString() : 'never')
 
+function ago(t?: number): string {
+  if (!t) return 'never'
+  const s = Math.max(0, Date.now() / 1000 - t)
+  if (s < 90) return 'just now'
+  if (s < 3600) return `${Math.round(s / 60)} min ago`
+  if (s < 86400) return `${Math.round(s / 3600)} h ago`
+  return fmtTime(t)
+}
+
+// ── crew roster (static until members.json lands in Phase 2) ────────────────
+
+type MemberId = 'lead' | 'investigator' | 'watcher' | 'poller'
+type Member = {
+  id: MemberId
+  title: string
+  initials: string
+  layer: string
+  kind: string
+  agent: string
+  duty: string
+  planned?: boolean
+}
+
+const ROSTER: Member[] = [
+  {
+    id: 'lead',
+    title: 'Radar Lead',
+    initials: 'RL',
+    layer: 'Lead',
+    kind: 'Resident session',
+    agent: 'slack-radar-crew',
+    duty: 'Triages every watched channel, sets category and priority, decides when a cluster needs investigating, judges possibly-resolved threads, writes the digest headline, and answers you here.',
+  },
+  {
+    id: 'investigator',
+    title: 'Investigator',
+    initials: 'IN',
+    layer: 'Research',
+    kind: 'Leaf (spawned per cluster)',
+    agent: 'slack-radar-investigator',
+    duty: 'Searches GitHub read-only for issues and pull requests that match a cluster of reports, and links them in the ledger.',
+  },
+  {
+    id: 'watcher',
+    title: 'Thread Watcher',
+    initials: 'TW',
+    layer: 'Review',
+    kind: 'Leaf (planned)',
+    agent: 'slack-radar-watcher',
+    duty: 'Will judge batches of possibly-resolved threads so the lead does not have to. Coming in Phase 2; the lead does this today.',
+    planned: true,
+  },
+  {
+    id: 'poller',
+    title: 'Poller',
+    initials: '⟳',
+    layer: 'System',
+    kind: 'Code, no model',
+    agent: '',
+    duty: 'Reads new messages and thread replies through your Slack MCP, flags likely resolutions, and delivers the digest. Spends no credits.',
+    planned: false,
+  },
+]
+
+type MemberStatus = { label: string; tone: 'ok' | 'aim' | 'warn' | 'muted' }
+
+function memberStatus(m: Member, s: State): MemberStatus {
+  if (m.id === 'lead') {
+    if (!s.crew.live) return { label: 'paused', tone: 'muted' }
+    return s.crew.running ? { label: 'working', tone: 'aim' } : { label: 'live', tone: 'ok' }
+  }
+  if (m.id === 'investigator') {
+    const n = s.investigations?.running || 0
+    return n ? { label: `${n} running`, tone: 'aim' } : { label: 'standing by', tone: 'muted' }
+  }
+  if (m.id === 'watcher') return { label: 'Phase 2', tone: 'muted' }
+  if (s.source_state === 'needs_login') return { label: 'needs re-login', tone: 'warn' }
+  return { label: `polled ${ago(s.last_poll_at)}`, tone: 'muted' }
+}
+
+const TONE_VAR: Record<MemberStatus['tone'], string> = {
+  ok: 'var(--ok)',
+  aim: 'var(--aim)',
+  warn: 'var(--warn)',
+  muted: 'var(--muted-strong)',
+}
+
+function Avatar({ m, s, selected, size = 32 }: { m: Member; s: State; selected?: boolean; size?: number }) {
+  const st = memberStatus(m, s)
+  const dim = m.planned || m.id === 'poller'
+  const style: CSSProperties = {
+    width: size,
+    height: size,
+    borderRadius: '50%',
+    display: 'grid',
+    placeItems: 'center',
+    fontSize: 11,
+    fontWeight: 700,
+    position: 'relative',
+    flex: 'none',
+    background: dim ? 'transparent' : 'var(--bg-hover)',
+    color: dim ? 'var(--muted)' : 'var(--text-strong)',
+    border: `2px ${dim ? 'dashed' : 'solid'} ${selected ? 'var(--accent)' : dim ? 'var(--border-strong)' : 'transparent'}`,
+    opacity: m.planned ? 0.6 : 1,
+  }
+  return (
+    <span style={style} aria-hidden>
+      {m.initials}
+      {!m.planned && (
+        <i
+          style={{
+            position: 'absolute',
+            right: -2,
+            bottom: -2,
+            width: 10,
+            height: 10,
+            borderRadius: '50%',
+            border: '2px solid var(--card)',
+            background: TONE_VAR[st.tone],
+          }}
+        />
+      )}
+    </span>
+  )
+}
+
 function statusVariant(s: string): 'ok' | 'err' | 'warn' | 'aim' | 'muted' {
   if (s === 'new') return 'warn'
   if (s === 'investigating') return 'aim'
@@ -87,7 +217,7 @@ function statusVariant(s: string): 'ok' | 'err' | 'warn' | 'aim' | 'muted' {
 
 export default function SlackRadar() {
   const api = useAppApi()
-  const [tab, setTab] = useState<'board' | 'activity' | 'settings'>('board')
+  const [tab, setTab] = useState<'board' | 'team' | 'activity' | 'settings'>('board')
   const [state, setState] = useState<State | null>(null)
   const [items, setItems] = useState<Item[]>([])
   const [events, setEvents] = useState<EventRow[]>([])
@@ -150,10 +280,10 @@ export default function SlackRadar() {
     <>
       <PageHeader
         title="Slack Radar"
-        subtitle="One crew triaging every channel you watch, with a local ledger and a daily digest"
+        subtitle="A small crew triaging your Slack channels, with a local ledger and a daily digest"
         actions={
           <div className="flex gap-2">
-            {(['board', 'activity', 'settings'] as const).map((t) => (
+            {(['board', 'team', 'activity', 'settings'] as const).map((t) => (
               <Btn key={t} primary={tab === t} onClick={() => setTab(t)} aria-pressed={tab === t}>
                 {t[0].toUpperCase() + t.slice(1)}
               </Btn>
@@ -190,7 +320,11 @@ export default function SlackRadar() {
             onStart={() => act('Start crew', () => api.post(`${BASE}/crew/start`, {}))}
             onPause={() => act('Pause crew', () => api.post(`${BASE}/crew/pause`, {}))}
             onDigest={() => act('Request digest', () => api.post(`${BASE}/digest/request`, {}))}
+            events={events}
+            onChanged={load}
           />
+        ) : tab === 'team' ? (
+          <TeamTab state={state} />
         ) : tab === 'activity' ? (
           <Activity events={events} />
         ) : (
@@ -216,6 +350,8 @@ function Board(props: {
   onStart: () => void
   onPause: () => void
   onDigest: () => void
+  events: EventRow[]
+  onChanged: () => void
 }) {
   const { state, items, selected, setSelected } = props
   const [repo, setRepo] = useState('')
@@ -231,7 +367,8 @@ function Board(props: {
     [state],
   )
   return (
-    <>
+    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) 360px', gap: 20, alignItems: 'start' }}>
+    <div style={{ minWidth: 0 }}>
       <div className="grid gap-3.5 grid-cols-[repeat(auto-fit,minmax(150px,1fr))] mb-6">
         <StatCard label="Awaiting triage" value={state.counts.needs_triage} accent />
         <StatCard label="Possibly resolved" value={state.counts.possibly_resolved} />
@@ -251,38 +388,7 @@ function Board(props: {
         </Card>
       )}
 
-      <Card className="mb-4">
-        <CardTitle>Crew</CardTitle>
-        <div className="flex flex-wrap items-center gap-2 text-sm">
-          <Badge variant={state.crew.live ? 'ok' : 'muted'}>{state.crew.live ? 'running' : 'paused'}</Badge>
-          {state.crew.running && <Badge variant="aim">mid-turn</Badge>}
-          {state.crew.trusted && <Badge variant="warn">auto-approve on</Badge>}
-          <span className="text-muted">
-            phase {state.crew_memory.phase} · next: {state.crew_memory.next || '—'}
-          </span>
-        </div>
-        <div className="flex flex-wrap gap-2 mt-3">
-          {state.crew.live ? (
-            <Btn onClick={props.onPause} disabled={!!props.busy}>Pause crew</Btn>
-          ) : (
-            <Btn primary onClick={props.onStart} disabled={!!props.busy || !props.configured}>Start crew</Btn>
-          )}
-          <Btn onClick={props.onPoll} disabled={!!props.busy || !props.configured}>Poll now</Btn>
-          <Btn onClick={props.onDigest} disabled={!!props.busy || !state.crew.live}>Request digest</Btn>
-        </div>
-        <p className="text-xs text-muted mt-2">
-          Last poll {fmtTime(state.last_poll_at)}
-          {state.last_poll_error ? ` · ${state.last_poll_error}` : ''} · last digest{' '}
-          {state.digest.last_posted_date || 'never'}
-          {state.digest.last_error ? ` · ${state.digest.last_error}` : ''}
-        </p>
-        {state.digest.last_text && (
-          <details className="mt-2 text-sm">
-            <summary className="cursor-pointer">Last digest</summary>
-            <pre className="whitespace-pre-wrap text-xs mt-1">{state.digest.last_text}</pre>
-          </details>
-        )}
-      </Card>
+      <DigestCard state={state} busy={props.busy} onDigest={props.onDigest} />
 
       <Card className="mb-4">
         <CardTitle>Channels</CardTitle>
@@ -380,7 +486,179 @@ function Board(props: {
           </ul>
         )}
       </Card>
-    </>
+    </div>
+      <LeadCard
+        state={state}
+        events={props.events}
+        configured={props.configured}
+        busy={props.busy}
+        onStart={props.onStart}
+        onPause={props.onPause}
+        onPoll={props.onPoll}
+        onChanged={props.onChanged}
+      />
+    </div>
+  )
+}
+
+// ── Board: today's digest ───────────────────────────────────────────────────
+
+function DigestCard({ state, busy, onDigest }: { state: State; busy: string; onDigest: () => void }) {
+  const d = state.digest
+  const today = new Date().toISOString().slice(0, 10)
+  const fresh = d.last_posted_date === today
+  return (
+    <Card className="mb-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <CardTitle>{fresh ? "Today's digest" : 'Latest digest'}</CardTitle>
+        {d.pending ? <Badge variant="aim">being delivered</Badge> : null}
+        <span className="text-xs text-muted">
+          {d.last_posted_date ? `${d.last_posted_date} · ${state.settings.digest_destination === 'self_dm' ? 'DMed to you' : 'dashboard notification'}` : 'none yet'}
+        </span>
+        <div className="flex-1" />
+        <Btn onClick={onDigest} disabled={!!busy || !state.crew.live}>Request digest</Btn>
+      </div>
+      {d.last_text ? (
+        <pre className="whitespace-pre-wrap text-sm mt-2" style={{ fontFamily: 'inherit', margin: '8px 0 0' }}>
+          {d.last_text}
+        </pre>
+      ) : (
+        <p className="text-sm text-muted mt-2">The Radar Lead writes one after the daily cron or when you press Request digest.</p>
+      )}
+      {d.last_error && <p className="text-xs mt-1" style={{ color: 'var(--danger)' }}>{d.last_error}</p>}
+    </Card>
+  )
+}
+
+// ── Board: the Radar Lead chat card ─────────────────────────────────────────
+
+function RosterStrip({ state }: { state: State }) {
+  return (
+    <div className="flex items-center gap-2" style={{ marginTop: 10 }}>
+      {ROSTER.map((m) => (
+        <span key={m.id} title={`${m.title} · ${memberStatus(m, state).label}`}>
+          <Avatar m={m} s={state} selected={m.id === 'lead'} size={30} />
+          <span className="sr-only">{`${m.title}: ${memberStatus(m, state).label}`}</span>
+        </span>
+      ))}
+    </div>
+  )
+}
+
+function LeadCard(props: {
+  state: State
+  events: EventRow[]
+  configured: boolean
+  busy: string
+  onStart: () => void
+  onPause: () => void
+  onPoll: () => void
+  onChanged: () => void
+}) {
+  const api = useAppApi()
+  const { state } = props
+  const lead = ROSTER[0]
+  const slotKey = state.crew.slot_key
+  const ready = state.crew.live && state.crew.session_open && state.crew.session_agent === state.crew.agent
+  const send = async (message: string) => {
+    await api.post(`${BASE}/crew/message`, { message })
+    props.onChanged()
+  }
+  const crewEvents = props.events.filter((e) => e.kind === 'crew' || e.kind === 'digest').slice(0, 5)
+  return (
+    <Card style={{ position: 'sticky', top: 0, padding: 0, display: 'flex', flexDirection: 'column', height: 'min(760px, calc(100vh - 140px))', overflow: 'hidden' }}>
+      <div style={{ padding: '14px 16px', borderBottom: '1px solid var(--border)' }}>
+        <div className="flex items-center gap-2">
+          <span style={{ fontWeight: 600, color: 'var(--text-strong)' }}>{state.crew.name || lead.title}</span>
+          <Badge variant={memberStatus(lead, state).tone === 'muted' ? 'muted' : memberStatus(lead, state).tone === 'aim' ? 'aim' : 'ok'}>
+            {memberStatus(lead, state).label}
+          </Badge>
+          <div className="flex-1" />
+          {state.crew.live ? (
+            <Btn onClick={props.onPause} disabled={!!props.busy}>Pause</Btn>
+          ) : null}
+          <Btn onClick={props.onPoll} disabled={!!props.busy || !props.configured}>Poll now</Btn>
+        </div>
+        <div className="text-xs text-muted" style={{ marginTop: 2 }}>
+          phase {state.crew_memory.phase} · next: {state.crew_memory.next || '—'}
+        </div>
+        <RosterStrip state={state} />
+      </div>
+      <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+        {ready ? (
+          <ChatEmbed
+            key={slotKey}
+            slotKey={slotKey}
+            agent={state.crew.agent}
+            frameless
+            startAtBottom
+            placeholder="Ask the Radar Lead…"
+            onSend={send}
+          />
+        ) : (
+          <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <p className="text-sm">
+              {state.crew.live
+                ? 'The Radar Lead session opens on its next turn. Start it now to talk here.'
+                : 'The Radar Lead is paused. Start the crew to triage your channels and talk to it here.'}
+            </p>
+            <Btn primary onClick={props.onStart} disabled={!!props.busy || !props.configured}>
+              {state.crew.live ? 'Open the session' : 'Start crew'}
+            </Btn>
+            {!props.configured && <p className="text-xs text-muted">Add a channel in Settings first.</p>}
+            {crewEvents.length > 0 && (
+              <ul className="text-xs text-muted flex flex-col gap-1" style={{ marginTop: 6 }}>
+                {crewEvents.map((e, i) => (
+                  <li key={`${e.at}-${i}`}>{ago(e.at)} · {e.text}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+      </div>
+    </Card>
+  )
+}
+
+// ── Team tab ────────────────────────────────────────────────────────────────
+
+function TeamTab({ state }: { state: State }) {
+  return (
+    <Card>
+      <CardTitle>Team</CardTitle>
+      <p className="text-sm text-muted" style={{ marginBottom: 8 }}>
+        Who works on your channels. Only the Radar Lead has a session; the others run when needed.
+      </p>
+      <ul className="flex flex-col">
+        {ROSTER.map((m) => {
+          const st = memberStatus(m, state)
+          return (
+            <li
+              key={m.id}
+              className="flex items-start gap-3"
+              style={{ padding: '12px 4px', borderTop: '1px solid var(--border)', opacity: m.planned ? 0.7 : 1 }}
+            >
+              <Avatar m={m} s={state} size={36} />
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span style={{ fontWeight: 600, color: 'var(--text-strong)' }}>{m.id === 'lead' ? state.crew.name || m.title : m.title}</span>
+                  <Badge variant="muted">{m.layer}</Badge>
+                  <span className="text-xs text-muted">{m.kind}</span>
+                  {m.agent && <span className="text-xs text-muted font-mono">{m.id === 'lead' ? state.crew.agent : m.agent}</span>}
+                </div>
+                <p className="text-sm" style={{ margin: '4px 0 0' }}>{m.duty}</p>
+                {m.id === 'investigator' && (state.investigations?.items || 0) > 0 && (
+                  <p className="text-xs text-muted" style={{ margin: '2px 0 0' }}>
+                    {state.investigations?.items} item(s) under investigation
+                  </p>
+                )}
+              </div>
+              <span className="text-xs" style={{ color: TONE_VAR[st.tone], whiteSpace: 'nowrap' }}>{st.label}</span>
+            </li>
+          )
+        })}
+      </ul>
+    </Card>
   )
 }
 

@@ -107,7 +107,7 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "slack_radar_request_digest",
         "description": (
-            "Ask the Slack Radar crew to compose today's digest. Used by the app's daily cron; "
+            "Ask the Radar Lead to compose today's digest. Used by the app's daily cron; "
             "the gateway wakes the crew on its next poll. Takes no arguments."
         ),
         "inputSchema": {"type": "object", "properties": {}},
