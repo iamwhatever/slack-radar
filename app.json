@@ -1,6 +1,6 @@
 {
   "name": "slack-radar",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "displayName": "Slack Radar",
   "description": "A Slack triage crew that remembers, reading with your own Slack identity through your Slack MCP — no bot, no invite. Watches the channels you choose, classifies every new message as a bug report, feature request, question, already-answered or noise with a priority, links clusters to existing GitHub issues and PRs, notices when a thread looks resolved, and sends you a daily digest — keeping everything in a local ledger so nothing is triaged twice.",
   "author": "iamwhatever",
@@ -18,7 +18,7 @@
     "One crew for every channel you configure: new messages are classified by category and priority with a one-line summary",
     "Its own per-channel cursor, independent of your Slack read state",
     "Flags threads that look resolved for the crew to judge; code never closes an item on its own",
-    "An expired Slack MCP login shows as 'needs re-login', never as 'no new messages'",
+    "An expired Slack MCP login shows as 'Slack connection: sign in again', never as 'no new messages'",
     "Clusters of reports are investigated by a read-only subagent that links matching GitHub issues and PRs"
   ],
   "defaultEnabled": false,
