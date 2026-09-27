@@ -360,7 +360,7 @@ _PRIORITY_ORDER = {p: i for i, p in enumerate(store.PRIORITIES)}
 
 
 def render_digest(ledger: dict[str, Any], headline: str, top_keys: list[str], limit: int = 10) -> str:
-    """The digest text, built only from PUBLIC fields (see crew_ledger_spec.md).
+    """The digest text, built only from PUBLIC fields (see desk/CONTRACT.md).
 
     ``note``/``investigation``/raw ``text`` never appear: they are local-only fields.
     """
