@@ -391,6 +391,81 @@ def test_investigator_agent_is_still_shipped_and_uses_the_ledger() -> None:
     assert "execute_bash" not in inv.get("allowedTools", [])  # never auto-approve a shell
 
 
+def test_lead_has_no_tool_the_unattended_grant_could_add() -> None:
+    # The scoped grant approves whatever the lead's session would otherwise prompt
+    # for. Naming the three spawn tools instead of the whole @kirocrew-core server
+    # keeps that set empty, so "the lead auto-approves only the ledger and spawn
+    # tools" holds with unattended on as well as off.
+    crew = _agent("slack-radar-crew")
+    assert "@kirocrew-core" not in crew["tools"]
+    core = sorted(t for t in crew["tools"] if t.startswith("@kirocrew-core"))
+    assert core == [
+        "@kirocrew-core/spawn_list",
+        "@kirocrew-core/spawn_run",
+        "@kirocrew-core/spawn_status",
+    ]
+    assert set(crew["tools"]) - {"thinking"} <= set(crew["allowedTools"])
+
+
+class _FakeGrant:
+    def __init__(self) -> None:
+        self.active: set[str] = set()
+        self.calls: list[str] = []
+
+    def is_scope_active(self, scope: str) -> bool:
+        return scope in self.active
+
+    def renew_scoped(self, scope: str, source: str, ttl: int):
+        self.calls.append(f"renew {scope} {source} {ttl}")
+        return type("R", (), {"renewed": scope in self.active})()
+
+    def activate_scoped(self, scope: str, source: str, ttl: int):
+        self.calls.append(f"activate {scope} {source} {ttl}")
+        self.active.add(scope)
+        return type("R", (), {"active": True})()
+
+    def deactivate_scope(self, scope: str) -> None:
+        self.calls.append(f"deactivate {scope}")
+        self.active.discard(scope)
+
+
+def test_unattended_grant_lives_only_on_the_crew_slot(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The host hands a spawn_run child auto-approval only from the parent slot's
+    # interactive ``_trust`` flag or the session's stored approval policy, and it
+    # never stores a scoped grant as that policy. The app's grant is the scoped
+    # kind and touches neither, so it cannot reach the investigator the crew
+    # spawns: that child's spawn and shell commands still prompt.
+    from backend import crew_runtime
+
+    grant = _FakeGrant()
+    monkeypatch.setattr(crew_runtime, "_safety_override", lambda: grant)
+    slot = _FakeSlot("crew-slack-radar", "slack-radar-crew")
+    live = {"enabled": True, "paused_reason": "", "unattended": True}
+
+    assert crew_runtime.sync_trust(slot, live) is True
+    assert slot._trust_scope == crew_runtime.TRUST_SCOPE and slot._trust is False
+    assert grant.calls == [f"activate {crew_runtime.TRUST_SCOPE} slack-radar-crew 900"]
+    assert crew_runtime.sync_trust(slot, live) is True  # the next poll renews
+    assert grant.calls[-1] == f"renew {crew_runtime.TRUST_SCOPE} slack-radar-crew 900"
+    assert slot._trust is False
+
+    assert crew_runtime.sync_trust(slot, {**live, "unattended": False}) is False
+    assert slot._trust_scope == "" and slot._trust is False
+    assert grant.calls[-1] == f"deactivate {crew_runtime.TRUST_SCOPE}"
+
+
+@pytest.mark.parametrize(
+    ("crew", "allowed"),
+    [({}, False), ({"unattended": False}, False), ({"unattended": "true"}, False), ({"unattended": True}, True)],
+)
+def test_board_investigate_needs_unattended(crew: dict, allowed: bool) -> None:
+    # The Investigate button spawns through the app spawn SDK, which the host
+    # always runs auto-approved; it must not run until the owner opted in.
+    from backend import crew_runtime
+
+    assert crew_runtime.owner_investigation_allowed(crew) is allowed
+
+
 def test_crew_defaults_to_the_shipped_agent(tmp_path: Path) -> None:
     from backend import crew_runtime  # noqa: F401  (imports cleanly without a gateway)
 
