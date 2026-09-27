@@ -46,7 +46,7 @@ const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PAT
 
 const shots = [
   { name: 'board', source: 'ok', tab: null },
-  { name: 'settings', source: 'ok', tab: 'Settings', wait: 'MCP server command' },
+  { name: 'settings', source: 'ok', tab: 'Settings', wait: 'Basics', open: 'Advanced' },
   { name: 'team', source: 'ok', tab: 'Team', wait: 'Only the Radar Lead has a session' },
   { name: 'needs-login', source: 'needs_login', tab: null },
 ]
@@ -56,10 +56,11 @@ try {
     const page = await ctx.newPage()
     page.on('pageerror', (e) => console.error(`[${s.name}] pageerror:`, e.message))
     await page.goto(`http://127.0.0.1:5287/index.html?source=${s.source}`)
-    await page.getByText('Slack MCP:').first().waitFor({ timeout: 30000 })
+    await page.getByText('Slack connection:').first().waitFor({ timeout: 30000 })
     if (s.tab) {
-      await page.getByRole('button', { name: s.tab, exact: true }).click()
-      await page.getByText(s.wait).waitFor()
+      await page.getByRole('tab', { name: s.tab, exact: true }).click()
+      await page.getByText(s.wait).first().waitFor()
+      if (s.open) await page.getByText(s.open, { exact: true }).click()
     }
     await page.waitForTimeout(400)
     // The page scrolls inside its own container; capture the full content height.

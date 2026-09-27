@@ -79,7 +79,7 @@ sequenceDiagram
     W->>M: batch_get_channel_info (1 channel)
     alt still an auth error
       W->>L: keep needs_login, cursors unchanged, cycle ends
-      Note over W,L: board shows "needs re-login", retry next cycle
+      Note over W,L: board shows "sign in again", retry next cycle
     else login restored
       W->>L: continue with the normal cycle
     end
@@ -136,31 +136,27 @@ its agent specs.
 ## First run
 
 1. Open **Slack Radar → Settings**.
-2. **Slack MCP.** Leave the command as `ai-community-slack-mcp` or enter your
-   own (a single executable on `PATH`, no arguments). Press **Check
-   connection**; the status line should read *Slack MCP: connected*.
-   Optionally set your workspace URL (`https://yourteam.slack.com`) so
-   permalinks open directly.
+2. **Slack sign-in.** Under **Basics**, press **Check connection**; the status line should read *Slack connection: connected*. The Slack MCP command (default `ai-community-slack-mcp`, a single executable on `PATH`, no arguments) and the optional workspace URL (`https://yourteam.slack.com`, so permalinks open directly) are under **Advanced**.
 3. **Channels.** List the channel IDs to watch, one per line (right-click a
    channel → *Copy link*, the `C…` segment). Any channel you can read works,
    up to 50.
 4. **Digest destination.** *Dashboard notification only* (the default) or *DM
    to myself* (`self_dm`, which needs your Slack login). Save settings.
-5. **Board → Start crew.** The first poll backfills the last 24 hours
-   (configurable).
+5. **Turn on the Crew switch** in the page header. The line under the title then reads *Watching N channels · running*. The first poll backfills the last 24 hours (configurable under Advanced).
 
 Nothing is polled until at least one channel is set, and the crew never runs
 until you start it.
 
 ## Usage
 
-The page has three tabs.
+The page has four tabs. The header shows the tabs, a **Crew** switch (start or pause the crew) and a status line such as *Watching 2 channels · running*. When the Slack sign-in expires, a full-width banner at the top says *Slack connection: sign in again*, with a **Details** fold for the technical error.
 
 | Tab | What it shows |
 |---|---|
-| Board | Slack MCP status, counts (awaiting triage, possibly resolved, open p0/p1, tracked), crew status (phase, next step, running or paused), per-channel poll health, the last digest, and the ledger filtered by status. **Start crew**, **Pause crew** and **Request digest** live here. Select items and press **Investigate** (optionally naming an `owner/name` repo) to spawn the Investigator on them |
+| Board | Slack connection and last poll, counts (awaiting triage, possibly resolved, open p0/p1, tracked), then the ledger filtered by status (at most two tags per row: status and priority; the rest on hover), then the last digest with **Request digest**, then per-channel poll health. On the right, the Radar Lead chat card with **Poll now**, the crew phase and next step, and three quick questions (*What needs me today?*, *Draft today's digest*, *Re-check resolved threads*). Select items and press **Investigate** (optionally naming an `owner/name` repo) to spawn the Investigator on them |
+| Team | Who is on the crew: Radar Lead (*Resident*), Investigator (*Joins on demand*), Thread Watcher (*Coming soon*) and the Poller (code, no model), each with a live status. Agent ids are in a **Details** fold |
 | Activity | The work log: polls that moved something, login lost or restored, crew notes, digests, settings changes, crew session moves |
-| Settings | Slack MCP command and connection check, workspace URL, watched channels, digest destination, Slack login, poll interval, backfill, and the Crew card (agent, model, auto-approve toggle) |
+| Settings | **Basics** first: Slack connection check, watched channels, digest destination (plus your Slack login for a DM), poll interval. **Advanced** (folded): Slack MCP command, workspace URL, backfill, and the crew agent, model and the *Unattended mode (auto-approve investigator commands)* switch |
 
 To get a digest on a schedule, resume the paused `daily-digest` cron (weekdays
 16:00 UTC) in the Schedule view. To get one now, press **Request digest** on the
@@ -172,7 +168,7 @@ Board.
 |---|---|---|
 | Radar Lead | Lead · resident | The crew session itself (agent `slack-radar-crew`, slot `crew-slack-radar`). Triages each new item (category, priority, summary), decides clusters, judges possibly-resolved threads, writes the digest headline, and is the one you talk to |
 | Investigator | Research · leaf | Spawned per cluster (agent `slack-radar-investigator`). Runs read-only `gh search` / `gh issue view` / `gh pr view` and records matching issue and PR links on the items. Never writes to GitHub or Slack |
-| Thread Watcher | Review · leaf | **Planned for Phase 2**, not shipped yet. Will judge batches of possibly-resolved threads. Today the Radar Lead does this itself |
+| Thread Watcher | Review · leaf | **Coming soon**, not shipped yet. Will judge batches of possibly-resolved threads. Today the Radar Lead does this itself |
 | Poller | System · code, no model | Runs inside the gateway. Cursor reads, thread re-checks, login-expiry detection, and digest delivery. Wakes the lead only when something moved |
 
 ## Configuration
@@ -192,10 +188,10 @@ are written only through the owner-gated Settings page.
 | `recheck_days` | `7` | How old a thread can be and still be re-checked, 1–30. No UI field |
 | `recheck_max_per_cycle` | `20` | Threads re-checked per cycle, 0–50. No UI field |
 
-The Crew card writes the crew record (`crew.json` in the app data dir), not the
+The Crew part of **Settings → Advanced** writes the crew record (`crew.json` in the app data dir), not the
 vault: `agent` (default `slack-radar-crew`; an override only, your own agents are
 never modified), `model` (empty = the agent's default), and `unattended` (the
-auto-approve toggle, off by default).
+*Unattended mode* switch, off by default).
 
 ## What runs in the background
 
@@ -241,18 +237,18 @@ Disabling the app stops the loop and revokes the crew's auto-approve grant.
 
 ## Troubleshooting
 
-- **The board says *needs re-login*.** Your Slack MCP's login expired. Log in to
-  the Slack MCP again on the gateway host. Polling stays paused with cursors
+- **The page says *Slack connection: sign in again*.** Your Slack MCP's login expired. Log in to
+  the Slack MCP again on the gateway host, then press **I signed in, check again**. Polling stays paused with cursors
   unchanged and resumes on the next cycle after a read succeeds; an expired login
   is never reported as "no new messages".
 - **The crew says its ledger tools are "not granted" or missing.** Its agent spec
   is stale, usually after an update. Run **Library → ⋮ → Sync** on Slack Radar,
-  then **Start crew** again.
+  then turn the **Crew** switch on again.
 - **The crew's session moved to `crew-slack-radar-g2`.** Expected. When the
   existing slot is bound to a different agent (for example one created by an
   older version on `kirocrew`), the app archives it and opens a fresh slot with a
   generation suffix. The Activity tab logs the move. Use the newest session.
-- **Status reads *binary not found* or *connected, but missing read tools*.**
+- **Status reads *Slack connection: not installed* or *missing read access*.**
   The Slack MCP command is not on the gateway's `PATH`, or that server does not
   expose the five read tools listed above.
 
@@ -298,9 +294,9 @@ Rendered from fake demo data (`docs/screenshots/capture/`); no real Slack conten
 | | |
 |---|---|
 | ![Board tab](docs/screenshots/board.png) | ![Settings tab](docs/screenshots/settings.png) |
-| Board: MCP status, crew phase and next step, per-channel health, and the triaged ledger | Settings: Slack MCP command and connection check, watched channels, digest destination |
-| ![Needs re-login state](docs/screenshots/needs-login.png) | |
-| Login expired: polling pauses and the board says so instead of showing an empty queue | |
+| Board: Slack connection, counts, the triaged ledger, then digest and channels; the Radar Lead chat card with quick questions | Settings: Basics (connection, channels, digest, poll interval) and the opened Advanced section |
+| ![Sign in again state](docs/screenshots/needs-login.png) | ![Team tab](docs/screenshots/team.png) |
+| Sign-in expired: a banner says so and polling pauses, instead of an empty queue | Team: who is on the crew and what each one is doing |
 
 ## License
 
@@ -373,27 +369,25 @@ kirocrew app enable slack-radar
 ## 首次运行
 
 1. 打开 **Slack Radar → Settings**。
-2. **Slack MCP。** 命令保持 `ai-community-slack-mcp`，或填你自己的（`PATH`
-   上的单个可执行文件，不带参数）。点 **Check connection**，状态行应显示
-   *Slack MCP: connected*。可以顺便填上工作区地址（`https://yourteam.slack.com`），
-   这样消息链接能直接打开。
+2. **Slack 登录。** 在 **Basics** 里点 **Check connection**，状态行应显示 *Slack connection: connected*。Slack MCP 命令（默认 `ai-community-slack-mcp`，`PATH` 上的单个可执行文件，不带参数）和可选的工作区地址（`https://yourteam.slack.com`，让消息链接能直接打开）在 **Advanced** 里。
 3. **频道。** 每行一个要监听的频道 ID（右键频道 → *Copy link*，取其中 `C…` 那一段）。
    只要你能读的频道都行，最多 50 个。
 4. **摘要去向。** *Dashboard notification only*（默认，仅仪表盘通知）或
    *DM to myself*（`self_dm`，需要填你的 Slack 登录名）。保存设置。
-5. **Board → Start crew。** 第一次轮询会回溯最近 24 小时（可调）。
+5. **打开页头的 Crew 开关。** 标题下的状态行会变成 *Watching N channels · running*。第一次轮询会回溯最近 24 小时（可在 Advanced 里调）。
 
 在设置至少一个频道之前不会轮询；在你点启动之前，小组也不会运行。
 
 ## 使用
 
-页面有三个标签页。
+页面有四个标签页。页头放着标签页、一个 **Crew** 开关（启动或暂停小组）和一行状态，例如 *Watching 2 channels · running*。Slack 登录过期时，页面顶部会出现一条通栏横幅 *Slack connection: sign in again*，技术细节收在 **Details** 折叠里。
 
 | 标签页 | 内容 |
 |---|---|
-| Board（看板） | Slack MCP 状态；计数（待分诊、可能已解决、未关闭的 p0/p1、跟踪总数）；小组状态（阶段、下一步、运行中或已暂停）；各频道轮询健康度；最近一次摘要；按状态筛选的台账。**Start crew**、**Pause crew**、**Request digest** 都在这里。勾选条目后点 **Investigate**（可选填一个 `owner/name` 仓库）即可派调查员去查 |
+| Board（看板） | Slack 连接与最近一次轮询；计数（待分诊、可能已解决、未关闭的 p0/p1、跟踪总数）；紧接着是按状态筛选的台账（每行最多两个标签：状态和优先级，其余悬停可见）；然后是最近一次摘要和 **Request digest**；最后是各频道轮询健康度。右侧是雷达组长聊天卡片，带 **Poll now**、小组阶段与下一步，以及三个快捷问题（*What needs me today?*、*Draft today's digest*、*Re-check resolved threads*）。勾选条目后点 **Investigate**（可选填一个 `owner/name` 仓库）即可派调查员去查 |
+| Team（团队） | 小组成员：雷达组长（*Resident*，常驻）、调查员（*Joins on demand*，按需加入）、线程观察员（*Coming soon*，即将推出）和轮询器（代码，不用模型），各带实时状态。agent id 收在 **Details** 折叠里 |
 | Activity（动态） | 工作日志：有变化的轮询、登录失效与恢复、小组备注、摘要、设置变更、小组会话迁移 |
-| Settings（设置） | Slack MCP 命令与连接检查、工作区地址、监听的频道、摘要去向、Slack 登录名、轮询间隔、回溯时长，以及 Crew 卡片（agent、模型、自动批准开关） |
+| Settings（设置） | 先是 **Basics**：Slack 连接检查、监听的频道、摘要去向（选私信时还有 Slack 登录名）、轮询间隔。**Advanced**（默认折叠）：Slack MCP 命令、工作区地址、回溯时长，以及小组的 agent、模型和 *Unattended mode (auto-approve investigator commands)* 开关 |
 
 想定时收摘要，就在 Schedule 页面恢复已暂停的 `daily-digest` 定时任务（工作日 UTC 16:00）；
 想马上要一份，点看板上的 **Request digest**。
@@ -404,7 +398,7 @@ kirocrew app enable slack-radar
 |---|---|---|
 | 雷达组长 | 组长 · 常驻 | 就是小组会话本身（agent `slack-radar-crew`，槽位 `crew-slack-radar`）。给每条新条目分诊（类别、优先级、摘要），决定如何聚簇，判断“可能已解决”的线程，写摘要标题，也是你对话的对象 |
 | 调查员 | 调研 · 临时 | 每簇派一个（agent `slack-radar-investigator`）。只读地运行 `gh search` / `gh issue view` / `gh pr view`，把匹配的 issue、PR 链接记到条目上。从不写 GitHub 或 Slack |
-| 线程观察员（第二期） | 复核 · 临时 | **计划在第二期加入，目前尚未提供。** 届时负责成批判断“可能已解决”的线程；现阶段由雷达组长自己判断 |
+| 线程观察员（即将推出） | 复核 · 临时 | **即将推出，目前尚未提供。** 届时负责成批判断“可能已解决”的线程；现阶段由雷达组长自己判断 |
 | 轮询器 | 系统 · 代码，不用模型 | 运行在网关内。负责游标读取、线程复查、登录失效检测和摘要投递；只有真有变化时才唤醒组长 |
 
 ## 配置
@@ -423,9 +417,9 @@ kirocrew app enable slack-radar
 | `recheck_days` | `7` | 多久以内的线程仍会被复查（天），1–30。界面上没有对应字段 |
 | `recheck_max_per_cycle` | `20` | 每轮最多复查的线程数，0–50。界面上没有对应字段 |
 
-Crew 卡片写入的是小组记录（应用数据目录下的 `crew.json`），而不是保险库：`agent`
+**Settings → Advanced** 里的 Crew 部分写入的是小组记录（应用数据目录下的 `crew.json`），而不是保险库：`agent`
 （默认 `slack-radar-crew`；只是覆盖项，你自己的 agent 永远不会被修改）、`model`
-（留空即用 agent 的默认模型）、`unattended`（自动批准开关，默认关闭）。
+（留空即用 agent 的默认模型）、`unattended`（*Unattended mode* 开关，默认关闭）。
 
 ## 后台会跑什么
 
@@ -458,14 +452,14 @@ Crew 卡片写入的是小组记录（应用数据目录下的 `crew.json`），
 
 ## 排障
 
-- **看板显示 *needs re-login*。** 你的 Slack MCP 登录过期了。在网关主机上重新登录 Slack MCP 即可。
+- **页面显示 *Slack connection: sign in again*。** 你的 Slack MCP 登录过期了。在网关主机上重新登录 Slack MCP，然后点 **I signed in, check again**。
   这期间轮询暂停、游标不动；下一轮读取成功后自动恢复。登录过期绝不会被当成“没有新消息”。
 - **小组说台账工具“not granted”或找不到。** 它的 agent 配置过时了，通常发生在升级之后。
-  在 **Library → ⋮ → Sync** 同步 Slack Radar，然后再点一次 **Start crew**。
+  在 **Library → ⋮ → Sync** 同步 Slack Radar，然后重新打开 **Crew** 开关。
 - **小组会话迁到了 `crew-slack-radar-g2`。** 这是正常的。如果现有槽位绑定的是别的 agent
   （比如旧版本在 `kirocrew` 上建的），应用会把它归档，并新开一个带代数后缀的槽位。
   Activity 页会记录这次迁移；使用最新的那个会话即可。
-- **状态显示 *binary not found* 或 *connected, but missing read tools*。** Slack MCP 命令不在网关的
+- **状态显示 *Slack connection: not installed* 或 *missing read access*。** Slack MCP 命令不在网关的
   `PATH` 上，或者该服务器没有提供上面列出的五个读取工具。
 
 ## 开发
@@ -509,9 +503,9 @@ slack-radar/
 | | |
 |---|---|
 | ![看板](docs/screenshots/board.png) | ![设置](docs/screenshots/settings.png) |
-| 看板：MCP 状态、小组阶段与下一步、各频道健康度、分诊后的台账 | 设置：Slack MCP 命令与连接检查、监听频道、摘要去向 |
-| ![需要重新登录](docs/screenshots/needs-login.png) | |
-| 登录过期：轮询暂停，看板直接说明原因，而不是显示一个空队列 | |
+| 看板：Slack 连接、计数、分诊后的台账，其后是摘要和频道；右侧是带快捷问题的雷达组长聊天卡片 | 设置：Basics（连接、频道、摘要、轮询间隔）和展开后的 Advanced |
+| ![需要重新登录](docs/screenshots/needs-login.png) | ![团队](docs/screenshots/team.png) |
+| 登录过期：顶部横幅直接说明，轮询暂停，而不是显示一个空队列 | 团队：小组有哪些成员、各自在做什么 |
 
 ## 许可
 

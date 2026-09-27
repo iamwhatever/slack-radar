@@ -1,6 +1,6 @@
 import { ChatEmbed, useAppApi } from '@kirocrew/app-sdk'
 import { Badge, Btn, Card, CardTitle, EmptyState, Input, PageHeader, StatCard, Toggle } from '@kirocrew/app-sdk/ui'
-import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react'
+import { useCallback, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from 'react'
 
 const BASE = '/api/apps/slack-radar'
 
@@ -70,15 +70,28 @@ type State = {
 
 type McpStatus = { status: string; command: string; detail?: string; missing_read_tools?: string[] }
 
-const MCP_LABEL: Record<string, string> = {
+// Plain words for the Slack connection. The technical state stays in the Details fold.
+const CONNECTION_LABEL: Record<string, string> = {
+  checking: 'checking…',
   connected: 'connected',
-  needs_login: 'needs re-login',
-  binary_not_found: 'binary not found',
-  incompatible: 'connected, but missing read tools',
-  error: 'error',
+  needs_login: 'sign in again',
+  binary_not_found: 'not installed',
+  incompatible: 'missing read access',
+  error: 'not working',
 }
 
+// The three quick questions the A mockup shows under the Radar Lead chat.
+const QUICK_QUESTIONS = ['What needs me today?', "Draft today's digest", 'Re-check resolved threads']
+
 type EventRow = { at: number; kind: string; text: string; key: string }
+
+type TabId = 'board' | 'team' | 'activity' | 'settings'
+const TABS: { id: TabId; label: string }[] = [
+  { id: 'board', label: 'Board' },
+  { id: 'team', label: 'Team' },
+  { id: 'activity', label: 'Activity' },
+  { id: 'settings', label: 'Settings' },
+]
 
 const fmtTime = (t?: number) => (t ? new Date(t * 1000).toLocaleString() : 'never')
 
@@ -89,6 +102,19 @@ function ago(t?: number): string {
   if (s < 3600) return `${Math.round(s / 60)} min ago`
   if (s < 86400) return `${Math.round(s / 3600)} h ago`
   return fmtTime(t)
+}
+
+function connectionStatus(mcp: McpStatus | null, sourceState: string): string {
+  return sourceState === 'needs_login' ? 'needs_login' : mcp?.status || 'checking'
+}
+
+function Details({ children, summary = 'Details' }: { children: ReactNode; summary?: string }) {
+  return (
+    <details className="text-xs text-muted" style={{ marginTop: 6 }}>
+      <summary style={{ cursor: 'pointer' }}>{summary}</summary>
+      <div style={{ marginTop: 4 }}>{children}</div>
+    </details>
+  )
 }
 
 // ── crew roster (static until members.json lands in Phase 2) ────────────────
@@ -111,7 +137,7 @@ const ROSTER: Member[] = [
     title: 'Radar Lead',
     initials: 'RL',
     layer: 'Lead',
-    kind: 'Resident session',
+    kind: 'Resident',
     agent: 'slack-radar-crew',
     duty: 'Triages every watched channel, sets category and priority, decides when a cluster needs investigating, judges possibly-resolved threads, writes the digest headline, and answers you here.',
   },
@@ -120,7 +146,7 @@ const ROSTER: Member[] = [
     title: 'Investigator',
     initials: 'IN',
     layer: 'Research',
-    kind: 'Leaf (spawned per cluster)',
+    kind: 'Joins on demand',
     agent: 'slack-radar-investigator',
     duty: 'Searches GitHub read-only for issues and pull requests that match a cluster of reports, and links them in the ledger.',
   },
@@ -129,9 +155,9 @@ const ROSTER: Member[] = [
     title: 'Thread Watcher',
     initials: 'TW',
     layer: 'Review',
-    kind: 'Leaf (planned)',
+    kind: 'Coming soon',
     agent: 'slack-radar-watcher',
-    duty: 'Will judge batches of possibly-resolved threads so the lead does not have to. Coming in Phase 2; the lead does this today.',
+    duty: 'Will judge batches of possibly-resolved threads so the lead does not have to. The lead does this today.',
     planned: true,
   },
   {
@@ -141,7 +167,7 @@ const ROSTER: Member[] = [
     layer: 'System',
     kind: 'Code, no model',
     agent: '',
-    duty: 'Reads new messages and thread replies through your Slack MCP, flags likely resolutions, and delivers the digest. Spends no credits.',
+    duty: 'Reads new messages and thread replies from Slack, flags likely resolutions, and delivers the digest. Spends no credits.',
     planned: false,
   },
 ]
@@ -157,8 +183,8 @@ function memberStatus(m: Member, s: State): MemberStatus {
     const n = s.investigations?.running || 0
     return n ? { label: `${n} running`, tone: 'aim' } : { label: 'standing by', tone: 'muted' }
   }
-  if (m.id === 'watcher') return { label: 'Phase 2', tone: 'muted' }
-  if (s.source_state === 'needs_login') return { label: 'needs re-login', tone: 'warn' }
+  if (m.id === 'watcher') return { label: 'Coming soon', tone: 'muted' }
+  if (s.source_state === 'needs_login') return { label: 'sign in again', tone: 'warn' }
   return { label: `polled ${ago(s.last_poll_at)}`, tone: 'muted' }
 }
 
@@ -215,9 +241,69 @@ function statusVariant(s: string): 'ok' | 'err' | 'warn' | 'aim' | 'muted' {
   return 'muted'
 }
 
+// ── header: tab strip and crew toggle ───────────────────────────────────────
+
+function TabStrip({ tab, setTab }: { tab: TabId; setTab: (t: TabId) => void }) {
+  return (
+    <div role="tablist" aria-label="Slack Radar sections" style={{ display: 'flex', gap: 4 }}>
+      {TABS.map((t) => {
+        const on = tab === t.id
+        return (
+          <button
+            key={t.id}
+            type="button"
+            role="tab"
+            aria-selected={on}
+            onClick={() => setTab(t.id)}
+            style={{
+              padding: '6px 12px',
+              borderRadius: 8,
+              border: 0,
+              cursor: 'pointer',
+              fontSize: 14,
+              background: on ? 'var(--bg-hover)' : 'transparent',
+              color: on ? 'var(--text-strong)' : 'var(--muted)',
+            }}
+          >
+            {t.label}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+function CrewSwitch({
+  state,
+  configured,
+  busy,
+  onStart,
+  onPause,
+}: {
+  state: State
+  configured: boolean
+  busy: string
+  onStart: () => void
+  onPause: () => void
+}) {
+  const live = state.crew.live
+  const disabled = !!busy || (!live && !configured)
+  return (
+    <div className="flex items-center gap-2" title={!live && !configured ? 'Add a channel in Settings first' : undefined}>
+      <span className="text-sm">Crew</span>
+      <Toggle
+        checked={live}
+        disabled={disabled}
+        onChange={(on) => (on ? onStart() : onPause())}
+        label={live ? 'Pause the crew' : 'Start the crew'}
+      />
+    </div>
+  )
+}
+
 export default function SlackRadar() {
   const api = useAppApi()
-  const [tab, setTab] = useState<'board' | 'team' | 'activity' | 'settings'>('board')
+  const [tab, setTab] = useState<TabId>('board')
   const [state, setState] = useState<State | null>(null)
   const [items, setItems] = useState<Item[]>([])
   const [events, setEvents] = useState<EventRow[]>([])
@@ -275,23 +361,40 @@ export default function SlackRadar() {
   }
 
   const configured = !!state && state.settings.channels.length > 0
+  const nChannels = state?.settings.channels.length || 0
+  const statusLine = !state
+    ? 'A small crew triaging your Slack channels'
+    : `${nChannels ? `Watching ${nChannels} channel${nChannels === 1 ? '' : 's'}` : 'No channels yet'} · ${state.crew.live ? 'running' : 'paused'}`
+  const conn = state ? connectionStatus(mcp, state.source_state) : 'checking'
+  const recheck = () => {
+    probe()
+    load()
+  }
 
   return (
     <>
       <PageHeader
         title="Slack Radar"
-        subtitle="A small crew triaging your Slack channels, with a local ledger and a daily digest"
+        subtitle={statusLine}
         actions={
-          <div className="flex gap-2">
-            {(['board', 'team', 'activity', 'settings'] as const).map((t) => (
-              <Btn key={t} primary={tab === t} onClick={() => setTab(t)} aria-pressed={tab === t}>
-                {t[0].toUpperCase() + t.slice(1)}
-              </Btn>
-            ))}
+          <div className="flex flex-wrap items-center gap-4">
+            <TabStrip tab={tab} setTab={setTab} />
+            {state && (
+              <CrewSwitch
+                state={state}
+                configured={configured}
+                busy={busy}
+                onStart={() => act('Start crew', () => api.post(`${BASE}/crew/start`, {}))}
+                onPause={() => act('Pause crew', () => api.post(`${BASE}/crew/pause`, {}))}
+              />
+            )}
           </div>
         }
       />
       <div className="px-6 pb-8 overflow-y-auto flex-1 min-h-0">
+        {state && conn === 'needs_login' && (
+          <SignInBanner mcp={mcp} sourceError={state.source_error} busy={busy} onCheck={recheck} />
+        )}
         {message && (
           <p role="status" className="text-sm text-muted mb-3">
             {message}
@@ -318,7 +421,6 @@ export default function SlackRadar() {
               })
             }
             onStart={() => act('Start crew', () => api.post(`${BASE}/crew/start`, {}))}
-            onPause={() => act('Pause crew', () => api.post(`${BASE}/crew/pause`, {}))}
             onDigest={() => act('Request digest', () => api.post(`${BASE}/digest/request`, {}))}
             events={events}
             onChanged={load}
@@ -335,6 +437,76 @@ export default function SlackRadar() {
   )
 }
 
+// ── Slack connection: banner and status line ────────────────────────────────
+
+function TechDetails({ mcp, sourceError }: { mcp: McpStatus | null; sourceError: string }) {
+  const lines = [
+    mcp?.status && `status: ${mcp.status}`,
+    mcp?.command && `command: ${mcp.command}`,
+    sourceError && `error: ${sourceError}`,
+    mcp?.detail && mcp.detail !== sourceError && `detail: ${mcp.detail}`,
+    mcp?.missing_read_tools?.length && `missing read tools: ${mcp.missing_read_tools.join(', ')}`,
+  ].filter(Boolean) as string[]
+  if (!lines.length) return null
+  return (
+    <Details>
+      <pre className="font-mono whitespace-pre-wrap" style={{ margin: 0 }}>{lines.join('\n')}</pre>
+    </Details>
+  )
+}
+
+function SignInBanner({ mcp, sourceError, busy, onCheck }: { mcp: McpStatus | null; sourceError: string; busy: string; onCheck: () => void }) {
+  return (
+    <div
+      role="alert"
+      className="mb-4"
+      style={{
+        border: '1px solid var(--warn)',
+        background: 'var(--warn-subtle)',
+        borderRadius: 10,
+        padding: '12px 16px',
+      }}
+    >
+      <div className="flex flex-wrap items-center gap-3">
+        <div style={{ flex: 1, minWidth: 240 }}>
+          <div style={{ fontWeight: 600, color: 'var(--text-strong)' }}>Slack connection: sign in again</div>
+          <div className="text-sm">
+            Your Slack sign-in expired, so no new messages are read. Sign in to Slack again on the computer running Kiro
+            Crew, then check again. Nothing is lost; reading picks up where it stopped.
+          </div>
+        </div>
+        <Btn primary onClick={onCheck} disabled={!!busy}>I signed in, check again</Btn>
+      </div>
+      <TechDetails mcp={mcp} sourceError={sourceError} />
+    </div>
+  )
+}
+
+function ConnectionLine({ mcp, state, withPoll }: { mcp: McpStatus | null; state: State; withPoll?: boolean }) {
+  const status = connectionStatus(mcp, state.source_state)
+  const ok = status === 'connected'
+  const dot = ok ? 'var(--ok)' : status === 'checking' ? 'var(--muted-strong)' : 'var(--warn)'
+  return (
+    <div className="mb-4">
+      <p role="status" className="text-sm text-muted flex flex-wrap items-center gap-2" style={{ margin: 0 }}>
+        <span aria-hidden style={{ width: 8, height: 8, borderRadius: '50%', background: dot, display: 'inline-block' }} />
+        <span>
+          Slack connection: <span style={{ color: ok ? 'var(--text)' : 'var(--warn)' }}>{CONNECTION_LABEL[status] || status}</span>
+        </span>
+        {withPoll && (
+          <span>
+            · last poll {ago(state.last_poll_at)}
+            {state.settings.channels.length > 0 && <> · watching {state.settings.channels.join(', ')}</>}
+          </span>
+        )}
+      </p>
+      {!ok && status !== 'needs_login' && <TechDetails mcp={mcp} sourceError={state.source_error} />}
+    </div>
+  )
+}
+
+// ── Board ───────────────────────────────────────────────────────────────────
+
 function Board(props: {
   state: State
   items: Item[]
@@ -348,7 +520,6 @@ function Board(props: {
   onPoll: () => void
   onInvestigate: (repo: string) => void
   onStart: () => void
-  onPause: () => void
   onDigest: () => void
   events: EventRow[]
   onChanged: () => void
@@ -369,54 +540,25 @@ function Board(props: {
   return (
     <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) 360px', gap: 20, alignItems: 'start' }}>
     <div style={{ minWidth: 0 }}>
-      <div className="grid gap-3.5 grid-cols-[repeat(auto-fit,minmax(150px,1fr))] mb-6">
+      <ConnectionLine mcp={props.mcp} state={state} withPoll />
+
+      <div className="grid gap-3 grid-cols-[repeat(auto-fit,minmax(150px,1fr))] mb-4">
         <StatCard label="Awaiting triage" value={state.counts.needs_triage} accent />
         <StatCard label="Possibly resolved" value={state.counts.possibly_resolved} />
         <StatCard label="Open p0 / p1" value={`${p.p0 || 0} / ${p.p1 || 0}`} />
         <StatCard label="Tracked items" value={state.counts.total} />
       </div>
 
-      <McpLine mcp={props.mcp} sourceState={state.source_state} sourceError={state.source_error} />
-
       {!props.configured && (
         <Card className="mb-4">
           <CardTitle>Finish setup</CardTitle>
           <p className="text-sm text-muted">
-            Add at least one channel ID in Settings. Slack Radar reads with your own Slack identity through your Slack
-            MCP, so there is no bot to invite.
+            Add at least one channel ID in Settings. Slack Radar reads Slack as you, so there is no bot to invite.
           </p>
         </Card>
       )}
 
-      <DigestCard state={state} busy={props.busy} onDigest={props.onDigest} />
-
       <Card className="mb-4">
-        <CardTitle>Channels</CardTitle>
-        {channelRows.length === 0 ? (
-          <p className="text-sm text-muted">No channels configured.</p>
-        ) : (
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="text-left text-muted">
-                <th scope="col">Channel</th>
-                <th scope="col">Last polled</th>
-                <th scope="col">Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {channelRows.map((c) => (
-                <tr key={c.cid}>
-                  <td className="font-mono">{c.cid}</td>
-                  <td>{fmtTime(c.last_polled_at)}</td>
-                  <td>{c.last_error ? <Badge variant="err">{c.last_error}</Badge> : <Badge variant="ok">ok</Badge>}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </Card>
-
-      <Card>
         <div className="flex flex-wrap items-center gap-2 mb-3">
           <CardTitle>Ledger</CardTitle>
           <label className="text-sm text-muted" htmlFor="sr-filter">Show</label>
@@ -449,41 +591,39 @@ function Board(props: {
         {items.length === 0 ? (
           <EmptyState icon={<span aria-hidden>📡</span>} title="Nothing here yet" subtitle="New messages appear after the next poll." />
         ) : (
-          <ul className="flex flex-col gap-2">
-            {items.map((it) => (
-              <li key={it.key} className="border rounded p-2 text-sm">
-                <div className="flex flex-wrap items-center gap-2">
-                  <input
-                    type="checkbox"
-                    aria-label={`Select ${it.key} for investigation`}
-                    checked={selected.has(it.key)}
-                    onChange={() => toggle(it.key)}
-                  />
-                  <Badge variant={statusVariant(it.status)}>{it.status}</Badge>
-                  {it.priority && <Badge variant={it.priority === 'p0' || it.priority === 'p1' ? 'err' : 'muted'}>{it.priority}</Badge>}
-                  {it.category && <Badge variant="muted">{it.category}</Badge>}
-                  {it.possibly_resolved && <Badge variant="warn">possibly resolved: {it.possibly_resolved.reason}</Badge>}
-                  <span className="text-muted font-mono">{it.channel}</span>
-                  <a className="underline" href={it.permalink} target="_blank" rel="noreferrer noopener">
-                    open in Slack
-                  </a>
-                  {it.reply_count > 0 && <span className="text-muted">{it.reply_count} replies</span>}
-                </div>
-                <p className="mt-1">{it.summary || it.text.slice(0, 280)}</p>
-                {it.links.length > 0 && (
-                  <p className="mt-1 text-muted">
-                    Linked:{' '}
-                    {it.links.map((u) => (
-                      <a key={u} className="underline mr-2" href={u} target="_blank" rel="noreferrer noopener">
-                        {u.replace('https://github.com/', '')}
-                      </a>
-                    ))}
-                  </p>
-                )}
-                {it.note && <p className="mt-1 text-xs text-muted">{it.note}</p>}
-              </li>
+          <ul className="flex flex-col">
+            {items.map((it, idx) => (
+              <LedgerRow key={it.key} it={it} first={idx === 0} checked={selected.has(it.key)} onToggle={() => toggle(it.key)} />
             ))}
           </ul>
+        )}
+      </Card>
+
+      <DigestCard state={state} busy={props.busy} onDigest={props.onDigest} />
+
+      <Card>
+        <CardTitle>Channels</CardTitle>
+        {channelRows.length === 0 ? (
+          <p className="text-sm text-muted">No channels configured.</p>
+        ) : (
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-muted">
+                <th scope="col">Channel</th>
+                <th scope="col">Last polled</th>
+                <th scope="col">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {channelRows.map((c) => (
+                <tr key={c.cid}>
+                  <td className="font-mono">{c.cid}</td>
+                  <td>{fmtTime(c.last_polled_at)}</td>
+                  <td>{c.last_error ? <Badge variant="err" title={c.last_error}>error</Badge> : <Badge variant="ok">ok</Badge>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         )}
       </Card>
     </div>
@@ -493,11 +633,69 @@ function Board(props: {
         configured={props.configured}
         busy={props.busy}
         onStart={props.onStart}
-        onPause={props.onPause}
         onPoll={props.onPoll}
         onChanged={props.onChanged}
       />
     </div>
+  )
+}
+
+// At most two tags per row: the status, then one severity (priority, else "possibly
+// resolved"). Everything else goes into the "+N" tag's hover title.
+function LedgerRow({ it, first, checked, onToggle }: { it: Item; first: boolean; checked: boolean; onToggle: () => void }) {
+  const second = it.priority
+    ? { label: it.priority, variant: (it.priority === 'p0' || it.priority === 'p1' ? 'err' : 'muted') as 'err' | 'muted' }
+    : it.possibly_resolved
+      ? { label: 'possibly resolved', variant: 'warn' as const }
+      : null
+  const extra = [
+    it.category && `category: ${it.category}`,
+    it.possibly_resolved && `possibly resolved: ${it.possibly_resolved.reason}`,
+  ].filter(Boolean) as string[]
+  return (
+    <li className="text-sm" style={{ padding: '10px 0', borderTop: first ? 0 : '1px solid var(--border)' }}>
+      <div className="flex items-start gap-2">
+        <input
+          type="checkbox"
+          aria-label={`Select ${it.key} for investigation`}
+          checked={checked}
+          onChange={onToggle}
+          style={{ marginTop: 4 }}
+        />
+        <div className="flex items-center gap-1" style={{ flex: 'none' }}>
+          <Badge variant={statusVariant(it.status)}>{it.status}</Badge>
+          {second && <Badge variant={second.variant}>{second.label}</Badge>}
+          {extra.length > 0 && (
+            <span className="text-xs text-muted" title={extra.join('\n')} aria-label={extra.join('; ')}>
+              +{extra.length}
+            </span>
+          )}
+        </div>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{ color: 'var(--text-strong)' }}>{it.summary || it.text.slice(0, 280)}</div>
+          <div className="text-xs text-muted" style={{ marginTop: 2 }}>
+            <span className="font-mono">{it.channel}</span>
+            {it.user && <> · {it.user}</>}
+            {it.reply_count > 0 && <> · {it.reply_count} replies</>}
+            {' · '}
+            <a className="underline" href={it.permalink} target="_blank" rel="noreferrer noopener">
+              open in Slack
+            </a>
+            {it.links.length > 0 && (
+              <>
+                {' · linked '}
+                {it.links.map((u) => (
+                  <a key={u} className="underline mr-2" href={u} target="_blank" rel="noreferrer noopener">
+                    {u.replace('https://github.com/', '')}
+                  </a>
+                ))}
+              </>
+            )}
+          </div>
+          {it.note && <p className="text-xs text-muted" style={{ margin: '2px 0 0' }}>{it.note}</p>}
+        </div>
+      </div>
+    </li>
   )
 }
 
@@ -551,7 +749,6 @@ function LeadCard(props: {
   configured: boolean
   busy: string
   onStart: () => void
-  onPause: () => void
   onPoll: () => void
   onChanged: () => void
 }) {
@@ -560,23 +757,28 @@ function LeadCard(props: {
   const lead = ROSTER[0]
   const slotKey = state.crew.slot_key
   const ready = state.crew.live && state.crew.session_open && state.crew.session_agent === state.crew.agent
+  const [asking, setAsking] = useState(false)
   const send = async (message: string) => {
     await api.post(`${BASE}/crew/message`, { message })
     props.onChanged()
   }
+  const ask = async (q: string) => {
+    setAsking(true)
+    try {
+      await send(q)
+    } finally {
+      setAsking(false)
+    }
+  }
   const crewEvents = props.events.filter((e) => e.kind === 'crew' || e.kind === 'digest').slice(0, 5)
+  const st = memberStatus(lead, state)
   return (
     <Card style={{ position: 'sticky', top: 0, padding: 0, display: 'flex', flexDirection: 'column', height: 'min(760px, calc(100vh - 140px))', overflow: 'hidden' }}>
       <div style={{ padding: '14px 16px', borderBottom: '1px solid var(--border)' }}>
         <div className="flex items-center gap-2">
           <span style={{ fontWeight: 600, color: 'var(--text-strong)' }}>{state.crew.name || lead.title}</span>
-          <Badge variant={memberStatus(lead, state).tone === 'muted' ? 'muted' : memberStatus(lead, state).tone === 'aim' ? 'aim' : 'ok'}>
-            {memberStatus(lead, state).label}
-          </Badge>
+          <Badge variant={st.tone === 'muted' ? 'muted' : st.tone === 'aim' ? 'aim' : 'ok'}>{st.label}</Badge>
           <div className="flex-1" />
-          {state.crew.live ? (
-            <Btn onClick={props.onPause} disabled={!!props.busy}>Pause</Btn>
-          ) : null}
           <Btn onClick={props.onPoll} disabled={!!props.busy || !props.configured}>Poll now</Btn>
         </div>
         <div className="text-xs text-muted" style={{ marginTop: 2 }}>
@@ -597,14 +799,16 @@ function LeadCard(props: {
           />
         ) : (
           <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
-            <p className="text-sm">
-              {state.crew.live
-                ? 'The Radar Lead session opens on its next turn. Start it now to talk here.'
-                : 'The Radar Lead is paused. Start the crew to triage your channels and talk to it here.'}
-            </p>
-            <Btn primary onClick={props.onStart} disabled={!!props.busy || !props.configured}>
-              {state.crew.live ? 'Open the session' : 'Start crew'}
-            </Btn>
+            {state.crew.live ? (
+              <>
+                <p className="text-sm">The Radar Lead session opens on its next turn. Open it now to talk here.</p>
+                <Btn primary onClick={props.onStart} disabled={!!props.busy || !props.configured}>Open the session</Btn>
+              </>
+            ) : (
+              <p className="text-sm">
+                The Radar Lead is paused. Turn on <b>Crew</b> at the top of the page to triage your channels and talk to it here.
+              </p>
+            )}
             {!props.configured && <p className="text-xs text-muted">Add a channel in Settings first.</p>}
             {crewEvents.length > 0 && (
               <ul className="text-xs text-muted flex flex-col gap-1" style={{ marginTop: 6 }}>
@@ -615,6 +819,28 @@ function LeadCard(props: {
             )}
           </div>
         )}
+      </div>
+      <div className="flex flex-wrap gap-2" style={{ padding: '10px 16px 12px', borderTop: '1px solid var(--border)' }}>
+        {QUICK_QUESTIONS.map((q) => (
+          <button
+            key={q}
+            type="button"
+            onClick={() => ask(q)}
+            disabled={!ready || asking}
+            style={{
+              fontSize: 12,
+              border: '1px solid var(--border-strong)',
+              borderRadius: 999,
+              padding: '4px 10px',
+              background: 'transparent',
+              color: 'var(--text)',
+              cursor: ready && !asking ? 'pointer' : 'not-allowed',
+              opacity: ready ? 1 : 0.5,
+            }}
+          >
+            {q}
+          </button>
+        ))}
       </div>
     </Card>
   )
@@ -632,6 +858,7 @@ function TeamTab({ state }: { state: State }) {
       <ul className="flex flex-col">
         {ROSTER.map((m) => {
           const st = memberStatus(m, state)
+          const agentId = m.id === 'lead' ? state.crew.agent : m.agent
           return (
             <li
               key={m.id}
@@ -644,13 +871,20 @@ function TeamTab({ state }: { state: State }) {
                   <span style={{ fontWeight: 600, color: 'var(--text-strong)' }}>{m.id === 'lead' ? state.crew.name || m.title : m.title}</span>
                   <Badge variant="muted">{m.layer}</Badge>
                   <span className="text-xs text-muted">{m.kind}</span>
-                  {m.agent && <span className="text-xs text-muted font-mono">{m.id === 'lead' ? state.crew.agent : m.agent}</span>}
                 </div>
                 <p className="text-sm" style={{ margin: '4px 0 0' }}>{m.duty}</p>
                 {m.id === 'investigator' && (state.investigations?.items || 0) > 0 && (
                   <p className="text-xs text-muted" style={{ margin: '2px 0 0' }}>
                     {state.investigations?.items} item(s) under investigation
                   </p>
+                )}
+                {agentId && (
+                  <Details>
+                    <span className="font-mono">
+                      agent: {agentId}
+                      {m.id === 'lead' && state.crew.slot_key ? ` · session: ${state.crew.slot_key}` : ''}
+                    </span>
+                  </Details>
                 )}
               </div>
               <span className="text-xs" style={{ color: TONE_VAR[st.tone], whiteSpace: 'nowrap' }}>{st.label}</span>
@@ -659,22 +893,6 @@ function TeamTab({ state }: { state: State }) {
         })}
       </ul>
     </Card>
-  )
-}
-
-function McpLine({ mcp, sourceState, sourceError }: { mcp: McpStatus | null; sourceState: string; sourceError: string }) {
-  const status = sourceState === 'needs_login' ? 'needs_login' : mcp?.status || 'checking'
-  const variant = status === 'connected' ? 'ok' : status === 'checking' ? 'muted' : 'err'
-  return (
-    <p role="status" className="text-sm mb-4 flex flex-wrap items-center gap-2">
-      <span>Slack MCP:</span>
-      <Badge variant={variant}>{MCP_LABEL[status] || status}</Badge>
-      {mcp?.command && <span className="font-mono text-muted">{mcp.command}</span>}
-      {status === 'needs_login' && (
-        <span className="text-muted">Re-authenticate your Slack MCP (e.g. refresh its browser/Midway login). Polling resumes on the next cycle.</span>
-      )}
-      {status !== 'connected' && (sourceError || mcp?.detail) && <span className="text-muted">{sourceError || mcp?.detail}</span>}
-    </p>
   )
 }
 
@@ -696,6 +914,8 @@ function Activity({ events }: { events: EventRow[] }) {
     </Card>
   )
 }
+
+// ── Settings: Basics first, Advanced folded ─────────────────────────────────
 
 function SettingsTab({
   state,
@@ -743,29 +963,18 @@ function SettingsTab({
         </Card>
       )}
       <Card className="mb-4">
-        <CardTitle>Slack MCP</CardTitle>
-        <McpLine mcp={mcp} sourceState={state.source_state} sourceError={state.source_error} />
-        <div className="grid gap-3 grid-cols-[repeat(auto-fit,minmax(220px,1fr))]">
-          <label className="text-sm">
-            MCP server command (a single executable on PATH)
-            <Input value={command} onChange={(e) => setCommand(e.target.value)} placeholder="ai-community-slack-mcp" />
-          </label>
-          <label className="text-sm">
-            Workspace URL (for permalinks, optional)
-            <Input value={workspaceUrl} onChange={(e) => setWorkspaceUrl(e.target.value)} placeholder="https://yourteam.slack.com" />
-          </label>
+        <CardTitle>Basics</CardTitle>
+        <div className="flex flex-wrap items-center gap-3">
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <ConnectionLine mcp={mcp} state={state} />
+          </div>
+          <Btn disabled={!!busy} onClick={onProbe}>Check connection</Btn>
         </div>
-        <p className="text-xs text-muted mt-2">
-          Slack is read with your own identity through this MCP server: read-only tools only, no bot, no invite. The
-          one write is the optional digest DM to yourself.
+        <p className="text-xs text-muted" style={{ margin: '0 0 12px' }}>
+          Slack is read as you, read-only: no bot, no invite. The one write is the optional digest DM to yourself.
         </p>
-        <Btn className="mt-2" disabled={!!busy} onClick={onProbe}>Check connection</Btn>
-      </Card>
-
-      <Card className="mb-4">
-        <CardTitle>Channels and digest</CardTitle>
         <label className="block text-sm mb-1" htmlFor="sr-channels">
-          Channel IDs to watch (one per line; e.g. C0123ABCD). Any channel you can read works.
+          Channels to watch (one channel ID per line, e.g. C0123ABCD). Any channel you can read works.
         </label>
         <textarea
           id="sr-channels"
@@ -783,20 +992,18 @@ function SettingsTab({
               onChange={(e) => setDestination(e.target.value as 'self_dm' | 'dashboard')}
             >
               <option value="dashboard">Dashboard notification only</option>
-              <option value="self_dm">DM to myself (self_dm)</option>
+              <option value="self_dm">DM to myself in Slack</option>
             </select>
           </label>
-          <label className="text-sm">
-            Your Slack login (for the self-DM)
-            <Input value={login} onChange={(e) => setLogin(e.target.value)} placeholder="jdoe" />
-          </label>
+          {destination === 'self_dm' && (
+            <label className="text-sm">
+              Your Slack login (for the DM)
+              <Input value={login} onChange={(e) => setLogin(e.target.value)} placeholder="jdoe" />
+            </label>
+          )}
           <label className="text-sm">
             Poll interval (seconds, 60–3600)
             <Input type="number" min={60} max={3600} value={pollSecs} onChange={(e) => setPollSecs(e.target.value)} />
-          </label>
-          <label className="text-sm">
-            First-poll backfill (hours, 0–168)
-            <Input type="number" min={0} max={168} value={backfill} onChange={(e) => setBackfill(e.target.value)} />
           </label>
         </div>
         <Btn primary className="mt-3" disabled={!!busy} onClick={saveSettings}>
@@ -805,36 +1012,63 @@ function SettingsTab({
       </Card>
 
       <Card>
-        <CardTitle>Crew</CardTitle>
-        <div className="grid gap-3 grid-cols-[repeat(auto-fit,minmax(220px,1fr))]">
-          <label className="text-sm">
-            Agent
-            <Input value={agent} onChange={(e) => setAgent(e.target.value)} placeholder="slack-radar-crew" />
-            <span className="block text-xs text-muted mt-1">
-              Default: the shipped slack-radar-crew agent, which already carries the ledger tools. Your own agents are
-              never modified.
-            </span>
-          </label>
-          <label className="text-sm">
-            Model (empty = agent default)
-            <Input value={model} onChange={(e) => setModel(e.target.value)} />
-          </label>
-        </div>
-        <div className="mt-3">
-          <Toggle checked={unattended} onChange={setUnattended} label="Auto-approve the crew's tool calls (unattended)" />
-          <p className="text-xs text-muted mt-1">
-            The crew reads messages anyone in your channels can write. With auto-approve on, a crafted message can steer
-            an unreviewed tool call. Leave it off unless every watched channel is trusted.
-          </p>
-        </div>
-        <Btn
-          primary
-          className="mt-3"
-          disabled={!!busy}
-          onClick={() => act('Save crew', () => api.put(`${BASE}/crew`, { agent, model, unattended }))}
-        >
-          Save crew
-        </Btn>
+        <details>
+          <summary style={{ cursor: 'pointer', fontWeight: 600, color: 'var(--text-strong)' }}>Advanced</summary>
+          <div className="grid gap-3 grid-cols-[repeat(auto-fit,minmax(220px,1fr))] mt-3">
+            <label className="text-sm">
+              MCP server command (a single executable on PATH)
+              <Input value={command} onChange={(e) => setCommand(e.target.value)} placeholder="ai-community-slack-mcp" />
+            </label>
+            <label className="text-sm">
+              Workspace URL (for permalinks, optional)
+              <Input value={workspaceUrl} onChange={(e) => setWorkspaceUrl(e.target.value)} placeholder="https://yourteam.slack.com" />
+            </label>
+            <label className="text-sm">
+              First-poll backfill (hours, 0–168)
+              <Input type="number" min={0} max={168} value={backfill} onChange={(e) => setBackfill(e.target.value)} />
+            </label>
+          </div>
+          <Btn className="mt-3" disabled={!!busy} onClick={saveSettings}>
+            Save settings
+          </Btn>
+
+          <div style={{ borderTop: '1px solid var(--border)', marginTop: 16, paddingTop: 12 }}>
+            <div className="text-sm" style={{ fontWeight: 600, marginBottom: 8 }}>Crew</div>
+            <div className="grid gap-3 grid-cols-[repeat(auto-fit,minmax(220px,1fr))]">
+              <label className="text-sm">
+                Agent
+                <Input value={agent} onChange={(e) => setAgent(e.target.value)} placeholder="slack-radar-crew" />
+                <span className="block text-xs text-muted mt-1">
+                  Default: the shipped slack-radar-crew agent. Your own agents are never modified.
+                </span>
+              </label>
+              <label className="text-sm">
+                Model (empty = agent default)
+                <Input value={model} onChange={(e) => setModel(e.target.value)} />
+              </label>
+            </div>
+            <div className="mt-3 flex items-center gap-2">
+              <Toggle
+                checked={unattended}
+                onChange={setUnattended}
+                label="Unattended mode (auto-approve investigator commands)"
+                describedBy="sr-unattended-risk"
+              />
+              <span className="text-sm">Unattended mode (auto-approve investigator commands)</span>
+            </div>
+            <p id="sr-unattended-risk" className="text-xs text-muted mt-1">
+              Risk: anyone in a watched channel can write text the crew reads, so a crafted message could steer a command nobody reviews.
+            </p>
+            <Btn
+              primary
+              className="mt-3"
+              disabled={!!busy}
+              onClick={() => act('Save crew', () => api.put(`${BASE}/crew`, { agent, model, unattended }))}
+            >
+              Save crew
+            </Btn>
+          </div>
+        </details>
       </Card>
     </>
   )
