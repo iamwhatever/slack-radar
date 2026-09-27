@@ -1,0 +1,1 @@
+Edit an agent's prompt in `agents/prompts/<name>.md`, never in the JSON, then run `python3 scripts/build_agents.py` to copy it into `agents/<name>.json`; `tests/test_agents.py` fails when the two differ.

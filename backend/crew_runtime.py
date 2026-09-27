@@ -42,7 +42,7 @@ from . import store
 logger = logging.getLogger("kirocrew.app.slack-radar")
 
 APP_NAME = "slack-radar"
-BRIEF_SENTINEL = "<!-- slack-radar-crew-brief v1 -->"
+BRIEF_SENTINEL = "<!-- slack-radar-crew-brief v2 -->"
 _BRIEF_PATH = Path(__file__).with_name("crew_brief.md")
 _brief_cache: str | None = None
 

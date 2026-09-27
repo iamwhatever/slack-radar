@@ -20,6 +20,7 @@ The LLM-facing `spawn_run` tool cannot ask for `approval_mode`: the internal spa
 
 - The Radar Lead's tools are all in `allowedTools`, so its session never prompts and the grant adds nothing there.
 - An Investigator the crew spawns prompts for the spawn and for each command, with or without unattended mode.
+- A Thread Watcher the crew spawns prompts for the spawn only: its one tool, the ledger, is in its own `allowedTools`, so its session never asks again.
 - An Investigator started from the board runs fully auto-approved, and only while unattended mode is on.
 
 ## What would make the grant reach the Investigator
