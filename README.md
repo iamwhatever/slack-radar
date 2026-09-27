@@ -171,6 +171,10 @@ Board.
 | Thread Watcher | Review · leaf | **Coming soon**, not shipped yet. Will judge batches of possibly-resolved threads. Today the Radar Lead does this itself |
 | Poller | System · code, no model | Runs inside the gateway. Cursor reads, thread re-checks, login-expiry detection, and digest delivery. Wakes the lead only when something moved |
 
+### Desk
+
+The crew's rules and interfaces live in `desk/`. [desk/CHARTER.md](desk/CHARTER.md) is the charter: the roster, who dispatches whom (only the Radar Lead spawns), what may never be sent to Slack, public vs local data, unattended scope and stop conditions. [desk/CONTRACT.md](desk/CONTRACT.md) is the machine contract: fixed agent names, the ledger format, the MCP tools and the HTTP routes. [desk/members.json](desk/members.json) is the roster as data, and `GET /api/apps/slack-radar/org` returns it with each member's live status.
+
 ## Configuration
 
 Settings live in the gateway's encrypted vault (entry `slack-radar.settings`) and
@@ -295,10 +299,12 @@ slack-radar/
 │   ├── store.py                ledger (stdlib only, shared with the MCP server)
 │   ├── mcp_server.py           crew tools: slack_radar_read/record/digest/request_digest
 │   ├── crew_brief.md           the crew's standing instructions
-│   └── crew_ledger_spec.md     every ledger field, who owns it, public vs local
+│   ├── org.py                  desk/members.json loader and the GET /org view
+│   └── crew_ledger_spec.md     pointer to desk/CONTRACT.md
+├── desk/                       CHARTER.md, CONTRACT.md (ledger fields, tools, routes), members.json
 ├── docs/screenshots/           screenshots and the fake-data capture harness
 ├── ui/                         React page (Board / Activity / Settings)
-└── tests/test_slack_radar.py
+└── tests/                      test_slack_radar.py, test_org.py
 ```
 
 ## Screenshots
@@ -415,6 +421,10 @@ kirocrew app enable slack-radar
 | 线程观察员（即将推出） | 复核 · 临时 | **即将推出，目前尚未提供。** 届时负责成批判断“可能已解决”的线程；现阶段由雷达组长自己判断 |
 | 轮询器 | 系统 · 代码，不用模型 | 运行在网关内。负责游标读取、线程复查、登录失效检测和摘要投递；只有真有变化时才唤醒组长 |
 
+### Desk（工作台）
+
+小组的规则和接口放在 `desk/` 里。[desk/CHARTER.md](desk/CHARTER.md) 是章程：成员、谁派谁（只有雷达组长会派生）、绝不能发到 Slack 的东西、公开与本地数据、无人值守的范围和停止条件。[desk/CONTRACT.md](desk/CONTRACT.md) 是机器契约：固定的 agent 名字、台账格式、MCP 工具和 HTTP 接口。[desk/members.json](desk/members.json) 是成员名单的数据形式，`GET /api/apps/slack-radar/org` 返回它，并附上每个成员的实时状态。
+
 ## 配置
 
 设置保存在网关的加密保险库里（条目 `slack-radar.settings`），只能通过仅限所有者的设置页写入。
@@ -513,10 +523,12 @@ slack-radar/
 │   ├── store.py                台账（仅用标准库，与 MCP 服务器共用）
 │   ├── mcp_server.py           小组工具：slack_radar_read/record/digest/request_digest
 │   ├── crew_brief.md           小组的常驻指令
-│   └── crew_ledger_spec.md     台账每个字段的归属、公开与否
+│   ├── org.py                  desk/members.json 的加载和 GET /org 视图
+│   └── crew_ledger_spec.md     指向 desk/CONTRACT.md
+├── desk/                       CHARTER.md、CONTRACT.md（台账字段、工具、接口）、members.json
 ├── docs/screenshots/           截图和假数据截图工具
 ├── ui/                         React 页面（Board / Activity / Settings）
-└── tests/test_slack_radar.py
+└── tests/                      test_slack_radar.py, test_org.py
 ```
 
 ## 截图

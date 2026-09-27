@@ -1,0 +1,50 @@
+[
+  {
+    "id": "lead",
+    "kind": "agent",
+    "agent": "slack-radar-crew",
+    "display": {"en": "Radar Lead", "zh": "雷达组长"},
+    "role": {
+      "en": "Conductor. Triages every watched channel, decides clusters, judges possibly-resolved threads, writes the digest headline, spawns investigators, and answers the owner.",
+      "zh": "指挥者。给所有被关注频道的消息分诊，决定聚簇，判断“可能已解决”的线程，写摘要标题，派出调查员，并回答所有者。"
+    },
+    "residency": "resident",
+    "tools": "ledger+spawn"
+  },
+  {
+    "id": "investigator",
+    "kind": "agent",
+    "agent": "slack-radar-investigator",
+    "display": {"en": "Investigator", "zh": "调查员"},
+    "role": {
+      "en": "Read-only leaf. Searches GitHub for issues and pull requests matching a cluster and records the links on the items. Never spawns, never writes to GitHub or Slack.",
+      "zh": "只读的叶子成员。在 GitHub 上搜索与一簇消息匹配的 issue 和 PR，把链接记到条目上。从不派生，从不写 GitHub 或 Slack。"
+    },
+    "residency": "on-demand",
+    "tools": "ledger+shell"
+  },
+  {
+    "id": "watcher",
+    "kind": "agent",
+    "agent": "slack-radar-watcher",
+    "display": {"en": "Thread Watcher", "zh": "线程观察员"},
+    "role": {
+      "en": "Read-only leaf, not shipped yet. Judges only whether a possibly-resolved thread is resolved. No shell, never spawns.",
+      "zh": "只读的叶子成员，尚未提供。只判断一个“可能已解决”的线程是否真的已解决。没有 shell，从不派生。"
+    },
+    "residency": "planned",
+    "tools": "ledger"
+  },
+  {
+    "id": "poller",
+    "kind": "code",
+    "agent": null,
+    "display": {"en": "Poller", "zh": "轮询器"},
+    "role": {
+      "en": "Gateway code, no model. Reads new messages and thread replies with the five Slack read tools, flags likely resolutions, detects an expired login, delivers the digest, and wakes the lead when something moved.",
+      "zh": "网关里的代码，不用模型。用五个 Slack 只读工具读取新消息和线程回复，标记可能的解决，发现登录过期，投递摘要，有变化时唤醒组长。"
+    },
+    "residency": "resident",
+    "tools": "slack-read"
+  }
+]

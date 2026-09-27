@@ -14,7 +14,7 @@ directory, then ``os.replace``), so a reader never sees a torn document.
 Layout under the app data dir (``~/.kiro/crew/apps/slack-radar/data/``):
 
 * ``ledger.json``   — channels (cursor state), items (triage entries), crew memory,
-  digest state. See ``crew_ledger_spec.md`` for every field.
+  digest state. See ``desk/CONTRACT.md`` for every field.
 * ``ledger.json.lock`` — sidecar lock (the ledger itself is replaced by rename, so it
   cannot be the lock).
 * ``events.jsonl``  — append-only work log, capped by :data:`MAX_EVENTS_BYTES`.

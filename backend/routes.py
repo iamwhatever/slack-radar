@@ -27,7 +27,7 @@ from typing import Any, Awaitable, Callable
 
 from aiohttp import web
 
-from . import crew_runtime, settings as settings_mod, slack_mcp, store, watch
+from . import crew_runtime, org, settings as settings_mod, slack_mcp, store, watch
 
 logger = logging.getLogger("kirocrew.app.slack-radar")
 
@@ -107,21 +107,12 @@ async def _handle_state(request: web.Request, ctx: Any) -> web.Response:
     except store.StoreError as exc:
         return _err(500, "ledger_corrupt", str(exc))
     crew = await asyncio.to_thread(store.read_crew, data_dir)
-    state = _state(request)
-    slot = state.get_slot(store.slot_key(crew)) if state is not None and hasattr(state, "get_slot") else None
     return web.json_response(
         {
             "ok": True,
             "vault_available": vault_ok,
             "settings": settings,
-            "crew": {
-                **crew,
-                "live": crew_runtime.is_live(crew),
-                "session_open": slot is not None,
-                "session_agent": str(getattr(slot, "agent", "") or "") if slot is not None else "",
-                "running": bool(getattr(slot, "running", False)),
-                "trusted": bool(getattr(slot, "_trust_scope", "")),
-            },
+            "crew": _crew_view(request, crew),
             "crew_memory": ledger.get("crew_memory"),
             "investigations": _investigations(ledger, ctx),
             "counts": store.counts(ledger),
@@ -133,6 +124,41 @@ async def _handle_state(request: web.Request, ctx: Any) -> web.Response:
             "digest": ledger.get("digest"),
         }
     )
+
+
+def _crew_view(request: web.Request, crew: dict[str, Any]) -> dict[str, Any]:
+    """The crew record plus what the host says about its session slot."""
+    state = _state(request)
+    slot = state.get_slot(store.slot_key(crew)) if state is not None and hasattr(state, "get_slot") else None
+    return {
+        **crew,
+        "live": crew_runtime.is_live(crew),
+        "session_open": slot is not None,
+        "session_agent": str(getattr(slot, "agent", "") or "") if slot is not None else "",
+        "running": bool(getattr(slot, "running", False)),
+        "trusted": bool(getattr(slot, "_trust_scope", "")),
+    }
+
+
+async def _handle_org(request: web.Request, ctx: Any) -> web.Response:
+    """``desk/members.json`` with a live block per member (see ``org.org_view``)."""
+    data_dir = _data_dir(ctx)
+    try:
+        members = await asyncio.to_thread(org.load_members)
+    except org.MembersError as exc:
+        return _err(500, "members_invalid", str(exc)[:300])
+    try:
+        ledger = await asyncio.to_thread(store.read_ledger, data_dir)
+    except store.StoreError as exc:
+        return _err(500, "ledger_corrupt", str(exc))
+    crew = await asyncio.to_thread(store.read_crew, data_dir)
+    view = org.org_view(
+        members,
+        crew=_crew_view(request, crew),
+        investigations=_investigations(ledger, ctx),
+        ledger=ledger,
+    )
+    return web.json_response({"ok": True, "members": view})
 
 
 def _investigations(ledger: dict[str, Any], ctx: Any) -> dict[str, int]:
@@ -364,6 +390,7 @@ def register_routes(ctx: Any) -> list[Any]:
 
     return [
         r("GET", "/state", _handle_state),
+        r("GET", "/org", _handle_org),
         r("GET", "/items", _handle_items),
         r("GET", "/events", _handle_events),
         r("PUT", "/settings", _owner_only(_handle_put_settings)),
