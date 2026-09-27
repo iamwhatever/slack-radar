@@ -174,6 +174,19 @@ def is_live(crew: dict[str, Any]) -> bool:
     return bool(crew.get("enabled")) and not crew.get("paused_reason")
 
 
+def owner_investigation_allowed(crew: dict[str, Any]) -> bool:
+    """Whether the board's Investigate button may start an investigator.
+
+    That button spawns through the app spawn SDK, and the host runs every SDK
+    spawn with ``approval_mode="auto"``: each of the investigator's shell commands
+    is approved without a prompt, for the whole run. The scoped grant plays no
+    part in it. So the button is allowed only while the owner has opted in to
+    unattended work; otherwise the investigator would run an unprompted shell over
+    Slack text with the owner never having said the channels are trusted.
+    """
+    return crew.get("unattended") is True
+
+
 def _safety_override() -> Any:
     try:
         from kiro_crew.safety_override import safety_override

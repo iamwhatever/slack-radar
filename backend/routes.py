@@ -308,6 +308,15 @@ async def _handle_investigate(request: web.Request, ctx: Any) -> web.Response:
     rows = [ledger["items"][k] for k in keys if k in ledger["items"]]
     if not rows:
         return _err(404, "unknown_items", "none of those items are in the ledger")
+    crew = await asyncio.to_thread(store.read_crew, _data_dir(ctx))
+    if not crew_runtime.owner_investigation_allowed(crew):
+        return _err(
+            409,
+            "unattended_required",
+            "Investigate runs the investigator with every shell command auto-approved. "
+            "Turn on unattended mode on the Crew card first, or let the crew spawn the "
+            "investigator, which asks you to approve each command.",
+        )
     task = _investigation_task(rows, repo)
     try:
         spawn_id = await ctx.spawn.run(task, INVESTIGATOR_AGENT, silent=True)

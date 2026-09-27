@@ -214,12 +214,26 @@ Disabling the app stops the loop and revokes the crew's auto-approve grant.
   called only from the digest path. No replies, reactions, drafts or channel
   posts.
 - **No shell on the lead.** The Radar Lead's agent has no `execute_bash` and no
-  `fs_write`; it auto-approves only the ledger tools and `spawn_run` /
-  `spawn_status` / `spawn_list`. The Investigator has a shell but auto-approves
-  nothing, so each command prompts unless you turn on unattended mode.
-- **Unattended mode is off by default.** When on, it is a scoped, 15-minute,
-  SEL-audited grant renewed by each poll while the crew is live, never the
-  interactive trust flag. Turn it on only when every watched channel is trusted.
+  `fs_write`. Its only tools are the ledger tools, `spawn_run` / `spawn_status` /
+  `spawn_list`, `fs_read`, `grep`, `glob` and `thinking`, and all of them are
+  pre-approved, so the lead never prompts and never gains a tool, in either mode.
+- **The Investigator has a shell, and the crew's investigator always asks.** When
+  the Radar Lead spawns it with `spawn_run`, the host asks you to approve the spawn
+  and then each command. Unattended mode does not change that: the host passes a
+  child only the parent's interactive trust flag, never a scoped grant. An
+  unanswered prompt is denied after two hours.
+- **The board's Investigate button needs unattended mode.** It spawns through the
+  app spawn SDK, which the host runs with every command auto-approved for the whole
+  run. So the button is refused (`unattended_required`) while unattended mode is
+  off.
+- **Unattended mode is off by default.** When on, the crew's session holds a
+  scoped, 15-minute, SEL-audited grant renewed by each poll while the crew is
+  live, never the interactive trust flag, and re-checked on every approval, so a
+  grant that lapses mid-turn makes the next prompt ask again. Because the lead's
+  tools are already pre-approved, the grant changes nothing for crew turns today;
+  what the toggle does in practice is let the Investigate button run. Turn it on
+  only when every watched channel is trusted. See
+  [docs/unattended-mode.md](docs/unattended-mode.md) for the approval chain.
 - **Prompt injection.** The crew reads text anyone in your channels can write.
   The ledger tools and the investigation prompt label message text as untrusted
   data, and both agents are told never to follow instructions in it. That is a mitigation,
@@ -437,11 +451,20 @@ kirocrew app enable slack-radar
   `batch_get_conversation_history`、`batch_get_thread_replies`、
   `batch_get_channel_info`、`batch_get_user_info`），其他工具名在到达进程前就会被拒绝。
   唯一的写操作 `self_dm` 是单独的方法，只在投递摘要时调用。不回复、不加表情、不存草稿、不在频道发言。
-- **组长没有 shell。** 雷达组长的 agent 没有 `execute_bash` 和 `fs_write`，只自动批准台账工具和
-  `spawn_run` / `spawn_status` / `spawn_list`。调查员有 shell，但什么都不自动批准，
-  除非你开启无人值守模式，否则每条命令都要确认。
-- **无人值守模式默认关闭。** 开启后，它是一个限定范围、15 分钟有效、记入 SEL 审计的授权，
-  在小组运行期间由每次轮询续期，绝不是交互式的信任开关。只有当所有监听频道都可信时才建议开启。
+- **组长没有 shell。** 雷达组长的 agent 没有 `execute_bash` 和 `fs_write`。它只有台账工具、
+  `spawn_run` / `spawn_status` / `spawn_list`、`fs_read`、`grep`、`glob` 和 `thinking`，
+  而且都已预先批准，所以无论哪种模式，组长都不会弹确认，也不会多出别的工具。
+- **调查员有 shell，小组派出的调查员总是要确认。** 雷达组长用 `spawn_run` 派出调查员时，
+  网关会先请你批准这次派出，再逐条批准它的命令。开启无人值守模式也不会改变这一点：
+  网关只把父会话的交互式信任开关传给子 agent，从不传限定范围的授权。无人应答的确认两小时后自动拒绝。
+- **看板上的 Investigate 按钮需要无人值守模式。** 它通过应用的 spawn SDK 派出调查员，
+  网关对这类派出在整个运行期间自动批准每条命令。所以无人值守模式关闭时，这个按钮会被拒绝
+  （`unattended_required`）。
+- **无人值守模式默认关闭。** 开启后，小组会话持有一个限定范围、15 分钟有效、记入 SEL 审计的授权，
+  在小组运行期间由每次轮询续期，绝不是交互式的信任开关；每次审批都会重新检查它，所以授权在
+  一轮中途过期后，下一次确认会重新询问你。由于组长的工具都已预先批准，这个授权目前对小组的回合
+  没有任何影响；这个开关实际的作用是允许 Investigate 按钮运行。只有当所有监听频道都可信时才建议开启。
+  审批链的细节见 [docs/unattended-mode.md](docs/unattended-mode.md)。
 - **提示注入。** 小组读的是频道里任何人都能写的文字。台账工具和调查提示都把消息正文标为不可信数据，
   两个 agent 也都被要求绝不执行其中的指令。这只是缓解而非保证，所以组长不给 shell，自动批准也需要主动开启。
 - **不存令牌。** 不保存任何 Slack 凭据，Slack MCP 用的是你自己的登录会话。
