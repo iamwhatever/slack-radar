@@ -4,6 +4,7 @@
  * a gateway, a ledger or Slack. Scenario comes from the query string:
  *   ?source=ok | needs_login
  */
+const TODAY_EMPTY = new URLSearchParams(location.search).get('today') === 'empty'
 const SCENARIO = new URLSearchParams(location.search).get('source') === 'needs_login' ? 'needs_login' : 'ok'
 
 const T0 = 1758700800 // 2025-09-24T08:00:00Z, fixed so frames are reproducible
@@ -107,7 +108,9 @@ const STATE = {
     name: 'Radar Lead', slot_key: 'crew-slack-radar', session_agent: 'slack-radar-crew',
     enabled: true, paused_reason: '', unattended: false, agent: 'slack-radar-crew', model: '',
     live: true, session_open: true, running: false, trusted: false,
-    today: 'Two p1 bugs need an owner; the CSV export reports look like one problem.',
+    today: TODAY_EMPTY
+      ? { text: '', at: 0 }
+      : { text: 'Two p1 bugs need an owner; the CSV export reports look like one problem.', at: T0 + 5400 },
   },
   investigations: { items: 1, running: 1 },
   crew_memory: {

@@ -52,6 +52,8 @@ type Settings = {
   recheck_max_per_cycle: number
 }
 
+type Today = { text: string; at: number }
+
 type State = {
   vault_available: boolean
   source_state: string
@@ -70,7 +72,7 @@ type State = {
     session_open: boolean
     running: boolean
     trusted: boolean
-    today?: string
+    today?: Today | null
   }
   crew_memory: { phase: string; next: string; updated_at: number }
   investigations?: { items: number; running: number }
@@ -100,7 +102,7 @@ const CONNECTION_LABEL: Record<string, string> = {
 }
 
 // The three quick questions offered beside "Ask the lead" and under the open chat.
-const QUICK_QUESTIONS = ['What needs me today?', "Draft today's digest", 'Re-check resolved threads']
+const QUICK_QUESTIONS = ['What needs me today?', "Draft today's digest", 'Which threads look resolved?']
 
 type EventRow = { at: number; kind: string; text: string; key: string }
 
@@ -174,10 +176,9 @@ const ROSTER: Member[] = [
     title: 'Thread Watcher',
     initials: 'TW',
     layer: 'Review',
-    kind: 'Coming soon',
+    kind: 'Joins on demand',
     agent: 'slack-radar-watcher',
-    duty: 'Will judge batches of possibly-resolved threads so the lead does not have to. The lead does this today.',
-    planned: true,
+    duty: 'Judges a batch of possibly-resolved threads when the lead asks, and records resolved or not in the ledger. No shell.',
   },
   {
     id: 'poller',
@@ -202,7 +203,7 @@ function memberStatus(m: Member, s: State): MemberStatus {
     const n = s.investigations?.running || 0
     return n ? { label: `${n} running`, tone: 'aim' } : { label: 'standing by', tone: 'muted' }
   }
-  if (m.id === 'watcher') return { label: 'Coming soon', tone: 'muted' }
+  if (m.id === 'watcher') return { label: 'standing by', tone: 'muted' }
   if (s.source_state === 'needs_login') return { label: 'sign in again', tone: 'warn' }
   return { label: `polled ${ago(s.last_poll_at)}`, tone: 'muted' }
 }
@@ -316,6 +317,9 @@ function CrewSwitch({
         onChange={(on) => (on ? onStart() : onPause())}
         label={live ? 'Pause the crew' : 'Start the crew'}
       />
+      <span className="text-xs text-muted" title="Whether the crew's commands run without asking you">
+        Unattended: {state.crew.trusted ? 'on' : 'off'}
+      </span>
     </div>
   )
 }
@@ -819,7 +823,7 @@ function NeedsCard({
   onWhy,
 }: {
   needs: Needs | null
-  today?: string
+  today?: Today | null
   handled: Item[]
   onChanged: () => void
   onWhy: (e: NeedEntry) => void
@@ -856,7 +860,12 @@ function NeedsCard({
   return (
     <Card className="mb-4">
       <CardTitle>Needs you</CardTitle>
-      {today && <p className="text-sm" style={{ margin: '0 0 8px' }}>{today}</p>}
+      {today?.text && (
+        <p className="text-sm" style={{ margin: '0 0 8px' }} data-testid="crew-today">
+          {today.text}
+          {today.at > 0 && <span className="text-xs text-muted"> · {ago(today.at)}</span>}
+        </p>
+      )}
       {failed && (
         <ErrorNotice
           message={`Could not ${verb} that message. Nothing changed.`}

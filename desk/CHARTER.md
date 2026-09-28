@@ -12,13 +12,13 @@ The rules the crew works by. The exact names, fields and routes are in [CONTRACT
 |---|---|---|---|---|
 | Radar Lead (`slack-radar-crew`) | agent · conductor | resident: one session for all channels | ledger, spawn, read files | triages, decides clusters, judges possibly-resolved threads, writes the digest headline, answers the owner |
 | Investigator (`slack-radar-investigator`) | agent · read-only leaf | joins on demand, one per cluster | ledger, shell for read-only `gh` | finds matching GitHub issues and PRs and records the links |
-| Thread Watcher (`slack-radar-watcher`) | agent · read-only leaf | planned, not shipped yet | ledger only, no shell | will judge only "resolved or not" for possibly-resolved threads; the Lead does this today |
+| Thread Watcher (`slack-radar-watcher`) | agent · read-only leaf | joins on demand, one per batch | ledger only, no shell | judges only "resolved or not" for a batch of possibly-resolved threads the Lead hands it |
 | Poller | code, no model | resident in the gateway | the five Slack read tools, plus the digest DM | reads messages and thread replies, flags likely resolutions, detects an expired login, delivers the digest, wakes the Lead |
 
 ### 2. Who dispatches whom
 
 - The Poller wakes the Lead when a poll moved something or a digest is due. It never spawns anyone.
-- Only the Lead spawns. It uses `spawn_run` for the Investigator (and, once shipped, the Thread Watcher), at most two investigations in flight.
+- Only the Lead spawns. It uses `spawn_run` for the Investigator and the Thread Watcher, at most two investigations in flight.
 - The owner can also start an Investigator from the Board's **Investigate** button. That is an owner action, not a crew action.
 - Leaves never spawn. The Investigator and the Thread Watcher have no spawn tool; they record into the ledger and stop.
 
@@ -41,9 +41,11 @@ The rules the crew works by. The exact names, fields and routes are in [CONTRACT
 See [docs/unattended-mode.md](../docs/unattended-mode.md) for the full approval chain. In short:
 
 - Off by default. The owner turns it on with `PUT /crew {"unattended": true}`.
-- When on and the crew is live, the Lead's session holds a scoped grant (`crew:slack-radar:autoapprove`, 900 s, SEL-audited), renewed by each poll. It never sets the interactive trust flag.
-- The Lead's tools are all pre-approved already, so the grant adds nothing to the Lead's turns.
-- An Investigator the Lead spawns still asks the owner to approve the spawn and each command, with unattended mode on or off. An unanswered prompt is denied after two hours.
+- When on and the crew is live, the Lead's session holds a scoped grant (`crew:slack-radar:autoapprove`, 900 s, SEL-audited). Every poll renews it while the toggle is on, so the crew runs unattended continuously, not for a window. It never sets the interactive trust flag.
+- The Lead's tools are all pre-approved already, so the grant adds nothing to the Lead's own turns.
+- The grant reaches the children the Lead spawns (Kiro Crew core since kirodotdev/KiroCrew#14497). While unattended mode is on, an Investigator or Thread Watcher spawn and every Investigator shell command are auto-approved, each SEL-audited. While it is off, the owner approves the spawn and each command, and an unanswered prompt is denied after two hours.
+- Picking **Normal** in the chat's trust menu ends the grant until the next poll arms it again. The app's own toggle is the off switch that lasts.
+- Risk: Slack text anyone in a watched channel can write reaches an agent with a shell. Turn unattended mode on only when every watched channel is trusted.
 - The Board's **Investigate** button runs the Investigator fully auto-approved, so it is refused unless unattended mode is on.
 
 ### 6. Stop conditions
@@ -66,13 +68,13 @@ See [docs/unattended-mode.md](../docs/unattended-mode.md) for the full approval 
 |---|---|---|---|---|
 | 雷达组长（`slack-radar-crew`） | agent · 指挥者 | 常驻：所有频道共用一个会话 | 台账、派生、读文件 | 分诊，决定聚簇，判断“可能已解决”的线程，写摘要标题，回答所有者 |
 | 调查员（`slack-radar-investigator`） | agent · 只读叶子成员 | 按需加入，每簇一个 | 台账、只读 `gh` 用的 shell | 找到匹配的 GitHub issue 和 PR，把链接记下来 |
-| 线程观察员（`slack-radar-watcher`） | agent · 只读叶子成员 | 计划中，尚未提供 | 只有台账，没有 shell | 届时只判断“可能已解决”的线程是否真的已解决；现在由组长自己判断 |
+| 线程观察员（`slack-radar-watcher`） | agent · 只读叶子成员 | 按需加入，每批一个 | 只有台账，没有 shell | 只判断组长交给它的一批“可能已解决”的线程是否真的已解决 |
 | 轮询器 | 代码，不用模型 | 常驻在网关里 | 五个 Slack 只读工具，外加摘要私信 | 读取消息和线程回复，标记可能的解决，发现登录过期，投递摘要，唤醒组长 |
 
 ### 2. 谁派谁
 
 - 轮询有变化或摘要到期时，轮询器唤醒组长。它从不派生任何成员。
-- 只有组长会派生。它用 `spawn_run` 派出调查员（线程观察员上线后也一样），同时最多两个调查在进行。
+- 只有组长会派生。它用 `spawn_run` 派出调查员和线程观察员，同时最多两个调查在进行。
 - 所有者也可以用看板上的 **Investigate** 按钮启动调查员。这是所有者的操作，不是小组的操作。
 - 叶子成员从不派生。调查员和线程观察员没有派生工具；它们写入台账后就结束。
 
@@ -95,9 +97,11 @@ See [docs/unattended-mode.md](../docs/unattended-mode.md) for the full approval 
 完整的审批链见 [docs/unattended-mode.md](../docs/unattended-mode.md)。简单说：
 
 - 默认关闭。所有者用 `PUT /crew {"unattended": true}` 打开。
-- 打开且小组在运行时，组长的会话持有一个限定范围的授权（`crew:slack-radar:autoapprove`，900 秒，有 SEL 审计），每次轮询续期。它从不设置交互式信任标志。
-- 组长的工具本来都已预先批准，所以这个授权对组长的回合没有任何增加。
-- 组长派出的调查员，无论无人值守模式开还是关，派生和每条命令仍要所有者批准。无人响应的提示两小时后被拒绝。
+- 打开且小组在运行时，组长的会话持有一个限定范围的授权（`crew:slack-radar:autoapprove`，900 秒，有 SEL 审计）。只要开关开着，每次轮询都会续期，所以小组是持续无人值守运行，而不是只有一段时间。它从不设置交互式信任标志。
+- 组长的工具本来都已预先批准，所以这个授权对组长自己的回合没有任何增加。
+- 这个授权会传到组长派出的子 agent（Kiro Crew 核心自 kirodotdev/KiroCrew#14497 起）。无人值守模式打开时，派出调查员或线程观察员，以及调查员的每条 shell 命令，都会自动批准，每条都有 SEL 审计。模式关闭时，派生和每条命令都要所有者批准，无人响应的提示两小时后被拒绝。
+- 在聊天的信任菜单里选 **Normal**，授权只结束到下一次轮询为止。应用自己的开关才是长期有效的关闭方式。
+- 风险：监听频道里任何人都能写的 Slack 文字会到达一个有 shell 的 agent。只有当所有监听频道都可信时才打开无人值守模式。
 - 看板的 **Investigate** 按钮会让调查员全程自动批准运行，所以只有无人值守模式打开时才允许。
 
 ### 6. 停止条件

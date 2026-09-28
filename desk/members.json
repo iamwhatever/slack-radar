@@ -29,10 +29,10 @@
     "agent": "slack-radar-watcher",
     "display": {"en": "Thread Watcher", "zh": "线程观察员"},
     "role": {
-      "en": "Read-only leaf, not shipped yet. Judges only whether a possibly-resolved thread is resolved. No shell, never spawns.",
-      "zh": "只读的叶子成员，尚未提供。只判断一个“可能已解决”的线程是否真的已解决。没有 shell，从不派生。"
+      "en": "Read-only leaf, spawned by the lead on demand. Judges only whether a possibly-resolved thread is resolved. No shell, never spawns.",
+      "zh": "只读的叶子成员，由组长按需派出。只判断一个“可能已解决”的线程是否真的已解决。没有 shell，从不派生。"
     },
-    "residency": "planned",
+    "residency": "on-demand",
     "tools": "ledger"
   },
   {
