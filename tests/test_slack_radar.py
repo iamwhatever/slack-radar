@@ -217,7 +217,7 @@ def test_thread_recheck_flags_possibly_resolved_never_resolves(tmp_path: Path) -
     store.mutate(tmp_path, lambda led: led["items"][key].update(last_thread_check_at=0.0))
     fake.threads[(C1, parent_ts)] = [
         {"ts": parent_ts, "text": "CI is red on main"},
-        {"ts": ts(now - 10), "text": "fixed in the last merge, thanks"},
+        {"ts": ts(now - 10), "user": "U2", "text": "fixed in the last merge, thanks"},
     ]
     summary = watch.run_cycle(tmp_path, fake, settings(channels=[C1]))
     assert summary["possibly_resolved"] == 1 and summary["thread_changed"] == 1
