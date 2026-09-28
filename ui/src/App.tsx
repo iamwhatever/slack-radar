@@ -39,6 +39,7 @@ type NeedEntry = {
   words?: string[]
   handoff_title?: string
   reply_draft?: string
+  dispatch?: FixDispatch
 }
 type NeedGroup = { id: 'decide' | 'unanswered' | 'clusters'; total: number; entries: NeedEntry[] }
 // A fix task the Lead wrote for a coding session (store.py `fix_handoff`, LOCAL).
@@ -52,11 +53,34 @@ type HandoffRow = {
   handled_how: string
   handoff: FixHandoff
 }
+// A hand-off the owner dispatched to a kirocrew-conductor session (needs.py `fix_view`).
+type FixDispatch = {
+  session_key: string
+  title: string
+  agent: string
+  at: number
+  state: 'running' | 'idle' | 'closed' | 'unknown'
+  pr_url: string
+  pr_number: number
+}
+type FixRow = {
+  key: string
+  channel: string
+  permalink: string
+  summary: string
+  status: string
+  handled_how: string
+  handoff_title: string
+  repo: string
+  dispatch: FixDispatch
+}
 type Needs = {
   groups: NeedGroup[]
   handled_total: number
   handoffs?: HandoffRow[]
   handoffs_total?: number
+  fixes?: FixRow[]
+  fixes_total?: number
   replied?: RepliedRow[]
   replied_total?: number
 }
@@ -870,22 +894,38 @@ function NeedRow({
   first,
   onMark,
   onWhy,
-  onStartFix,
+  onDispatch,
+  busy,
 }: {
   e: NeedEntry
   first: boolean
   onMark: (how: HandleHow) => void
   onWhy: () => void
-  onStartFix?: () => void
+  onDispatch?: () => void
+  busy?: boolean
 }) {
-  const fix = !!e.handoff_title && !!onStartFix
+  const fix = !!e.handoff_title && !!onDispatch
+  const sent = e.dispatch
   return (
     <li className="text-sm" style={{ padding: '10px 0', borderTop: first ? 0 : '1px solid var(--border)' }}>
       <div className="flex items-start gap-2">
         <div style={{ flex: 'none', minWidth: 28 }}>{priorityBadge(e.priority)}</div>
         <div style={{ minWidth: 0, flex: 1 }}>
           <div style={{ color: 'var(--text-strong)' }}>{e.summary || '(no text)'}</div>
-          {fix && <div className="text-xs" style={{ marginTop: 2 }}>Fix: {e.handoff_title}</div>}
+          {fix && !sent && <div className="text-xs" style={{ marginTop: 2 }}>Fix: {e.handoff_title}</div>}
+          {sent && (
+            <div className="text-xs" style={{ marginTop: 2 }} data-testid="fix-in-progress">
+              <SessionLink d={sent} /> · {FIX_STATE[sent.state] || sent.state}
+              {sent.pr_url && (
+                <>
+                  {' · '}
+                  <a className="underline" href={sent.pr_url} target="_blank" rel="noreferrer noopener">
+                    PR #{sent.pr_number}
+                  </a>
+                </>
+              )}
+            </div>
+          )}
           <div className="text-xs text-muted" style={{ marginTop: 2 }}>
             {e.reason}
             {e.words && e.words.length > 0 && <> ({e.words.join(', ')})</>}
@@ -902,9 +942,20 @@ function NeedRow({
           </div>
         </div>
         <div className="flex items-center gap-1" style={{ flex: 'none' }}>
-          {fix ? (
+          {sent ? (
             <>
-              <Btn style={small} onClick={onStartFix}>Start fix session</Btn>
+              <Btn style={small} onClick={() => onMark('ignored')}>Ignore</Btn>
+              <MoreMenu
+                label="More actions"
+                actions={[
+                  { label: 'Done', onClick: () => onMark('done') },
+                  { label: 'Why? Ask the lead', onClick: onWhy },
+                ]}
+              />
+            </>
+          ) : fix ? (
+            <>
+              <Btn style={small} onClick={onDispatch} disabled={busy}>{busy ? 'Dispatching…' : 'Dispatch fix'}</Btn>
               <Btn style={small} onClick={() => onMark('ignored')}>Ignore</Btn>
               <MoreMenu
                 label="More actions"
@@ -927,64 +978,143 @@ function NeedRow({
   )
 }
 
-type Launcher = { openChat: (opts: { message?: string; autoSend?: boolean }) => void }
+type LaunchOpts = { message?: string; autoSend?: boolean; agent?: string; slotKey?: string }
+type Launcher = { openChat: (opts: LaunchOpts) => void }
 // `useChatLauncher` is read off the SDK namespace so an older host without it still loads the app.
 const useLauncher: () => Launcher | null =
   typeof (sdk as { useChatLauncher?: unknown }).useChatLauncher === 'function'
     ? (sdk as unknown as { useChatLauncher: () => Launcher }).useChatLauncher
     : () => null
 
-// Start fix session: a NEW chat whose composer holds the prompt. Nothing is sent until
-// the owner presses Send. Without the SDK launcher, a dialog to copy the prompt instead.
-function useStartFix(): [(h: FixHandoff) => void, ReactNode] {
+const FIX_STATE: Record<string, string> = { running: 'working', idle: 'waiting', closed: 'session closed', unknown: '' }
+
+// A link to a dispatched session. Inside the dashboard it opens the session in place.
+function SessionLink({ d }: { d: { session_key: string; title: string } }) {
   const launcher = useLauncher()
-  const [shown, setShown] = useState<FixHandoff | null>(null)
+  const href = `/chat?sid=${encodeURIComponent(d.session_key)}`
+  return (
+    <a
+      className="underline"
+      href={href}
+      onClick={(ev) => {
+        if (!launcher) return
+        ev.preventDefault()
+        launcher.openChat({ slotKey: d.session_key })
+      }}
+    >
+      {d.title || 'Fix session'}
+    </a>
+  )
+}
+
+type DispatchReply =
+  | { ok: true; mode: 'server'; session_key: string; title: string }
+  | { ok: true; mode: 'client'; agent: string; title: string; seed: string }
+
+function errorBody(err: unknown): { code?: string; error?: string; session_key?: string; title?: string } {
+  try {
+    return JSON.parse(String((err as { body?: string }).body || '{}'))
+  } catch {
+    return {}
+  }
+}
+
+// Dispatch fix: ONE click is the owner's consent. The server opens a kirocrew-conductor
+// session with the hand-off and its Slack context and sends it; a toast links to it.
+// When the gateway cannot create sessions for the app, the seed comes back and the
+// SDK launcher sends it in a new conductor chat; with no launcher, a copy dialog.
+function useDispatchFix(onChanged: () => void): {
+  dispatch: (key: string) => void
+  busyKey: string
+  ui: ReactNode
+} {
+  const api = useAppApi()
+  const launcher = useLauncher()
+  const [busyKey, setBusyKey] = useState('')
+  const [toast, setToast] = useState<{ session_key: string; title: string; again?: boolean } | null>(null)
+  const [failed, setFailed] = useState<{ key: string; why: string } | null>(null)
+  const [shown, setShown] = useState<{ title: string; seed: string } | null>(null)
   const [copied, setCopied] = useState(false)
-  const start = (h: FixHandoff) => {
-    if (launcher) launcher.openChat({ message: h.prompt, autoSend: false })
-    else {
-      setCopied(false)
-      setShown(h)
+  const dispatch = async (key: string) => {
+    if (busyKey) return
+    setBusyKey(key)
+    setFailed(null)
+    try {
+      const r = await api.post<DispatchReply>(`${BASE}/items/handoff/dispatch`, { key })
+      if (r.mode === 'server') setToast({ session_key: r.session_key, title: r.title })
+      else if (launcher) launcher.openChat({ agent: r.agent, message: r.seed, autoSend: true })
+      else {
+        setCopied(false)
+        setShown({ title: r.title, seed: r.seed })
+      }
+      onChanged()
+    } catch (err) {
+      const b = errorBody(err)
+      if (b.code === 'already_dispatched' && b.session_key) setToast({ session_key: b.session_key, title: b.title || '', again: true })
+      else setFailed({ key, why: b.error || 'the gateway refused it' })
+    } finally {
+      setBusyKey('')
     }
   }
   const copy = async () => {
     if (!shown) return
     try {
-      await navigator.clipboard.writeText(shown.prompt)
+      await navigator.clipboard.writeText(shown.seed)
       setCopied(true)
     } catch {
       setCopied(false)
     }
   }
-  const dialog = shown ? (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="sr-fix-title"
-      style={{ position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(0,0,0,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-      onKeyDown={(ev) => ev.key === 'Escape' && setShown(null)}
-    >
-      <div style={{ width: 'min(720px, 92vw)', background: 'var(--card)', border: '1px solid var(--border-strong)', borderRadius: 10, padding: 16 }}>
-        <h3 id="sr-fix-title" className="text-sm" style={{ margin: '0 0 6px', fontWeight: 600 }}>{shown.title}</h3>
-        <p className="text-xs text-muted" style={{ margin: '0 0 8px' }}>
-          Copy this task into a new chat. Nothing is sent for you.
-        </p>
-        <textarea
-          readOnly
-          aria-label="Fix task"
-          value={shown.prompt}
-          style={{ width: '100%', height: 260, fontSize: 12, fontFamily: 'var(--font-mono, monospace)' }}
-        />
-        <div className="flex items-center gap-2" style={{ marginTop: 8 }}>
-          <Btn onClick={copy}>{copied ? 'Copied' : 'Copy prompt'}</Btn>
-          <a className="underline text-sm" href="/chat?new=1">New chat</a>
-          <div className="flex-1" />
-          <Btn onClick={() => setShown(null)}>Close</Btn>
+  const ui = (
+    <>
+      {failed && (
+        <ErrorNotice message={`Could not dispatch that fix: ${failed.why}. Nothing was sent.`} onRetry={() => dispatch(failed.key)} />
+      )}
+      {toast && (
+        <div
+          role="status"
+          data-testid="dispatch-toast"
+          className="text-sm flex items-center gap-2"
+          style={{ position: 'fixed', right: 16, bottom: 16, zIndex: 40, background: 'var(--card)', border: '1px solid var(--border-strong)', borderRadius: 8, padding: '8px 12px', maxWidth: 480 }}
+        >
+          <span style={{ flex: 1, minWidth: 0 }}>
+            {toast.again ? 'Already dispatched: ' : 'Fix dispatched to a conductor: '}
+            <SessionLink d={toast} />
+          </span>
+          <Btn style={small} onClick={() => setToast(null)}>Close</Btn>
         </div>
-      </div>
-    </div>
-  ) : null
-  return [start, dialog]
+      )}
+      {shown && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="sr-fix-title"
+          style={{ position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(0,0,0,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+          onKeyDown={(ev) => ev.key === 'Escape' && setShown(null)}
+        >
+          <div style={{ width: 'min(720px, 92vw)', background: 'var(--card)', border: '1px solid var(--border-strong)', borderRadius: 10, padding: 16 }}>
+            <h3 id="sr-fix-title" className="text-sm" style={{ margin: '0 0 6px', fontWeight: 600 }}>{shown.title}</h3>
+            <p className="text-xs text-muted" style={{ margin: '0 0 8px' }}>
+              This Kiro Crew cannot open the session for you. Copy this task into a new kirocrew-conductor chat.
+            </p>
+            <textarea
+              readOnly
+              aria-label="Fix task"
+              value={shown.seed}
+              style={{ width: '100%', height: 260, fontSize: 12, fontFamily: 'var(--font-mono, monospace)' }}
+            />
+            <div className="flex items-center gap-2" style={{ marginTop: 8 }}>
+              <Btn onClick={copy}>{copied ? 'Copied' : 'Copy task'}</Btn>
+              <a className="underline text-sm" href="/chat?new=1">New chat</a>
+              <div className="flex-1" />
+              <Btn onClick={() => setShown(null)}>Close</Btn>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  )
+  return { dispatch, busyKey, ui }
 }
 
 function NeedsCard({
@@ -1001,9 +1131,8 @@ function NeedsCard({
   onWhy: (e: NeedEntry) => void
 }) {
   const api = useAppApi()
-  const [startFix, fixDialog] = useStartFix()
-  const handoffs = needs?.handoffs || []
-  const byKey = new Map(handoffs.map((h) => [h.key, h.handoff]))
+  const fixer = useDispatchFix(onChanged)
+  const fixes = needs?.fixes || []
   const [sendFailed, setSendFailed] = useState<{ key: string; text: string; edited: boolean; why: string } | null>(null)
   const [sent, setSent] = useState('')
   useEffect(() => {
@@ -1105,7 +1234,7 @@ function NeedsCard({
                 {GROUP_TITLE[g.id]} <span className="text-muted" style={{ fontWeight: 400 }}>({g.total - (g.entries.length - g.shown.length)})</span>
               </h4>
               <ul className="flex flex-col">
-                {g.shown.map((e, i) => g.id === 'decide' && e.reply_draft && !byKey.has(e.key) ? (
+                {g.shown.map((e, i) => g.id === 'decide' && e.reply_draft && !e.handoff_title ? (
                   <ReplyRow
                     key={e.key}
                     e={e}
@@ -1121,7 +1250,8 @@ function NeedsCard({
                     first={i === 0}
                     onMark={(how) => post(e.members?.length ? e.members : [e.key], how, `${g.id}:${e.key}`)}
                     onWhy={() => onWhy(e)}
-                    onStartFix={g.id === 'decide' && byKey.has(e.key) ? () => startFix(byKey.get(e.key)!) : undefined}
+                    onDispatch={g.id === 'decide' && e.handoff_title ? () => fixer.dispatch(e.key) : undefined}
+                    busy={fixer.busyKey === e.key}
                   />
                 ))}
               </ul>
@@ -1132,29 +1262,36 @@ function NeedsCard({
       {dismissFailed && (
         <ErrorNotice message="Could not dismiss that hand-off. Nothing changed." onRetry={() => dismiss(dismissFailed)} />
       )}
-      {handoffs.length > 0 && (
-        <details style={{ marginTop: 12 }}>
+      {fixes.length > 0 && (
+        <details style={{ marginTop: 12 }} data-testid="fixes-in-flight">
           <summary className="text-sm text-muted" style={{ cursor: 'pointer' }}>
-            Fixes handed off ({needs?.handoffs_total ?? handoffs.length})
+            Fixes in flight ({needs?.fixes_total ?? fixes.length})
           </summary>
           <ul className="flex flex-col" style={{ marginTop: 4 }}>
-            {handoffs.map((h, i) => (
+            {fixes.map((f, i) => (
               <li
-                key={h.key}
+                key={f.key}
                 className="text-sm flex items-center gap-2"
                 style={{ padding: '6px 0', borderTop: i === 0 ? 0 : '1px solid var(--border)' }}
               >
                 <span style={{ flex: 1, minWidth: 0 }}>
-                  {h.handoff.title}
+                  <SessionLink d={f.dispatch} />
                   <span className="text-xs text-muted">
                     {' · '}
-                    {h.summary}
+                    {FIX_STATE[f.dispatch.state] || f.dispatch.state || 'sent'}
                     {' · '}
-                    <span className="font-mono">{h.handoff.repo}</span> · {ago(h.handoff.at)}
+                    <span className="font-mono">{f.repo}</span> · {ago(f.dispatch.at)}
                   </span>
+                  {f.dispatch.pr_url && (
+                    <>
+                      {' · '}
+                      <a className="underline" href={f.dispatch.pr_url} target="_blank" rel="noreferrer noopener">
+                        PR #{f.dispatch.pr_number}
+                      </a>
+                    </>
+                  )}
                 </span>
-                <Btn style={small} onClick={() => startFix(h.handoff)}>Start fix session</Btn>
-                <Btn style={small} onClick={() => dismiss(h.key)}>Dismiss</Btn>
+                <Btn style={small} onClick={() => dismiss(f.key)}>Dismiss</Btn>
               </li>
             ))}
           </ul>
@@ -1211,7 +1348,7 @@ function NeedsCard({
           </ul>
         </details>
       )}
-      {fixDialog}
+      {fixer.ui}
     </Card>
   )
 }

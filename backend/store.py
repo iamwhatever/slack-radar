@@ -624,6 +624,32 @@ def apply_handoff_dismiss(ledger: dict[str, Any], key: str) -> dict[str, Any] | 
     return item
 
 
+# ── fix dispatch (owner click -> a kirocrew-conductor session) ─────────────
+
+#: What the owner's Dispatch fix stores on ``fix_handoff.dispatch``.
+DISPATCH_FIELDS = ("session_key", "title", "agent", "at")
+
+
+def apply_dispatch(ledger: dict[str, Any], key: str, dispatch: dict[str, Any]) -> dict[str, Any] | None:
+    """Record the session a fix was dispatched to. None for an unknown key or no hand-off."""
+    item = (ledger.get("items") or {}).get(key)
+    if item is None or not isinstance(item.get("fix_handoff"), dict):
+        return None
+    item["fix_handoff"]["dispatch"] = {k: dispatch.get(k) for k in DISPATCH_FIELDS}
+    item["fix_handoff"]["pr_url"] = ""
+    return item
+
+
+def apply_fix_pr(ledger: dict[str, Any], key: str, url: str) -> bool:
+    """Store the PR a dispatched session reported, once. True when it was new."""
+    item = (ledger.get("items") or {}).get(key)
+    h = item.get("fix_handoff") if isinstance(item, dict) else None
+    if not isinstance(h, dict) or not h.get("dispatch") or h.get("pr_url") or not _URL_RE.match(url or ""):
+        return False
+    h["pr_url"] = url
+    return True
+
+
 def swap_seen_runs(data_dir: Path, current: dict[str, dict[str, str]]) -> dict[str, dict[str, str]]:
     """Store ``current`` as the seen child runs and return what was stored before.
 
@@ -698,6 +724,10 @@ def apply_crew_record(ledger: dict[str, Any], payload: dict[str, Any]) -> dict[s
             if why:
                 problems.append(why)
             else:
+                prev = item.get("fix_handoff") if isinstance(item.get("fix_handoff"), dict) else {}
+                if prev.get("dispatch"):
+                    # A rewrite keeps the owner's dispatch and the PR it produced.
+                    handoff["dispatch"], handoff["pr_url"] = prev["dispatch"], str(prev.get("pr_url") or "")
                 item["fix_handoff"] = handoff
         if problems:
             refused.append({"key": key, "why": "; ".join(problems)})

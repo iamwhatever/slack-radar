@@ -87,6 +87,18 @@ const REPLY_ITEM = item(4, 'C0DEMO2', 'hana', 'Does the CSV export keep my colum
 })
 const REPLY_DRAFT = 'Yes. The export uses the columns you filtered, and hidden columns are left out. ' +
   'The one known gap is tracked here: https://github.com/example-org/example-app/issues/398'
+const dispatched = (it: (typeof ITEMS)[number], title: string, extra: Record<string, unknown>) => ({
+  session_key: `chat-${it.ts_float}-1`, title: `Fix: ${title}`, agent: 'kirocrew-conductor',
+  at: T0 + 6600, state: 'running', pr_url: '', pr_number: 0, ...extra,
+})
+const IN_PROGRESS = dispatched(ITEMS[3], 'Roll back the dashboard bundle split', {})
+const WITH_PR = dispatched(ITEMS[1], 'Add dark mode to the reports view', {
+  at: T0 + 3000, state: 'idle', pr_url: 'https://github.com/example-org/example-app/pull/418', pr_number: 418,
+})
+const fixRow = (it: (typeof ITEMS)[number], d: typeof IN_PROGRESS) => ({
+  key: it.key, channel: it.channel, permalink: it.permalink, summary: it.summary, status: it.status,
+  handled_how: '', handoff_title: d.title.slice(5), repo: 'example-org/example-app', dispatch: d,
+})
 
 const NEEDS = {
   ok: true,
@@ -97,6 +109,8 @@ const NEEDS = {
     text: 'Settings → API keys → Rotate. The old key keeps working for 24 hours.',
     at: T0 + 3000, permalink: `https://example.slack.com/archives/C0DEMO1/p${T0 + 3000}000200`,
   }],
+  fixes_total: 2,
+  fixes: [fixRow(ITEMS[3], IN_PROGRESS), fixRow(ITEMS[1], WITH_PR)],
   handoffs_total: 1,
   handoffs: [{
     key: ITEMS[0].key, channel: ITEMS[0].channel, permalink: ITEMS[0].permalink,
@@ -106,7 +120,7 @@ const NEEDS = {
     { id: 'decide', total: 4, entries: [
       need(ITEMS[0], 'Fix ready to hand off', { handoff_title: HANDOFF.title }),
       need(REPLY_ITEM, 'Reply ready to send', { reply_draft: REPLY_DRAFT }),
-      need(ITEMS[3], 'Open p1'),
+      need(ITEMS[3], `Fix in progress · ${IN_PROGRESS.title}`, { handoff_title: IN_PROGRESS.title.slice(5), dispatch: IN_PROGRESS }),
       need(ITEMS[2], 'Looks resolved: reply says “thanks”'),
     ] },
     { id: 'unanswered', total: 1, entries: [
@@ -205,6 +219,9 @@ const api = {
   post: async (path: string, body?: unknown) => {
     const w = window as unknown as { __posts?: unknown[] }
     w.__posts = [...(w.__posts || []), { path, body }]
+    if (path.endsWith('/items/handoff/dispatch')) {
+      return { ok: true, mode: 'server', session_key: 'chat-99-1', title: `Fix: ${HANDOFF.title}`, agent: 'kirocrew-conductor', at: T0 + 7000 }
+    }
     return respond(path)
   },
   put: async (path: string) => respond(path),
@@ -219,7 +236,7 @@ export function useAppApi() {
 /** Stand-in for the host's chat launcher: records the launch for the DOM check. */
 export function useChatLauncher() {
   return {
-    openChat: (opts: { message?: string; autoSend?: boolean }) => {
+    openChat: (opts: { message?: string; autoSend?: boolean; agent?: string; slotKey?: string }) => {
       ;(window as unknown as { __launched?: unknown[] }).__launched = [
         ...((window as unknown as { __launched?: unknown[] }).__launched || []),
         opts,
