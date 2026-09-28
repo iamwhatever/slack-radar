@@ -77,6 +77,68 @@ def _call_if_present(obj: Any, name: str, *args: Any) -> None:
             logger.debug("slack-radar: %s failed", name, exc_info=True)
 
 
+# ── the crew's child runs (investigator / watcher) ──────────────────────
+
+
+def child_runs(state: Any, crew: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """The crew session's unfinished child runs, or None when the gateway gives no list.
+
+    Read through ``state.subagents.running_agents_for``, the host's own per-parent
+    summary (``id``, ``agent``, ``task`` clipped to 80 chars and redacted,
+    ``startedAt``). A dashboard slot's children are keyed ``dashboard:<slot key>``.
+    """
+    subs = getattr(state, "subagents", None) if state is not None else None
+    fn = getattr(subs, "running_agents_for", None)
+    if not callable(fn):
+        return None
+    try:
+        runs = fn(f"dashboard:{store.slot_key(crew)}")
+    except Exception:  # noqa: BLE001 - a host change must not break a read
+        logger.debug("slack-radar: running_agents_for failed", exc_info=True)
+        return None
+    return [r for r in runs if isinstance(r, dict)] if isinstance(runs, list) else None
+
+
+def _member_of(agent: str) -> str:
+    from . import org
+
+    if org.agent_matches(agent, org.INVESTIGATOR_AGENT):
+        return "investigator"
+    if org.agent_matches(agent, org.WATCHER_AGENT):
+        return "watcher"
+    return ""
+
+
+def observe_member_runs(data_dir: Path, runs: list[dict[str, Any]] | None) -> list[str]:
+    """Log a ``member`` event for each investigator/watcher run that started or ended
+    since the last observation. Returns the event lines written.
+
+    With no run list (``None``) nothing is compared, so a gateway that stops
+    answering never reads as "every run finished".
+    """
+    from . import org
+
+    if runs is None:
+        return []
+    current: dict[str, dict[str, str]] = {}
+    for r in runs:
+        member = _member_of(str(r.get("agent") or ""))
+        rid = str(r.get("id") or "")
+        if member and rid:
+            current[rid] = {"member": member, "task": org.task_line(r.get("task"))}
+    prev = store.swap_seen_runs(data_dir, current)
+    lines: list[str] = []
+    for rid, info in current.items():
+        if rid not in prev:
+            lines.append(f"{info['member']} started: {info['task']}".rstrip(": "))
+    for rid, info in prev.items():
+        if rid not in current and isinstance(info, dict):
+            lines.append(f"{info.get('member') or 'member'} finished")
+    for line in lines:
+        store.append_event(data_dir, "member", line)
+    return lines
+
+
 # ── the brief ──────────────────────────────────────────────────────────────
 
 
@@ -433,6 +495,7 @@ async def after_poll(data_dir: Path, summary: dict[str, Any], *, reason: str = "
     if state is None:
         return False
     crew = await asyncio.to_thread(store.read_crew, data_dir)
+    await asyncio.to_thread(observe_member_runs, data_dir, child_runs(state, crew))
     if not is_live(crew):
         revoke(state, crew)
         return False

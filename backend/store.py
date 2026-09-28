@@ -43,6 +43,8 @@ SCHEMA = 1
 LEDGER_FILENAME = "ledger.json"
 EVENTS_FILENAME = "events.jsonl"
 CREW_FILENAME = "crew.json"
+#: Child runs of the crew session seen on the last observation (``member`` events).
+RUNS_SEEN_FILENAME = "member_runs.json"
 
 #: Classification vocabulary. The crew may only write these values.
 CATEGORIES = ("feature-request", "bug-report", "question", "already-answered", "noise")
@@ -562,6 +564,22 @@ def apply_handle(ledger: dict[str, Any], key: str, how: str) -> dict[str, Any] |
     else:
         item["handled_at"], item["handled_how"] = now(), how
     return item
+
+
+def swap_seen_runs(data_dir: Path, current: dict[str, dict[str, str]]) -> dict[str, dict[str, str]]:
+    """Store ``current`` as the seen child runs and return what was stored before.
+
+    Read and write happen under one lock, so two observers racing on the same change
+    see it once: the second one gets the first one's ``current`` back.
+    """
+    path = Path(data_dir) / RUNS_SEEN_FILENAME
+    with _file_lock(path):
+        try:
+            prev = _read_json(path)
+        except StoreError:
+            prev = None
+        _atomic_write_text(path, json.dumps(current, sort_keys=True))
+    return prev if isinstance(prev, dict) else {}
 
 
 # ── crew write path (used by the MCP server) ───────────────────────────────

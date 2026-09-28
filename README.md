@@ -184,7 +184,7 @@ with the new default).
 
 ### Desk
 
-The crew's rules and interfaces live in `desk/`. [desk/CHARTER.md](desk/CHARTER.md) is the charter: the roster, who dispatches whom (only the Radar Lead spawns), what may never be sent to Slack, public vs local data, unattended scope and stop conditions. [desk/CONTRACT.md](desk/CONTRACT.md) is the machine contract: fixed agent names, the ledger format, the MCP tools and the HTTP routes. [desk/members.json](desk/members.json) is the roster as data, and `GET /api/apps/slack-radar/org` returns it with each member's live status.
+The crew's rules and interfaces live in `desk/`. [desk/CHARTER.md](desk/CHARTER.md) is the charter: the roster, who dispatches whom (only the Radar Lead spawns), what may never be sent to Slack, public vs local data, unattended scope and stop conditions. [desk/CONTRACT.md](desk/CONTRACT.md) is the machine contract: fixed agent names, the ledger format, the MCP tools and the HTTP routes. [desk/members.json](desk/members.json) is the roster as data, and `GET /api/apps/slack-radar/org` returns it with each member's live status. `GET /api/apps/slack-radar/now` says what each member is doing right now (the Lead's phase, each running Investigator or Watcher task from the gateway's run list, the Poller's last and next poll), and the Activity log gets a line when an Investigator or Watcher starts or finishes.
 
 ## Configuration
 
@@ -445,7 +445,7 @@ kirocrew app enable slack-radar
 
 ### Desk（工作台）
 
-小组的规则和接口放在 `desk/` 里。[desk/CHARTER.md](desk/CHARTER.md) 是章程：成员、谁派谁（只有雷达组长会派生）、绝不能发到 Slack 的东西、公开与本地数据、无人值守的范围和停止条件。[desk/CONTRACT.md](desk/CONTRACT.md) 是机器契约：固定的 agent 名字、台账格式、MCP 工具和 HTTP 接口。[desk/members.json](desk/members.json) 是成员名单的数据形式，`GET /api/apps/slack-radar/org` 返回它，并附上每个成员的实时状态。
+小组的规则和接口放在 `desk/` 里。[desk/CHARTER.md](desk/CHARTER.md) 是章程：成员、谁派谁（只有雷达组长会派生）、绝不能发到 Slack 的东西、公开与本地数据、无人值守的范围和停止条件。[desk/CONTRACT.md](desk/CONTRACT.md) 是机器契约：固定的 agent 名字、台账格式、MCP 工具和 HTTP 接口。[desk/members.json](desk/members.json) 是成员名单的数据形式，`GET /api/apps/slack-radar/org` 返回它，并附上每个成员的实时状态。`GET /api/apps/slack-radar/now` 说明每个成员此刻在做什么（组长的阶段、网关运行列表里每个调查员或线程观察员的任务、轮询器上次和下次轮询的时间），调查员或线程观察员开始或结束时，Activity 日志也会记一行。
 
 ## 配置
 
