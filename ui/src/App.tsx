@@ -1,6 +1,6 @@
 import { ChatEmbed, useAppApi } from '@kirocrew/app-sdk'
 import { Badge, Btn, Card, CardTitle, EmptyState, Input, PageHeader, StatCard, Toggle } from '@kirocrew/app-sdk/ui'
-import { useCallback, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 
 const BASE = '/api/apps/slack-radar'
 
@@ -20,7 +20,25 @@ type Item = {
   needs_triage: boolean
   possibly_resolved: { reason: string; at: number } | null
   ts_float: number
+  handled_at?: number
+  handled_how?: 'done' | 'ignored' | ''
 }
+
+// GET /needs: rule-built groups (backend/needs.py). A cluster entry names its members.
+type NeedEntry = {
+  key: string
+  channel: string
+  permalink: string
+  summary: string
+  priority: string
+  category: string
+  age_hours: number
+  reason: string
+  members?: string[]
+  words?: string[]
+}
+type NeedGroup = { id: 'decide' | 'unanswered' | 'clusters'; total: number; entries: NeedEntry[] }
+type Needs = { groups: NeedGroup[]; handled_total: number }
 
 type Settings = {
   channels: string[]
@@ -52,6 +70,7 @@ type State = {
     session_open: boolean
     running: boolean
     trusted: boolean
+    today?: string
   }
   crew_memory: { phase: string; next: string; updated_at: number }
   investigations?: { items: number; running: number }
@@ -80,7 +99,7 @@ const CONNECTION_LABEL: Record<string, string> = {
   error: 'not working',
 }
 
-// The three quick questions the A mockup shows under the Radar Lead chat.
+// The three quick questions offered beside "Ask the lead" and under the open chat.
 const QUICK_QUESTIONS = ['What needs me today?', "Draft today's digest", 'Re-check resolved threads']
 
 type EventRow = { at: number; kind: string; text: string; key: string }
@@ -306,6 +325,8 @@ export default function SlackRadar() {
   const [tab, setTab] = useState<TabId>('board')
   const [state, setState] = useState<State | null>(null)
   const [items, setItems] = useState<Item[]>([])
+  const [needs, setNeeds] = useState<Needs | null>(null)
+  const [handled, setHandled] = useState<Item[]>([])
   const [events, setEvents] = useState<EventRow[]>([])
   const [filter, setFilter] = useState('open')
   const [selected, setSelected] = useState<Set<string>>(new Set())
@@ -327,13 +348,17 @@ export default function SlackRadar() {
 
   const load = useCallback(async () => {
     try {
-      const [s, i, e] = await Promise.all([
+      const [s, i, e, n, h] = await Promise.all([
         api.get<State>(`${BASE}/state`),
         api.get<{ items: Item[] }>(`${BASE}/items?status=${encodeURIComponent(filter)}&limit=300`),
         api.get<{ events: EventRow[] }>(`${BASE}/events?limit=150`),
+        api.get<Needs>(`${BASE}/needs`),
+        api.get<{ items: Item[] }>(`${BASE}/items?handled=1&limit=100`),
       ])
       setState(s)
       setItems(i.items)
+      setNeeds(n)
+      setHandled(h.items)
       setEvents(e.events.slice().reverse())
     } catch (err) {
       setMessage(`Could not load: ${(err as Error).message}`)
@@ -406,6 +431,8 @@ export default function SlackRadar() {
           <Board
             state={state}
             items={items}
+            needs={needs}
+            handled={handled}
             configured={configured}
             mcp={mcp}
             filter={filter}
@@ -510,6 +537,8 @@ function ConnectionLine({ mcp, state, withPoll }: { mcp: McpStatus | null; state
 function Board(props: {
   state: State
   items: Item[]
+  needs: Needs | null
+  handled: Item[]
   configured: boolean
   mcp: McpStatus | null
   filter: string
@@ -526,6 +555,9 @@ function Board(props: {
 }) {
   const { state, items, selected, setSelected } = props
   const [repo, setRepo] = useState('')
+  const [pending, setPending] = useState('')
+  const [expanded, setExpanded] = useChatOpen(state.crew.slot_key)
+  const chatRef = useRef<HTMLDivElement>(null)
   const p = state.counts.open_by_priority
   const toggle = (key: string) => {
     const next = new Set(selected)
@@ -537,16 +569,33 @@ function Board(props: {
     () => state.settings.channels.map((cid) => ({ cid, ...(state.channels[cid] || {}) })),
     [state],
   )
+  const askWhy = (e: NeedEntry) => {
+    setPending(whyQuestion(e))
+    setExpanded(true)
+    window.requestAnimationFrame(() => chatRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' }))
+  }
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) 360px', gap: 20, alignItems: 'start' }}>
     <div style={{ minWidth: 0 }}>
-      <ConnectionLine mcp={props.mcp} state={state} withPoll />
+      <div className="flex flex-wrap items-start gap-3">
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <ConnectionLine mcp={props.mcp} state={state} withPoll />
+        </div>
+        <Btn onClick={props.onPoll} disabled={!!props.busy || !props.configured}>Poll now</Btn>
+      </div>
 
-      <div className="grid gap-3 grid-cols-[repeat(auto-fit,minmax(150px,1fr))] mb-4">
-        <StatCard label="Awaiting triage" value={state.counts.needs_triage} accent />
-        <StatCard label="Possibly resolved" value={state.counts.possibly_resolved} />
-        <StatCard label="Open p0 / p1" value={`${p.p0 || 0} / ${p.p1 || 0}`} />
-        <StatCard label="Tracked items" value={state.counts.total} />
+      <div ref={chatRef}>
+        <AskLead
+          state={state}
+          events={props.events}
+          configured={props.configured}
+          busy={props.busy}
+          expanded={expanded}
+          setExpanded={setExpanded}
+          pending={pending}
+          setPending={setPending}
+          onStart={props.onStart}
+          onChanged={props.onChanged}
+        />
       </div>
 
       {!props.configured && (
@@ -557,6 +606,21 @@ function Board(props: {
           </p>
         </Card>
       )}
+
+      <NeedsCard
+        needs={props.needs}
+        today={state.crew.today}
+        handled={props.handled}
+        onChanged={props.onChanged}
+        onWhy={askWhy}
+      />
+
+      <div className="grid gap-3 grid-cols-[repeat(auto-fit,minmax(150px,1fr))] mb-4">
+        <StatCard label="Awaiting triage" value={state.counts.needs_triage} accent />
+        <StatCard label="Possibly resolved" value={state.counts.possibly_resolved} />
+        <StatCard label="Open p0 / p1" value={`${p.p0 || 0} / ${p.p1 || 0}`} />
+        <StatCard label="Tracked items" value={state.counts.total} />
+      </div>
 
       <Card className="mb-4">
         <div className="flex flex-wrap items-center gap-2 mb-3">
@@ -627,16 +691,225 @@ function Board(props: {
         )}
       </Card>
     </div>
-      <LeadCard
-        state={state}
-        events={props.events}
-        configured={props.configured}
-        busy={props.busy}
-        onStart={props.onStart}
-        onPoll={props.onPoll}
-        onChanged={props.onChanged}
-      />
+  )
+}
+
+// ── Board: "Needs you" ──────────────────────────────────────────────────────
+
+// Section titles for GET /needs groups, in the order the backend returns them.
+const GROUP_TITLE: Record<NeedGroup['id'], string> = {
+  decide: 'Needs a decision',
+  unanswered: 'Questions nobody answered',
+  clusters: 'Reported more than once',
+}
+
+type HandleHow = 'done' | 'ignored' | 'reopen'
+
+function fmtAge(h: number): string {
+  if (h < 1) return 'under 1 h old'
+  if (h < 48) return `${Math.round(h)} h old`
+  return `${Math.floor(h / 24)} days old`
+}
+
+function whyQuestion(e: NeedEntry): string {
+  const s = e.summary.length > 80 ? `${e.summary.slice(0, 79)}…` : e.summary
+  return `Why is "${s}" ${e.priority || 'on my list'}?`
+}
+
+function priorityBadge(priority: string) {
+  if (!priority) return null
+  return <Badge variant={priority === 'p0' || priority === 'p1' ? 'err' : 'muted'}>{priority}</Badge>
+}
+
+// The host's ErrorNotice is not part of the app SDK, so this is a small local one:
+// what failed, in plain words, and the one action that fixes it.
+function ErrorNotice({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return (
+    <div
+      role="alert"
+      className="text-sm flex flex-wrap items-center gap-2"
+      style={{ border: '1px solid var(--danger)', borderRadius: 8, padding: '8px 12px', margin: '8px 0' }}
+    >
+      <span style={{ flex: 1, minWidth: 200 }}>{message}</span>
+      <Btn onClick={onRetry}>Try again</Btn>
     </div>
+  )
+}
+
+// "⋯": row actions beyond the two visible buttons.
+function MoreMenu({ label, actions }: { label: string; actions: { label: string; onClick: () => void }[] }) {
+  const ref = useRef<HTMLDetailsElement>(null)
+  return (
+    <details ref={ref} style={{ position: 'relative' }}>
+      <summary
+        aria-label={label}
+        title={label}
+        style={{ listStyle: 'none', cursor: 'pointer', padding: '2px 8px', borderRadius: 6, color: 'var(--muted)' }}
+      >
+        ⋯
+      </summary>
+      <div
+        role="menu"
+        style={{
+          position: 'absolute', right: 0, top: '100%', zIndex: 5, minWidth: 180, padding: 4,
+          background: 'var(--card)', border: '1px solid var(--border-strong)', borderRadius: 8,
+        }}
+      >
+        {actions.map((a) => (
+          <button
+            key={a.label}
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              if (ref.current) ref.current.open = false
+              a.onClick()
+            }}
+            style={{
+              display: 'block', width: '100%', textAlign: 'left', fontSize: 13, padding: '6px 10px',
+              border: 0, borderRadius: 6, background: 'transparent', color: 'var(--text)', cursor: 'pointer',
+            }}
+          >
+            {a.label}
+          </button>
+        ))}
+      </div>
+    </details>
+  )
+}
+
+const small: CSSProperties = { fontSize: 12, padding: '2px 10px' }
+
+function NeedRow({ e, first, onMark, onWhy }: { e: NeedEntry; first: boolean; onMark: (how: HandleHow) => void; onWhy: () => void }) {
+  return (
+    <li className="text-sm" style={{ padding: '10px 0', borderTop: first ? 0 : '1px solid var(--border)' }}>
+      <div className="flex items-start gap-2">
+        <div style={{ flex: 'none', minWidth: 28 }}>{priorityBadge(e.priority)}</div>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{ color: 'var(--text-strong)' }}>{e.summary || '(no text)'}</div>
+          <div className="text-xs text-muted" style={{ marginTop: 2 }}>
+            {e.reason}
+            {e.words && e.words.length > 0 && <> ({e.words.join(', ')})</>}
+            {' · '}
+            <span className="font-mono">{e.channel}</span> · {fmtAge(e.age_hours)}
+            {e.permalink && (
+              <>
+                {' · '}
+                <a className="underline" href={e.permalink} target="_blank" rel="noreferrer noopener">
+                  Open in Slack
+                </a>
+              </>
+            )}
+          </div>
+        </div>
+        <div className="flex items-center gap-1" style={{ flex: 'none' }}>
+          <Btn style={small} onClick={() => onMark('done')}>Done</Btn>
+          <Btn style={small} onClick={() => onMark('ignored')}>Ignore</Btn>
+          <MoreMenu label="More actions" actions={[{ label: 'Why? Ask the lead', onClick: onWhy }]} />
+        </div>
+      </div>
+    </li>
+  )
+}
+
+function NeedsCard({
+  needs,
+  today,
+  handled,
+  onChanged,
+  onWhy,
+}: {
+  needs: Needs | null
+  today?: string
+  handled: Item[]
+  onChanged: () => void
+  onWhy: (e: NeedEntry) => void
+}) {
+  const api = useAppApi()
+  // Rows marked here leave the list at once; a failed save puts them back.
+  const [gone, setGone] = useState<Set<string>>(new Set())
+  const [failed, setFailed] = useState<{ keys: string[]; how: HandleHow; rowId?: string } | null>(null)
+  useEffect(() => setGone(new Set()), [needs])
+
+  const post = async (keys: string[], how: HandleHow, rowId?: string) => {
+    setFailed(null)
+    if (rowId) setGone((prev) => new Set(prev).add(rowId))
+    try {
+      for (const key of keys) await api.post(`${BASE}/items/handle`, { key, how })
+      onChanged()
+    } catch {
+      if (rowId) {
+        setGone((prev) => {
+          const next = new Set(prev)
+          next.delete(rowId)
+          return next
+        })
+      }
+      setFailed({ keys, how, rowId })
+    }
+  }
+  const groups = (needs?.groups || []).map((g) => ({
+    ...g,
+    shown: g.entries.filter((e) => !gone.has(`${g.id}:${e.key}`)),
+  }))
+  const empty = groups.every((g) => g.shown.length === 0)
+  const verb = failed?.how === 'reopen' ? 'reopen' : failed?.how === 'ignored' ? 'ignore' : 'mark as done'
+  return (
+    <Card className="mb-4">
+      <CardTitle>Needs you</CardTitle>
+      {today && <p className="text-sm" style={{ margin: '0 0 8px' }}>{today}</p>}
+      {failed && (
+        <ErrorNotice
+          message={`Could not ${verb} that message. Nothing changed.`}
+          onRetry={() => post(failed.keys, failed.how, failed.rowId)}
+        />
+      )}
+      {!needs ? (
+        <p className="text-sm text-muted">Loading…</p>
+      ) : empty ? (
+        <p className="text-sm text-muted">Nothing needs you right now.</p>
+      ) : (
+        groups.map((g) =>
+          g.shown.length === 0 ? null : (
+            <section key={g.id} aria-label={GROUP_TITLE[g.id]} style={{ marginTop: 10 }}>
+              <h4 className="text-sm" style={{ margin: 0, fontWeight: 600, color: 'var(--text-strong)' }}>
+                {GROUP_TITLE[g.id]} <span className="text-muted" style={{ fontWeight: 400 }}>({g.total - (g.entries.length - g.shown.length)})</span>
+              </h4>
+              <ul className="flex flex-col">
+                {g.shown.map((e, i) => (
+                  <NeedRow
+                    key={e.key}
+                    e={e}
+                    first={i === 0}
+                    onMark={(how) => post(e.members?.length ? e.members : [e.key], how, `${g.id}:${e.key}`)}
+                    onWhy={() => onWhy(e)}
+                  />
+                ))}
+              </ul>
+            </section>
+          ),
+        )
+      )}
+      {(needs?.handled_total || 0) > 0 && (
+        <details style={{ marginTop: 12 }}>
+          <summary className="text-sm text-muted" style={{ cursor: 'pointer' }}>Handled ({needs?.handled_total})</summary>
+          <ul className="flex flex-col" style={{ marginTop: 4 }}>
+            {handled.map((it, i) => (
+              <li
+                key={it.key}
+                className="text-sm flex items-center gap-2"
+                style={{ padding: '6px 0', borderTop: i === 0 ? 0 : '1px solid var(--border)' }}
+              >
+                <span style={{ flex: 1, minWidth: 0 }}>{it.summary || it.text.slice(0, 200)}</span>
+                <span className="text-xs text-muted">
+                  {it.handled_how === 'ignored' ? 'Ignored' : 'Done'} {ago(it.handled_at)}
+                </span>
+                <Btn style={small} onClick={() => post([it.key], 'reopen')}>Reopen</Btn>
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+    </Card>
   )
 }
 
@@ -728,7 +1001,7 @@ function DigestCard({ state, busy, onDigest }: { state: State; busy: string; onD
   )
 }
 
-// ── Board: the Radar Lead chat card ─────────────────────────────────────────
+// ── Board: "Ask the lead" (one line until a conversation starts) ────────────
 
 function RosterStrip({ state }: { state: State }) {
   return (
@@ -743,49 +1016,188 @@ function RosterStrip({ state }: { state: State }) {
   )
 }
 
-function LeadCard(props: {
+// Open/closed chat, remembered per crew session so a reload keeps an open chat open.
+function useChatOpen(slotKey: string): [boolean, (on: boolean) => void] {
+  const flag = `slack-radar:chat-open:${slotKey}`
+  const read = () => {
+    try {
+      return window.localStorage.getItem(flag) === '1'
+    } catch {
+      return false
+    }
+  }
+  const [open, setOpen] = useState(read)
+  useEffect(() => setOpen(read()), [flag]) // eslint-disable-line react-hooks/exhaustive-deps
+  const set = useCallback(
+    (on: boolean) => {
+      setOpen(on)
+      try {
+        if (on) window.localStorage.setItem(flag, '1')
+        else window.localStorage.removeItem(flag)
+      } catch {
+        /* private mode: the chat just closes on reload */
+      }
+    },
+    [flag],
+  )
+  return [open, set]
+}
+
+function Chip({ q, onClick, disabled }: { q: string; onClick: () => void; disabled: boolean }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        fontSize: 12,
+        border: '1px solid var(--border-strong)',
+        borderRadius: 999,
+        padding: '4px 10px',
+        background: 'transparent',
+        color: 'var(--text)',
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        opacity: disabled ? 0.5 : 1,
+        whiteSpace: 'nowrap',
+      }}
+    >
+      {q}
+    </button>
+  )
+}
+
+function AskLead(props: {
   state: State
   events: EventRow[]
   configured: boolean
   busy: string
+  expanded: boolean
+  setExpanded: (on: boolean) => void
+  pending: string
+  setPending: (q: string) => void
   onStart: () => void
-  onPoll: () => void
   onChanged: () => void
 }) {
   const api = useAppApi()
-  const { state } = props
+  const { state, expanded, pending } = props
   const lead = ROSTER[0]
   const slotKey = state.crew.slot_key
   const ready = state.crew.live && state.crew.session_open && state.crew.session_agent === state.crew.agent
-  const [asking, setAsking] = useState(false)
-  const send = async (message: string) => {
+  const [draft, setDraft] = useState('')
+  const [sending, setSending] = useState(false)
+  const [failed, setFailed] = useState('')
+  const [copied, setCopied] = useState(false)
+  const st = memberStatus(lead, state)
+
+  // The embed's own composer sends through the same owner route.
+  const sendFromEmbed = async (message: string) => {
     await api.post(`${BASE}/crew/message`, { message })
     props.onChanged()
   }
   const ask = async (q: string) => {
-    setAsking(true)
+    const text = q.trim()
+    if (!text) return
+    setSending(true)
+    setFailed('')
     try {
-      await send(q)
+      await api.post(`${BASE}/crew/message`, { message: text })
+      setDraft('')
+      if (text === pending) props.setPending('')
+      props.setExpanded(true)
+      props.onChanged()
+    } catch {
+      setFailed(text)
     } finally {
-      setAsking(false)
+      setSending(false)
     }
   }
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(pending)
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1500)
+    } catch {
+      setCopied(false)
+    }
+  }
+  const notice = failed && (
+    <ErrorNotice message="The Radar Lead did not get that message." onRetry={() => ask(failed)} />
+  )
+  const notReady = (
+    <div className="text-sm" style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 10 }}>
+      {state.crew.live ? (
+        <>
+          <span>The Radar Lead session opens on its next turn. Open it now to talk here.</span>
+          <Btn primary onClick={props.onStart} disabled={!!props.busy || !props.configured}>Open the session</Btn>
+        </>
+      ) : (
+        <span>
+          The Radar Lead is paused. Turn on <b>Crew</b> at the top of the page to triage your channels and talk to it here.
+        </span>
+      )}
+    </div>
+  )
+
+  if (!expanded) {
+    return (
+      <Card className="mb-4" style={{ padding: '10px 14px' }}>
+        <form
+          className="flex flex-wrap items-center gap-2"
+          onSubmit={(e) => {
+            e.preventDefault()
+            ask(draft)
+          }}
+        >
+          <Avatar m={lead} s={state} size={26} />
+          <Input
+            aria-label="Ask the lead"
+            placeholder="Ask the lead…"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            disabled={!ready || sending}
+            style={{ flex: 1, minWidth: 200 }}
+          />
+          <Btn primary type="submit" disabled={!ready || sending || !draft.trim()}>Send</Btn>
+          {QUICK_QUESTIONS.map((q) => (
+            <Chip key={q} q={q} onClick={() => ask(q)} disabled={!ready || sending} />
+          ))}
+        </form>
+        {!ready && <div style={{ marginTop: 8 }}>{notReady}</div>}
+        {notice}
+      </Card>
+    )
+  }
+
   const crewEvents = props.events.filter((e) => e.kind === 'crew' || e.kind === 'digest').slice(0, 5)
-  const st = memberStatus(lead, state)
   return (
-    <Card style={{ position: 'sticky', top: 0, padding: 0, display: 'flex', flexDirection: 'column', height: 'min(760px, calc(100vh - 140px))', overflow: 'hidden' }}>
-      <div style={{ padding: '14px 16px', borderBottom: '1px solid var(--border)' }}>
+    <Card
+      className="mb-4"
+      style={{ padding: 0, display: 'flex', flexDirection: 'column', height: 'min(620px, calc(100vh - 180px))', overflow: 'hidden' }}
+    >
+      <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--border)' }}>
         <div className="flex items-center gap-2">
           <span style={{ fontWeight: 600, color: 'var(--text-strong)' }}>{state.crew.name || lead.title}</span>
           <Badge variant={st.tone === 'muted' ? 'muted' : st.tone === 'aim' ? 'aim' : 'ok'}>{st.label}</Badge>
           <div className="flex-1" />
-          <Btn onClick={props.onPoll} disabled={!!props.busy || !props.configured}>Poll now</Btn>
+          <Btn onClick={() => props.setExpanded(false)} aria-expanded>Collapse</Btn>
         </div>
         <div className="text-xs text-muted" style={{ marginTop: 2 }}>
           phase {state.crew_memory.phase} · next: {state.crew_memory.next || '—'}
         </div>
         <RosterStrip state={state} />
       </div>
+      {pending && (
+        // ChatEmbed has no API to fill its composer, so the question waits here.
+        <div
+          className="text-sm flex flex-wrap items-center gap-2"
+          style={{ padding: '8px 16px', borderBottom: '1px solid var(--border)', background: 'var(--bg-hover)' }}
+        >
+          <span style={{ flex: 1, minWidth: 200, userSelect: 'all' }}>{pending}</span>
+          <Btn primary style={small} onClick={() => ask(pending)} disabled={!ready || sending}>Send</Btn>
+          <Btn style={small} onClick={copy}>{copied ? 'Copied' : 'Copy'}</Btn>
+        </div>
+      )}
+      {notice && <div style={{ padding: '0 16px' }}>{notice}</div>}
       <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
         {ready ? (
           <ChatEmbed
@@ -795,20 +1207,11 @@ function LeadCard(props: {
             frameless
             startAtBottom
             placeholder="Ask the Radar Lead…"
-            onSend={send}
+            onSend={sendFromEmbed}
           />
         ) : (
           <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
-            {state.crew.live ? (
-              <>
-                <p className="text-sm">The Radar Lead session opens on its next turn. Open it now to talk here.</p>
-                <Btn primary onClick={props.onStart} disabled={!!props.busy || !props.configured}>Open the session</Btn>
-              </>
-            ) : (
-              <p className="text-sm">
-                The Radar Lead is paused. Turn on <b>Crew</b> at the top of the page to triage your channels and talk to it here.
-              </p>
-            )}
+            {notReady}
             {!props.configured && <p className="text-xs text-muted">Add a channel in Settings first.</p>}
             {crewEvents.length > 0 && (
               <ul className="text-xs text-muted flex flex-col gap-1" style={{ marginTop: 6 }}>
@@ -822,29 +1225,13 @@ function LeadCard(props: {
       </div>
       <div className="flex flex-wrap gap-2" style={{ padding: '10px 16px 12px', borderTop: '1px solid var(--border)' }}>
         {QUICK_QUESTIONS.map((q) => (
-          <button
-            key={q}
-            type="button"
-            onClick={() => ask(q)}
-            disabled={!ready || asking}
-            style={{
-              fontSize: 12,
-              border: '1px solid var(--border-strong)',
-              borderRadius: 999,
-              padding: '4px 10px',
-              background: 'transparent',
-              color: 'var(--text)',
-              cursor: ready && !asking ? 'pointer' : 'not-allowed',
-              opacity: ready ? 1 : 0.5,
-            }}
-          >
-            {q}
-          </button>
+          <Chip key={q} q={q} onClick={() => ask(q)} disabled={!ready || sending} />
         ))}
       </div>
     </Card>
   )
 }
+
 
 // ── Team tab ────────────────────────────────────────────────────────────────
 

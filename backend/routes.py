@@ -27,7 +27,7 @@ from typing import Any, Awaitable, Callable
 
 from aiohttp import web
 
-from . import crew_runtime, org, settings as settings_mod, slack_mcp, store, watch
+from . import crew_runtime, needs, org, settings as settings_mod, slack_mcp, store, watch
 
 logger = logging.getLogger("kirocrew.app.slack-radar")
 
@@ -202,8 +202,21 @@ async def _handle_items(request: web.Request, ctx: Any) -> web.Response:
         rows = [r for r in rows if r.get("status") == status]
     if channel:
         rows = [r for r in rows if r.get("channel") == channel]
+    if q.get("handled") == "1":
+        rows = [r for r in rows if needs.is_handled(r)]
     rows.sort(key=lambda r: -float(r.get("ts_float") or 0))
     return web.json_response({"ok": True, "items": rows[:limit], "total": len(rows)})
+
+
+async def _handle_needs(request: web.Request, ctx: Any) -> web.Response:
+    """The Needs-you groups (``needs.build_needs``): fixed rules, no model call."""
+    try:
+        ledger = await asyncio.to_thread(store.read_ledger, _data_dir(ctx))
+    except store.StoreError as exc:
+        return _err(500, "ledger_corrupt", str(exc))
+    spawn = getattr(ctx, "spawn", None)
+    done = spawn.is_done if spawn is not None and hasattr(spawn, "is_done") else None
+    return web.json_response({"ok": True, **needs.build_needs(ledger, store.now(), done)})
 
 
 async def _handle_events(request: web.Request, ctx: Any) -> web.Response:
@@ -316,6 +329,27 @@ async def _handle_crew_message(request: web.Request, ctx: Any) -> web.Response:
     return web.json_response(result)
 
 
+async def _handle_item_handle(request: web.Request, ctx: Any) -> web.Response:
+    """Owner marks an item done / ignored, or reopens it. Status is unchanged."""
+    body = await _json_body(request)
+    if body is None:
+        return _err(400, "body_not_object", "request body must be a JSON object")
+    key = body.get("key")
+    how = body.get("how")
+    if not store.is_item_key(key):
+        return _err(400, "invalid_field", "key must be a ledger item key")
+    if how not in store.HANDLE_ACTIONS:
+        return _err(400, "invalid_field", "how must be done, ignored or reopen")
+    try:
+        item = await asyncio.to_thread(store.mutate, _data_dir(ctx), lambda led: store.apply_handle(led, key, how))
+    except store.StoreError as exc:
+        return _err(500, "ledger_corrupt", str(exc))
+    if item is None:
+        return _err(404, "unknown_item", "that item is not in the ledger")
+    store.append_event(_data_dir(ctx), "handled", f"owner marked an item {how}", key=key)
+    return web.json_response({"ok": True, "item": item})
+
+
 async def _handle_digest_request(request: web.Request, ctx: Any) -> web.Response:
     def _req(led: dict[str, Any]) -> None:
         led["digest"]["requested_at"] = store.now()
@@ -399,6 +433,8 @@ def register_routes(ctx: Any) -> list[Any]:
         r("GET", "/state", _handle_state),
         r("GET", "/org", _handle_org),
         r("GET", "/items", _handle_items),
+        r("GET", "/needs", _handle_needs),
+        r("POST", "/items/handle", _owner_only(_handle_item_handle)),
         r("GET", "/events", _handle_events),
         r("PUT", "/settings", _owner_only(_handle_put_settings)),
         r("GET", "/mcp/status", _owner_only(_handle_mcp_status)),

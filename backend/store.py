@@ -402,6 +402,9 @@ def normalize_message(
         "needs_triage": True,
         "thread_changed": False,
         "possibly_resolved": None,
+        # owner-owned: set only by POST /items/handle, never by the crew's record tool
+        "handled_at": 0.0,
+        "handled_how": "",
         # history already carried reply_count/latest_reply, so the first thread
         # re-check is due one RECHECK_MIN_GAP after ingest, not in the same cycle.
         "last_thread_check_at": t,
@@ -534,6 +537,31 @@ def read_events(data_dir: Path, limit: int = 200) -> list[dict[str, Any]]:
         if isinstance(row, dict):
             out.append(row)
     return out
+
+
+# ── owner write path (POST /items/handle) ─────────────────────────────────
+
+#: What the owner can do to an item on the Needs-you list. ``reopen`` clears both fields.
+HANDLE_ACTIONS = ("done", "ignored", "reopen")
+
+
+def apply_handle(ledger: dict[str, Any], key: str, how: str) -> dict[str, Any] | None:
+    """Mark one item handled (``done``/``ignored``) or clear the mark (``reopen``).
+
+    Status is left alone: a handled item only leaves the Needs-you list. Returns the
+    updated item, or None for an unknown key. The crew's ``apply_crew_record`` has no
+    path to these two fields.
+    """
+    if how not in HANDLE_ACTIONS:
+        raise ValueError(f"how must be one of {HANDLE_ACTIONS}")
+    item = (ledger.get("items") or {}).get(key)
+    if item is None:
+        return None
+    if how == "reopen":
+        item["handled_at"], item["handled_how"] = 0.0, ""
+    else:
+        item["handled_at"], item["handled_how"] = now(), how
+    return item
 
 
 # ── crew write path (used by the MCP server) ───────────────────────────────

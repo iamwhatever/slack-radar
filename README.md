@@ -158,7 +158,7 @@ The page has four tabs. The header shows the tabs, a **Crew** switch (start or p
 
 | Tab | What it shows |
 |---|---|
-| Board | Slack connection and last poll, counts (awaiting triage, possibly resolved, open p0/p1, tracked), then the ledger filtered by status (at most two tags per row: status and priority; the rest on hover), then the last digest with **Request digest**, then per-channel poll health. On the right, the Radar Lead chat card with **Poll now**, the crew phase and next step, and three quick questions (*What needs me today?*, *Draft today's digest*, *Re-check resolved threads*). Select items and press **Investigate** (optionally naming an `owner/name` repo) to spawn the Investigator on them |
+| Board | Slack connection, last poll and **Poll now**. Then **Ask the lead…**: one line with three quick questions (*What needs me today?*, *Draft today's digest*, *Re-check resolved threads*); your first question opens it into the full Radar Lead chat, which stays open (also after a reload) until you press **Collapse**. Then **Needs you**, built by fixed rules from the ledger, no model call: *Needs a decision* (open p0/p1, finished investigations with GitHub links, threads that look resolved), *Questions nobody answered* (no reply for over 2 days) and *Reported more than once* (similar messages in one channel). Each row has **Done** and **Ignore**, which only take it off this list (its status is unchanged), a link to Slack, and a **⋯** menu with *Why? Ask the lead*. **Handled (N)** at the bottom lists what you took off, each with **Reopen**. Below: counts, the ledger filtered by status (at most two tags per row), the last digest with **Request digest**, and per-channel poll health. Select ledger items and press **Investigate** (optionally naming an `owner/name` repo) to spawn the Investigator on them |
 | Team | Who is on the crew: Radar Lead (*Resident*), Investigator (*Joins on demand*), Thread Watcher (*Coming soon*) and the Poller (code, no model), each with a live status. Agent ids are in a **Details** fold |
 | Activity | The work log: polls that moved something, login lost or restored, crew notes, digests, settings changes, crew session moves |
 | Settings | **Basics** first: Slack connection check, watched channels, digest destination (plus your Slack login for a DM), poll interval. **Advanced** (folded): Slack MCP command, workspace URL, backfill, and the crew agent, model and the *Unattended mode (auto-approve investigator commands)* switch |
@@ -312,11 +312,12 @@ slack-radar/
 │   ├── mcp_server.py           crew tools: slack_radar_read/record/digest/request_digest
 │   ├── crew_brief.md           the crew's standing instructions
 │   ├── org.py                  desk/members.json loader and the GET /org view
+│   ├── needs.py                the Needs-you rules behind GET /needs (no model call)
 │   └── crew_ledger_spec.md     pointer to desk/CONTRACT.md
 ├── desk/                       CHARTER.md, CONTRACT.md (ledger fields, tools, routes), members.json
 ├── docs/screenshots/           screenshots and the fake-data capture harness
 ├── ui/                         React page (Board / Activity / Settings)
-└── tests/                      test_slack_radar.py, test_org.py
+└── tests/                      test_slack_radar.py, test_org.py, test_needs.py
 ```
 
 ## Screenshots
@@ -326,9 +327,11 @@ Rendered from fake demo data (`docs/screenshots/capture/`); no real Slack conten
 | | |
 |---|---|
 | ![Board tab](docs/screenshots/board.png) | ![Settings tab](docs/screenshots/settings.png) |
-| Board: Slack connection, counts, the triaged ledger, then digest and channels; the Radar Lead chat card with quick questions | Settings: Basics (connection, channels, digest, poll interval) and the opened Advanced section |
+| Board: the one-line *Ask the lead* bar, **Needs you** first, then counts, the ledger, digest and channels | Settings: Basics (connection, channels, digest, poll interval) and the opened Advanced section |
 | ![Sign in again state](docs/screenshots/needs-login.png) | ![Team tab](docs/screenshots/team.png) |
 | Sign-in expired: a banner says so and polling pauses, instead of an empty queue | Team: who is on the crew and what each one is doing |
+| ![Needs you card](docs/screenshots/needs-you.png) | ![Chat opened](docs/screenshots/chat-expanded.png) |
+| Needs you: three groups, **Done** / **Ignore** per row, and the opened **Handled** fold with **Reopen** | After the first question the lead chat opens in place; **Collapse** folds it back to one line |
 
 ## License
 
@@ -419,7 +422,7 @@ kirocrew app enable slack-radar
 
 | 标签页 | 内容 |
 |---|---|
-| Board（看板） | Slack 连接与最近一次轮询；计数（待分诊、可能已解决、未关闭的 p0/p1、跟踪总数）；紧接着是按状态筛选的台账（每行最多两个标签：状态和优先级，其余悬停可见）；然后是最近一次摘要和 **Request digest**；最后是各频道轮询健康度。右侧是雷达组长聊天卡片，带 **Poll now**、小组阶段与下一步，以及三个快捷问题（*What needs me today?*、*Draft today's digest*、*Re-check resolved threads*）。勾选条目后点 **Investigate**（可选填一个 `owner/name` 仓库）即可派调查员去查 |
+| Board（看板） | Slack 连接、最近一次轮询和 **Poll now**。接着是 **Ask the lead…**：一行输入框加三个快捷问题（*What needs me today?*、*Draft today's digest*、*Re-check resolved threads*）；问出第一个问题后，它展开成完整的雷达组长聊天，一直开着（刷新后也是），直到你点 **Collapse**。然后是 **Needs you（需要你处理）**，按固定规则从台账算出，不调用模型：*Needs a decision*（未关闭的 p0/p1、带 GitHub 链接且已查完的调查、看起来已解决的线程）、*Questions nobody answered*（超过 2 天没人回的问题）和 *Reported more than once*（同一频道里相似的消息）。每行有 **Done** 和 **Ignore**，只是把它移出这个列表（状态不变），一个 Slack 链接，以及 **⋯** 菜单里的 *Why? Ask the lead*。底部的 **Handled (N)** 列出你移走的条目，每条可 **Reopen**。再往下：计数、按状态筛选的台账（每行最多两个标签）、最近一次摘要和 **Request digest**、各频道轮询健康度。在台账里勾选条目后点 **Investigate**（可选填一个 `owner/name` 仓库）即可派调查员去查 |
 | Team（团队） | 小组成员：雷达组长（*Resident*，常驻）、调查员（*Joins on demand*，按需加入）、线程观察员（*Coming soon*，即将推出）和轮询器（代码，不用模型），各带实时状态。agent id 收在 **Details** 折叠里 |
 | Activity（动态） | 工作日志：有变化的轮询、登录失效与恢复、小组备注、摘要、设置变更、小组会话迁移 |
 | Settings（设置） | 先是 **Basics**：Slack 连接检查、监听的频道、摘要去向（选私信时还有 Slack 登录名）、轮询间隔。**Advanced**（默认折叠）：Slack MCP 命令、工作区地址、回溯时长，以及小组的 agent、模型和 *Unattended mode (auto-approve investigator commands)* 开关 |
@@ -543,11 +546,12 @@ slack-radar/
 │   ├── mcp_server.py           小组工具：slack_radar_read/record/digest/request_digest
 │   ├── crew_brief.md           小组的常驻指令
 │   ├── org.py                  desk/members.json 的加载和 GET /org 视图
+│   ├── needs.py                GET /needs 背后的 Needs-you 规则（不调用模型）
 │   └── crew_ledger_spec.md     指向 desk/CONTRACT.md
 ├── desk/                       CHARTER.md、CONTRACT.md（台账字段、工具、接口）、members.json
 ├── docs/screenshots/           截图和假数据截图工具
 ├── ui/                         React 页面（Board / Activity / Settings）
-└── tests/                      test_slack_radar.py, test_org.py
+└── tests/                      test_slack_radar.py, test_org.py, test_needs.py
 ```
 
 ## 截图
@@ -557,9 +561,11 @@ slack-radar/
 | | |
 |---|---|
 | ![看板](docs/screenshots/board.png) | ![设置](docs/screenshots/settings.png) |
-| 看板：Slack 连接、计数、分诊后的台账，其后是摘要和频道；右侧是带快捷问题的雷达组长聊天卡片 | 设置：Basics（连接、频道、摘要、轮询间隔）和展开后的 Advanced |
+| 看板：一行 *Ask the lead* 输入条，最上面是 **Needs you**，然后是计数、台账、摘要和频道 | 设置：Basics（连接、频道、摘要、轮询间隔）和展开后的 Advanced |
 | ![需要重新登录](docs/screenshots/needs-login.png) | ![团队](docs/screenshots/team.png) |
 | 登录过期：顶部横幅直接说明，轮询暂停，而不是显示一个空队列 | 团队：小组有哪些成员、各自在做什么 |
+| ![需要你处理](docs/screenshots/needs-you.png) | ![展开的聊天](docs/screenshots/chat-expanded.png) |
+| Needs you：三组，每行 **Done** / **Ignore**，以及展开后带 **Reopen** 的 **Handled** 折叠 | 问出第一个问题后，组长聊天就地展开；**Collapse** 收回成一行 |
 
 ## 许可
 
