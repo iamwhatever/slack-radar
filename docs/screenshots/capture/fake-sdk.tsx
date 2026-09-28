@@ -82,17 +82,30 @@ const HANDOFF = {
   at: T0 + 6000,
 }
 
+const REPLY_ITEM = item(4, 'C0DEMO2', 'hana', 'Does the CSV export keep my column filters?', {
+  category: 'question', priority: 'p3', summary: 'Does CSV export keep column filters?', reply_count: 0,
+})
+const REPLY_DRAFT = 'Yes. The export uses the columns you filtered, and hidden columns are left out. ' +
+  'The one known gap is tracked here: https://github.com/example-org/example-app/issues/398'
+
 const NEEDS = {
   ok: true,
   handled_total: HANDLED.length,
+  replied_total: 1,
+  replied: [{
+    key: ITEMS[2].key, channel: ITEMS[2].channel, summary: ITEMS[2].summary,
+    text: 'Settings → API keys → Rotate. The old key keeps working for 24 hours.',
+    at: T0 + 3000, permalink: `https://example.slack.com/archives/C0DEMO1/p${T0 + 3000}000200`,
+  }],
   handoffs_total: 1,
   handoffs: [{
     key: ITEMS[0].key, channel: ITEMS[0].channel, permalink: ITEMS[0].permalink,
     summary: ITEMS[0].summary, status: ITEMS[0].status, handled_how: '', handoff: HANDOFF,
   }],
   groups: [
-    { id: 'decide', total: 3, entries: [
+    { id: 'decide', total: 4, entries: [
       need(ITEMS[0], 'Fix ready to hand off', { handoff_title: HANDOFF.title }),
+      need(REPLY_ITEM, 'Reply ready to send', { reply_draft: REPLY_DRAFT }),
       need(ITEMS[3], 'Open p1'),
       need(ITEMS[2], 'Looks resolved: reply says “thanks”'),
     ] },
@@ -189,7 +202,11 @@ const api = {
   raw: async () => new Response('{}'),
   request: async (path: string) => respond(path),
   get: async (path: string) => respond(path),
-  post: async (path: string) => respond(path),
+  post: async (path: string, body?: unknown) => {
+    const w = window as unknown as { __posts?: unknown[] }
+    w.__posts = [...(w.__posts || []), { path, body }]
+    return respond(path)
+  },
   put: async (path: string) => respond(path),
   patch: async (path: string) => respond(path),
   del: async (path: string) => respond(path),

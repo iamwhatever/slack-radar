@@ -1,6 +1,6 @@
 {
   "name": "slack-radar",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "displayName": "Slack Radar",
   "description": "A Slack triage crew that remembers, reading with your own Slack identity through your Slack MCP — no bot, no invite. Watches the channels you choose, classifies every new message as a bug report, feature request, question, already-answered or noise with a priority, links clusters to existing GitHub issues and PRs, notices when a thread looks resolved, and sends you a daily digest — keeping everything in a local ledger so nothing is triaged twice.",
   "author": "iamwhatever",
@@ -14,13 +14,14 @@
   ],
   "highlights": [
     "Reads with your own Slack identity via your Slack MCP: no bot, no invite, nothing visible in the channel",
-    "Read-only by construction: a hard allowlist of five read tools; the only write is an optional digest DM to yourself",
+    "Reads through a hard allowlist of five read tools; it writes only an optional digest DM to yourself and the thread replies you send with a click",
     "One crew for every channel you configure: new messages are classified by category and priority with a one-line summary",
     "Its own per-channel cursor, independent of your Slack read state",
     "Flags threads that look resolved for the crew to judge; code never closes an item on its own",
     "An expired Slack MCP login shows as 'Slack connection: sign in again', never as 'no new messages'",
     "Clusters of reports are investigated by a read-only subagent that links matching GitHub issues and PRs",
-    "A fix the crew found becomes one click: Start fix session opens a new chat with the task typed in, and nothing is sent until you press Send"
+    "A fix the crew found becomes one click: Start fix session opens a new chat with the task typed in, and nothing is sent until you press Send",
+    "Reply in one click: the Lead drafts an answer, you edit it if you like and press Send to thread, and it goes out under your name; the crew itself cannot post"
   ],
   "defaultEnabled": false,
   "platform": {

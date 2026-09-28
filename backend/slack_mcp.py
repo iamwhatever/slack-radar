@@ -12,10 +12,18 @@ Least privilege is enforced HERE, before anything reaches the process:
 
 * :meth:`SlackMcpClient.call` accepts only :data:`READ_TOOLS`. Any other name raises
   :class:`ToolNotAllowed` without writing a byte to the subprocess.
-* The ONE write is :meth:`SlackMcpClient.send_self_dm` (``self_dm``: a DM from the user to
-  the user). It is a separate method, used only by the daily-digest path in ``watch.py``,
-  and the tool name is a literal inside it rather than a parameter. ``post_message``,
-  ``create_draft``, ``reaction_tool`` and every other write tool are unreachable.
+* There are two writes, each a separate method whose tool name is a literal inside it
+  rather than a parameter:
+
+  - :meth:`SlackMcpClient.send_self_dm` (``self_dm``: a DM from the user to the user),
+    used only by the daily-digest path in ``watch.py``;
+  - :meth:`SlackMcpClient.post_reply` (``post_message`` with ``threadTs``: a reply in an
+    item's own thread, as the user), used only by the owner-only
+    ``POST /items/reply/send`` route when the owner clicks **Send to thread**. The poller
+    never calls it, and the crew's ledger MCP server does not import this module.
+
+  :meth:`SlackMcpClient.call` still refuses ``post_message``. ``create_draft``,
+  ``reaction_tool`` and every other write tool are unreachable.
 
 Blocking by design; callers run it in ``asyncio.to_thread``. One lock serializes calls.
 """
@@ -46,8 +54,16 @@ READ_TOOLS: frozenset[str] = frozenset(
         "batch_get_user_info",
     }
 )
-#: The single write, reachable only through :meth:`SlackMcpClient.send_self_dm`.
+#: The digest write, reachable only through :meth:`SlackMcpClient.send_self_dm`.
 SELF_DM_TOOL = "self_dm"
+#: Channel writes, reachable only through :meth:`SlackMcpClient.post_reply`. Never in
+#: :data:`READ_TOOLS`, so :meth:`SlackMcpClient.call` refuses them.
+POST_REPLY_TOOL = "post_message"
+WRITE_TOOLS: frozenset[str] = frozenset({POST_REPLY_TOOL})
+#: The longest reply :meth:`SlackMcpClient.post_reply` sends.
+MAX_REPLY_CHARS = 1500
+_THREAD_TS_RE = re.compile(r"^\d{9,11}\.\d{6}$")
+_CHANNEL_ID_RE = re.compile(r"^[CGD][A-Z0-9]{2,20}$")
 
 #: Env vars never handed to the Slack MCP subprocess: gateway-internal credentials it has
 #: no use for. The MCP authenticates with the user's own browser/Midway session.
@@ -285,6 +301,21 @@ class SlackMcpClient:
         """The digest's only Slack write: a DM from the user to themselves."""
         return self._call_tool(SELF_DM_TOOL, {"login": login, "text": text})
 
+    def post_reply(self, channel: str, thread_ts: str, text: str) -> Any:
+        """Reply in one thread as the user: ``post_message`` with ``threadTs``.
+
+        Only the owner's **Send to thread** click reaches this (``routes.py``). It always
+        replies inside a thread, never posts a new top-level message, and checks its
+        arguments before anything is written to the process.
+        """
+        if not isinstance(channel, str) or not _CHANNEL_ID_RE.match(channel):
+            raise ToolNotAllowed("post_reply needs a channel id")
+        if not isinstance(thread_ts, str) or not _THREAD_TS_RE.match(thread_ts):
+            raise ToolNotAllowed("post_reply needs a thread timestamp")
+        if not isinstance(text, str) or not text.strip() or len(text) > MAX_REPLY_CHARS:
+            raise ToolNotAllowed(f"post_reply needs 1-{MAX_REPLY_CHARS} characters of text")
+        return self._call_tool(POST_REPLY_TOOL, {"channelId": channel, "threadTs": thread_ts, "text": text})
+
     def probe(self) -> dict[str, Any]:
         """initialize + tools/list only. Never calls a tool."""
         with self._lock:
@@ -293,7 +324,8 @@ class SlackMcpClient:
         tools = [t.get("name") for t in (reply.get("result") or {}).get("tools") or [] if isinstance(t, dict)]
         self._tools = [t for t in tools if isinstance(t, str)]
         missing = sorted(READ_TOOLS - set(self._tools))
-        return {"tools": len(self._tools), "missing_read_tools": missing, "has_self_dm": SELF_DM_TOOL in self._tools}
+        return {"tools": len(self._tools), "missing_read_tools": missing, "has_self_dm": SELF_DM_TOOL in self._tools,
+                "has_post_message": POST_REPLY_TOOL in self._tools}
 
 
 # ── process-wide client (the gateway keeps one subprocess) ─────────────────

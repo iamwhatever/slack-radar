@@ -53,6 +53,10 @@ STOPWORDS = frozenset(
 HANDOFF_REASON = "Fix ready to hand off"
 #: Hand-offs listed in the "Fixes handed off" fold.
 HANDOFF_CAP = 50
+#: The ``decide`` reason for an item carrying a ``reply_draft`` (below a hand-off).
+REPLY_REASON = "Reply ready to send"
+#: Sent replies listed in the "Replied" fold.
+REPLIED_CAP = 50
 
 _PRIORITY_RANK = {"p0": 0, "p1": 1, "p2": 2, "p3": 3}
 
@@ -92,6 +96,7 @@ def _entry(item: dict[str, Any], now: float, reason: str) -> dict[str, Any]:
         "age_hours": age_hours(item, now),
         "reason": reason,
         **({"handoff_title": item["fix_handoff"].get("title") or ""} if has_handoff(item) else {}),
+        **({"reply_draft": str(item["reply_draft"].get("text") or "")} if store.has_reply_draft(item) else {}),
     }
 
 
@@ -107,6 +112,28 @@ def handoff_entry(item: dict[str, Any]) -> dict[str, Any]:
         "handled_how": item.get("handled_how") or "",
         "handoff": {k: h.get(k) for k in ("title", "prompt", "repo", "links", "at")},
     }
+
+
+def replied_entry(item: dict[str, Any]) -> dict[str, Any]:
+    """One row of the "Replied" fold: what the owner sent, and where."""
+    r = item["replied"]
+    return {
+        "key": item.get("key") or "",
+        "channel": item.get("channel") or "",
+        "summary": item.get("summary") or str(item.get("text") or "")[:200],
+        "text": str(r.get("text") or ""),
+        "at": float(r.get("at") or 0),
+        "permalink": str(r.get("permalink") or item.get("permalink") or ""),
+    }
+
+
+def replied_rows(ledger: dict[str, Any]) -> tuple[list[dict[str, Any]], int]:
+    """Sent replies, newest first, capped at :data:`REPLIED_CAP`, and their total."""
+    rows = sorted(
+        (it for it in (ledger.get("items") or {}).values() if isinstance(it, dict) and isinstance(it.get("replied"), dict)),
+        key=lambda it: -float(it["replied"].get("at") or 0),
+    )
+    return [replied_entry(it) for it in rows[:REPLIED_CAP]], len(rows)
 
 
 def has_handoff(item: dict[str, Any]) -> bool:
@@ -138,6 +165,8 @@ def decide_reason(item: dict[str, Any], spawn_done: Callable[[str], bool] | None
     """Why an open, unhandled item needs a call, or ``""``. First match wins."""
     if has_handoff(item):
         return HANDOFF_REASON
+    if store.has_reply_draft(item):
+        return REPLY_REASON
     if item.get("priority") in URGENT_PRIORITIES:
         return f"Open {item['priority']}"
     if _investigation_done(item, spawn_done):
@@ -249,7 +278,10 @@ def build_needs(
         (it for it in (ledger.get("items") or {}).values() if isinstance(it, dict) and has_handoff(it)),
         key=lambda it: -float(it["fix_handoff"].get("at") or 0),
     )
+    replied, replied_total = replied_rows(ledger)
     return {
+        "replied": replied,
+        "replied_total": replied_total,
         "groups": [{"id": gid, "total": len(rows), "entries": rows[:cap]} for gid, rows in groups],
         "handled_total": handled,
         "handoffs": [handoff_entry(it) for it in handoffs[:HANDOFF_CAP]],

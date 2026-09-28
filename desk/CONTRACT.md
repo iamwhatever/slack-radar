@@ -14,7 +14,7 @@ What the code, the agents and the UI agree on. The people-level rules are in [CH
 | Crew slot | `crew-slack-radar`, then `crew-slack-radar-g<N>` | `store.SLOT_KEY`, `store.next_slot_key` |
 | Ledger MCP server | `@slack-radar:ledger` | `app.json` `mcpServers.ledger` |
 | Unattended grant scope | `crew:slack-radar:autoapprove` (900 s) | `crew_runtime.TRUST_SCOPE` |
-| Brief sentinel | `<!-- slack-radar-crew-brief v5 -->` | first line of `backend/crew_brief.md` |
+| Brief sentinel | `<!-- slack-radar-crew-brief v6 -->` | first line of `backend/crew_brief.md` |
 
 These names are part of the install: renaming one orphans a session, a spec or a grant.
 
@@ -102,6 +102,9 @@ One per top-level message. Thread replies are not items; they are signals on the
 | `fix_handoff` | crew (Lead) / owner clears | local | `{title ≤120, prompt ≤4000, repo owner/name, links [https ≤10], at}` or `null`. A fix task for a coding session the owner starts from the Board. Only on a `triaged`/`investigating` `bug-report`/`feature-request`; one per item, a new write replaces it. Title and prompt get the public check (`store.public_text_problem`: no path, host or secret). The prompt must contain the item key, every link, the word `coverage` (the verdict) and the line `Do not merge; open a PR for review`; `links` defaults to the item's `links`. Cleared only by `POST /items/handoff/dismiss` |
 | `handled_at` | owner | local | epoch s the owner pressed **Done** or **Ignore**; `0` = not handled. Set only by `POST /items/handle`; `slack_radar_record` has no field for it |
 | `handled_how` | owner | local | `done` · `ignored` · `""`. A handled item keeps its `status`; it only leaves the Needs-you list. `reopen` clears both fields |
+| `reply_draft` | crew (Lead) / owner edits | local until sent | `{text ≤1500, at, by: lead\|owner}` or `null`/absent. A reply for the item's own thread that the owner sends. Only on an open item. The Lead's text gets the public check (`store.public_text_problem`) and is refused when it names another channel's id or carries a 40+ char line of another channel's message or replies. `POST /items/reply/draft` saves the owner's edit (`by: owner`, length and open-status checks only). Cleared by a successful send |
+| `replied` | send route | local (the text is public in Slack) | `{ts, at, text, permalink}`: what the owner sent. Set only by `POST /items/reply/send`; `slack_radar_record` has no field for it |
+| `reply_send_at` | send route | local | epoch s of the last send attempt; the minute-per-item limit. Cleared when a send certainly posted nothing |
 
 Retention: closed items (`resolved`, `noise`) are dropped 30 days after their last update; the ledger holds at most 2000 items, closed-oldest evicted first.
 
@@ -141,7 +144,7 @@ The crew's resumable position across turns, compaction and restarts.
 | `last_destination` / `last_text` | poller | `self_dm` or `dashboard`, and the rendered text (shown on the board) |
 | `last_error` | poller | a `needs_login` or transport failure keeps the digest pending for the next cycle; any other error drops it rather than retrying forever |
 
-The gateway renders the text itself (`watch.render_digest`) from counts and PUBLIC item fields plus the crew's headline, and delivers it per `digest_destination`: `self_dm` (the app's only Slack write, `SlackMcpClient.send_self_dm`, reachable only from `watch.deliver_pending_digest`) or `dashboard` (a `notification` event plus `last_text`). Nothing is ever posted to a channel.
+The gateway renders the text itself (`watch.render_digest`) from counts and PUBLIC item fields plus the crew's headline, and delivers it per `digest_destination`: `self_dm` (the app's only Slack write, `SlackMcpClient.send_self_dm`, reachable only from `watch.deliver_pending_digest`) or `dashboard` (a `notification` event plus `last_text`). The digest is never posted to a channel; the only channel write is the owner's one-click reply (§5, *One-click reply*).
 
 ### Event log (`events.jsonl`)
 
@@ -154,7 +157,7 @@ With no Slack bot on the gateway the poller reads the http app's `state` (the on
 
 #### Brief injection — presence check
 
-The brief (`crew_brief.md`, first line `<!-- slack-radar-crew-brief v5 -->`) is prepended to the nudge whenever no message in the session both contains the sentinel and is at least as long as the brief. Session start, compaction and restart are all the same case.
+The brief (`crew_brief.md`, first line `<!-- slack-radar-crew-brief v6 -->`) is prepended to the nudge whenever no message in the session both contains the sentinel and is at least as long as the brief. Session start, compaction and restart are all the same case.
 
 ## 4. MCP tools (`backend/mcp_server.py`)
 
@@ -172,6 +175,8 @@ One stdio server, declared in `app.json` `mcpServers.ledger`, reached by agents 
 `slack_radar_record` crew shape: `{phase?: idle|triaging|investigating|rechecking|digest, next?: str ≤500, today?: str ≤240, tried_add?: [str], rejected_add?: [str]}`. A refused `today` is reported in `refused` as key `crew.today`; the other crew fields still apply.
 
 `event` is one line for the Activity tab: no paths, no hosts.
+
+`slack_radar_record` also takes `reply_draft?: {text} | null` per item (see the item table). A refused draft is reported per item and the other fields still apply; there is no field for `replied`.
 
 ## 5. HTTP routes (`backend/routes.py`)
 
@@ -196,8 +201,22 @@ All paths are under `/api/apps/slack-radar`. "Owner" means `_owner_gate`: the da
 | POST | `/crew/message` | owner | `{message}` | send the owner's chat-card message to the lead |
 | POST | `/digest/request` | owner | — | request a digest and wake the crew |
 | POST | `/investigate` | owner | `{keys: [≤10], repo?}` | spawn the Investigator via the spawn SDK; refused `unattended_required` unless unattended is on |
+| POST | `/items/reply/draft` | owner | `{key, text}` | save the owner's edited `reply_draft` (`by: owner`). `400 invalid_field`, `404 unknown_item` |
+| POST | `/items/reply/send` | owner | `{key, keep_open?: bool}` | send the item's `reply_draft` to its thread as the owner (below) |
 
 Errors are `{ok: false, code, error}` with an HTTP status.
+
+#### One-click reply
+
+`POST /items/reply/send` is the only caller of `SlackMcpClient.post_reply`, which calls the Slack MCP's `post_message` with `{channelId: item.channel, threadTs: item.thread_ts or item.ts, text: reply_draft.text}`. `slack_mcp.WRITE_TOOLS = {"post_message"}` is disjoint from `READ_TOOLS`, so `SlackMcpClient.call("post_message")` still raises `ToolNotAllowed`; `watch.py`, `crew_runtime.py` and `mcp_server.py` never reference it. Order: check and stamp `reply_send_at` under the ledger lock, then post, then on success set `replied`, clear `reply_draft`, append event kind `reply` (`replied in <channel> · <first 60 chars>`), and mark the item handled `done` unless `keep_open` is true.
+
+| Refusal | Status | When |
+|---|---|---|
+| `needs_login` | 409 | `ledger.source_state != ok`, or the post itself failed on auth. Nothing posted |
+| `no_draft` / `not_open` | 409 | no draft, or the item is closed |
+| `rate_limited` | 429 | a send attempt for this item less than 60 s ago; `retry_after` seconds |
+| `send_unknown` | 502 | the Slack MCP did not answer; the stamp is kept so a retry inside the minute cannot post twice |
+| `tool_error` / `binary_not_found` | 502 | the tool refused or is missing; nothing posted, the stamp is cleared |
 
 `GET /org` `live` blocks:
 
@@ -245,3 +264,5 @@ Response: `{ok, groups: [{id, total, entries}], handled_total, handoffs, handoff
 A `decide` row with a hand-off shows **Start fix session** and **Ignore** (Done moves into ⋯). **Start fix session** calls the app SDK's `useChatLauncher().openChat({message: prompt, autoSend: false})`: a new chat session with the prompt in its composer, never sent. On a host without `useChatLauncher` it opens a dialog with the prompt, **Copy prompt** and a **New chat** link.
 
 **Done** / **Ignore** on a cluster entry posts `/items/handle` for every member.
+
+**Reply ready to send.** An open, unhandled item with a `reply_draft` joins `decide` with reason `Reply ready to send`, checked right after `Fix ready to hand off`; its entry carries `reply_draft` (the text). The response also carries `replied` (items with a `replied` record, newest first, at most 50: `{key, channel, summary, text, at, permalink}`) and `replied_total`, the board's **Replied (N)** fold. The row shows the draft in an editable box with **Send to thread** and **Ignore**; ⋯ holds *Open in Slack*, *Done without sending* and *Why? Ask the lead*. Send saves an edited draft first, then posts; the row leaves the list and the board says "Sent as you".

@@ -502,6 +502,96 @@ def _investigation_task(rows: list[dict[str, Any]], repo: str) -> str:
     )
 
 
+# ── one-click reply: the Lead drafts, the owner sends ─────────────────────────
+
+#: Refusals from ``store.reserve_reply_send`` → (HTTP status, message).
+_SEND_REFUSALS = {
+    "unknown_item": (404, "that item is not in the ledger"),
+    "needs_login": (409, "Slack needs you to sign in again before anything can be sent"),
+    "no_draft": (409, "that item has no reply draft"),
+    "not_open": (409, "that item is closed"),
+    "rate_limited": (429, "a reply for this item was sent less than a minute ago"),
+}
+
+
+async def _handle_reply_draft(request: web.Request, ctx: Any) -> web.Response:
+    """Owner saves an edited reply draft (``by: "owner"``)."""
+    body = await _json_body(request)
+    if body is None:
+        return _err(400, "body_not_object", "request body must be a JSON object")
+    key = body.get("key")
+    if not store.is_item_key(key):
+        return _err(400, "invalid_field", "key must be a ledger item key")
+    try:
+        item, why = await asyncio.to_thread(
+            store.mutate, _data_dir(ctx), lambda led: store.apply_reply_draft_edit(led, key, body.get("text"))
+        )
+    except store.StoreError as exc:
+        return _err(500, "ledger_corrupt", str(exc))
+    if item is None:
+        return _err(404, "unknown_item", "that item is not in the ledger")
+    if why:
+        return _err(400, "invalid_field", why)
+    return web.json_response({"ok": True, "item": item})
+
+
+async def _handle_reply_send(request: web.Request, ctx: Any) -> web.Response:
+    """Owner sends an item's reply draft to its Slack thread, as the owner.
+
+    The only caller of ``SlackMcpClient.post_reply``. One attempt per item per minute;
+    an attempt whose outcome is unknown (a transport failure) keeps its stamp, so a
+    retry cannot post the same reply twice inside that minute.
+    """
+    body = await _json_body(request)
+    if body is None:
+        return _err(400, "body_not_object", "request body must be a JSON object")
+    key = body.get("key")
+    if not store.is_item_key(key):
+        return _err(400, "invalid_field", "key must be a ledger item key")
+    keep_open = body.get("keep_open") is True
+    try:
+        settings = await asyncio.to_thread(settings_mod.read_settings)
+    except settings_mod.SettingsUnavailable:
+        return _err(503, "vault_unavailable", "the gateway secret vault is unavailable")
+    data_dir = _data_dir(ctx)
+    try:
+        plan = await asyncio.to_thread(store.mutate, data_dir, lambda led: store.reserve_reply_send(led, key))
+    except store.StoreError as exc:
+        return _err(500, "ledger_corrupt", str(exc))
+    if plan["code"]:
+        status, message = _SEND_REFUSALS[plan["code"]]
+        extra = {"retry_after": plan["retry_after"]} if plan.get("retry_after") else {}
+        return web.json_response({"ok": False, "code": plan["code"], "error": message, **extra}, status=status)
+    client = slack_mcp.get_client(settings["slack_mcp_command"])
+    try:
+        result = await asyncio.to_thread(client.post_reply, plan["channel"], plan["thread_ts"], plan["text"])
+    except slack_mcp.McpTransportError as exc:
+        return _err(502, "send_unknown", f"Slack did not answer; check the thread before retrying ({exc})"[:300])
+    except slack_mcp.SlackMcpError as exc:
+        await asyncio.to_thread(store.mutate, data_dir, lambda led: store.release_reply_send(led, key))
+        status = 409 if exc.code == "needs_login" else 502
+        return _err(status, exc.code, f"Nothing was posted: {exc}"[:300])
+    reply_ts = _reply_ts(result)
+    link = (
+        store.permalink(str(settings.get("workspace_url") or ""), plan["channel"], reply_ts, plan["thread_ts"])
+        if reply_ts else ""
+    )
+    item = await asyncio.to_thread(
+        store.mutate, data_dir, lambda led: store.apply_reply_sent(led, key, plan["text"], reply_ts, link, keep_open)
+    )
+    store.append_event(data_dir, "reply", f"replied in {plan['channel']} · {plan['text'][:60]}", key=key)
+    return web.json_response({"ok": True, "item": item})
+
+
+def _reply_ts(result: Any) -> str:
+    """The posted message's ``ts`` from a ``post_message`` result, or ""."""
+    if isinstance(result, dict):
+        for cand in (result.get("ts"), (result.get("message") or {}).get("ts") if isinstance(result.get("message"), dict) else None):
+            if isinstance(cand, str) and cand:
+                return cand
+    return ""
+
+
 # ── registration ───────────────────────────────────────────────────────────
 
 
@@ -530,4 +620,6 @@ def register_routes(ctx: Any) -> list[Any]:
         r("POST", "/crew/message", _owner_only(_handle_crew_message)),
         r("POST", "/digest/request", _owner_only(_handle_digest_request)),
         r("POST", "/investigate", _owner_only(_handle_investigate)),
+        r("POST", "/items/reply/draft", _owner_only(_handle_reply_draft)),
+        r("POST", "/items/reply/send", _owner_only(_handle_reply_send)),
     ]

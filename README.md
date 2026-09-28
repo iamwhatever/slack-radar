@@ -64,7 +64,8 @@ flowchart LR
   I --> T
   T -- "triage · memory · pending digest" --> L
   L -- "pending digest" --> W
-  W -- "self_dm (only write)" --> MCP
+  W -- "self_dm (digest)" --> MCP
+  R -- "post_message (your Send click)" --> MCP
   W -- "or notification" --> UI
   UI -- "settings" --> R --> V
   V -- "channels · MCP command · digest dest" --> W
@@ -177,6 +178,10 @@ with the new default).
 
 When an investigation finds a concrete fix (a linked issue with a known cause, or a PR to backport), the Radar Lead writes one hand-off on the item: a self-contained task for a coding session with the repo, the item key, the links, the coverage verdict, what to change, how to verify, and "Do not merge; open a PR for review". The row shows up under *Needs a decision* as "Fix ready to hand off". Press **Start fix session** and a new chat opens with that task already typed into its box; nothing is sent until you press Send, and you can edit it first. Slack Radar never starts the fix itself, never messages another session, and writes nothing to Slack or GitHub. If you ask the Lead to do dev work, it answers with a hand-off instead. On an older Kiro Crew without the SDK's chat launcher, the button opens the task in a dialog with **Copy prompt** and a **New chat** link.
 
+### Reply in one click
+
+When a question has a clear answer in the ledger or its links, or a bug report deserves an acknowledgement with the linked issue or PR, the Radar Lead drafts a short reply in the poster's language. The row shows up under *Needs a decision* as "Reply ready to send", with the draft in an editable box. Press **Send to thread** and it goes out in that message's thread under your own name, through your Slack MCP; the row leaves the list and the item counts as done. **Ignore** drops the row; **⋯** has *Open in Slack* and *Done without sending*. **Replied (N)** under the list shows what you sent, with a link to each reply. The Lead never posts: nothing reaches Slack without your click, one send per item per minute, and sending waits while Slack needs you to sign in again.
+
 ## The team
 
 | Member | Role | What they do |
@@ -227,12 +232,14 @@ Disabling the app stops the loop and revokes the crew's auto-approve grant.
 
 ## Autonomy and security
 
-- **Read-only Slack.** The MCP client admits only five read tools (`list_channels`,
-  `batch_get_conversation_history`, `batch_get_thread_replies`,
-  `batch_get_channel_info`, `batch_get_user_info`); any other tool name raises
-  before it reaches the process. The one write, `self_dm`, is a separate method
-  called only from the digest path. No replies, reactions, drafts or channel
-  posts.
+- **Slack is read-only unless you click Send.** The MCP client's `call` admits only
+  five read tools (`list_channels`, `batch_get_conversation_history`,
+  `batch_get_thread_replies`, `batch_get_channel_info`, `batch_get_user_info`); any
+  other tool name, `post_message` included, raises before it reaches the process.
+  There are two writes, each a separate method: `self_dm` for the digest, and
+  `post_message` in a thread, called only by the owner-only route behind **Send to
+  thread**. The crew drafts replies but has no tool that posts; no reactions, edits
+  or new channel posts.
 - **No shell on the lead.** The Radar Lead's agent has no `execute_bash` and no
   `fs_write`. Its only tools are the ledger tools, `spawn_run` / `spawn_status` /
   `spawn_list`, `fs_read`, `grep`, `glob` and `thinking`, and all of them are
@@ -314,7 +321,7 @@ slack-radar/
 │   ├── routes.py               HTTP API (backend.hooks.routes)
 │   ├── hooks.py                on_startup / on_shutdown: poll loop, grant revoke
 │   ├── watch.py                poll cycle, thread re-check, ts<->ISO, digest render/deliver
-│   ├── slack_mcp.py            stdio client for your Slack MCP, read-only allowlist + self_dm
+│   ├── slack_mcp.py            stdio client for your Slack MCP, read-only allowlist + self_dm + post_reply
 │   ├── settings.py             vault-backed settings
 │   ├── crew_runtime.py         crew session, brief injection, nudge, grant, slot moves
 │   ├── store.py                ledger (stdlib only, shared with the MCP server)
@@ -340,7 +347,7 @@ Rendered from fake demo data (`docs/screenshots/capture/`); no real Slack conten
 | ![Sign in again state](docs/screenshots/needs-login.png) | ![Team tab](docs/screenshots/team.png) |
 | Sign-in expired: a banner says so and polling pauses, instead of an empty queue | Team: who is on the crew and what each one is doing |
 | ![Needs you card](docs/screenshots/needs-you.png) | ![Chat opened](docs/screenshots/chat-expanded.png) |
-| Needs you: a fix ready to hand off with **Start fix session** / **Ignore**, other rows with **Done** / **Ignore**, and the opened **Fixes handed off** and **Handled** folds | After the first question the lead chat opens in place; **Collapse** folds it back to one line |
+| Needs you: a fix ready to hand off with **Start fix session** / **Ignore**, a reply ready to send with its editable draft and **Send to thread** / **Ignore**, other rows with **Done** / **Ignore**, and the opened **Fixes handed off**, **Handled** and **Replied** folds | After the first question the lead chat opens in place; **Collapse** folds it back to one line |
 
 ## License
 
@@ -447,6 +454,10 @@ kirocrew app enable slack-radar
 
 调查找到明确的修复时（一个原因已知的关联 issue，或一个要回移的 PR），雷达组长会在条目上写一个交接：给编码会话的自包含任务，含仓库、条目 key、链接、覆盖结论、改什么、怎么验证，以及 "Do not merge; open a PR for review"。这一行会出现在 *Needs a decision* 里，原因是 "Fix ready to hand off"。点 **Start fix session** 会打开一个新聊天，任务已经填在输入框里；你按发送之前什么都不会发出去，也可以先改。Slack Radar 从不自己开始修复，从不给别的会话发消息，也不向 Slack 或 GitHub 写任何东西。你让组长做开发工作时，它会用一个交接来回答。在没有 SDK 聊天启动器的旧版 Kiro Crew 上，这个按钮会弹出对话框，带 **Copy prompt** 和 **New chat** 链接。
 
+### 一键回复
+
+当一个问题在台账或链接里已有明确答案，或一个 bug 报告值得回一句并附上关联的 issue 或 PR 时，雷达组长会用发帖人的语言起草一条简短的回复。这一行会出现在 *Needs a decision* 里，原因是 "Reply ready to send"，草稿显示在可编辑的输入框里。点 **Send to thread**，它就以你自己的名义、通过你的 Slack MCP 发到那条消息的线程里；这一行离开列表，条目算作已完成。**Ignore** 移走这一行；**⋯** 里有 *Open in Slack* 和 *Done without sending*。列表下面的 **Replied (N)** 显示你发过的回复，每条带链接。组长从不发消息：没有你的点击，什么都不会到达 Slack；每个条目每分钟最多发一次；Slack 需要重新登录时不能发送。
+
 ## 团队
 
 | 成员 | 角色 | 职责 |
@@ -492,10 +503,11 @@ kirocrew app enable slack-radar
 
 ## 自主性与安全
 
-- **Slack 只读。** MCP 客户端只放行五个读取工具（`list_channels`、
+- **除非你点发送，Slack 是只读的。** MCP 客户端的 `call` 只放行五个读取工具（`list_channels`、
   `batch_get_conversation_history`、`batch_get_thread_replies`、
-  `batch_get_channel_info`、`batch_get_user_info`），其他工具名在到达进程前就会被拒绝。
-  唯一的写操作 `self_dm` 是单独的方法，只在投递摘要时调用。不回复、不加表情、不存草稿、不在频道发言。
+  `batch_get_channel_info`、`batch_get_user_info`），其他工具名（包括 `post_message`）在到达进程前就会被拒绝。
+  写操作有两个，各是单独的方法：摘要用的 `self_dm`，以及在线程里的 `post_message`，只由 **Send to thread**
+  背后的仅限所有者接口调用。小组能起草回复，但没有任何能发消息的工具；不加表情、不编辑、不在频道发新消息。
 - **组长没有 shell。** 雷达组长的 agent 没有 `execute_bash` 和 `fs_write`。它只有台账工具、
   `spawn_run` / `spawn_status` / `spawn_list`、`fs_read`、`grep`、`glob` 和 `thinking`，
   而且都已预先批准，所以无论哪种模式，组长都不会弹确认，也不会多出别的工具。
@@ -554,7 +566,7 @@ slack-radar/
 │   ├── routes.py               HTTP 接口（backend.hooks.routes）
 │   ├── hooks.py                on_startup / on_shutdown：轮询循环、撤销授权
 │   ├── watch.py                轮询、线程复查、ts<->ISO、摘要渲染与投递
-│   ├── slack_mcp.py            连接你的 Slack MCP 的 stdio 客户端，只读白名单 + self_dm
+│   ├── slack_mcp.py            连接你的 Slack MCP 的 stdio 客户端，只读白名单 + self_dm + post_reply
 │   ├── settings.py             基于保险库的设置
 │   ├── crew_runtime.py         小组会话、简报注入、唤醒、授权、槽位迁移
 │   ├── store.py                台账（仅用标准库，与 MCP 服务器共用）
@@ -580,7 +592,7 @@ slack-radar/
 | ![需要重新登录](docs/screenshots/needs-login.png) | ![团队](docs/screenshots/team.png) |
 | 登录过期：顶部横幅直接说明，轮询暂停，而不是显示一个空队列 | 团队：小组有哪些成员、各自在做什么 |
 | ![需要你处理](docs/screenshots/needs-you.png) | ![展开的聊天](docs/screenshots/chat-expanded.png) |
-| Needs you：可交接的修复带 **Start fix session** / **Ignore**，其他行带 **Done** / **Ignore**，以及展开的 **Fixes handed off** 和 **Handled** 折叠 | 问出第一个问题后，组长聊天就地展开；**Collapse** 收回成一行 |
+| Needs you：可交接的修复带 **Start fix session** / **Ignore**，待发送的回复带可编辑草稿和 **Send to thread** / **Ignore**，其他行带 **Done** / **Ignore**，以及展开的 **Fixes handed off**、**Handled** 和 **Replied** 折叠 | 问出第一个问题后，组长聊天就地展开；**Collapse** 收回成一行 |
 
 ## 许可
 

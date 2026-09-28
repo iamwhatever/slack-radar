@@ -72,7 +72,7 @@ def test_watcher_is_a_ledger_only_leaf() -> None:
 
 def test_brief_carries_the_watcher_rule_and_the_current_marker() -> None:
     brief = (ROOT / "backend" / "crew_brief.md").read_text(encoding="utf-8")
-    assert brief.splitlines()[0] == crew_runtime.BRIEF_SENTINEL == "<!-- slack-radar-crew-brief v5 -->"
+    assert brief.splitlines()[0] == crew_runtime.BRIEF_SENTINEL == "<!-- slack-radar-crew-brief v6 -->"
     assert "slack-radar-watcher" in brief and "5 or more" in brief
     assert "Never more than one Watcher in flight" in brief
 
@@ -99,6 +99,6 @@ def test_brief_and_lead_prompt_carry_the_fix_handoff_rule() -> None:
     for text in (brief, lead):
         assert "fix_handoff" in text and "Do not merge; open a PR for review" in text
         assert "never session_send" in text.replace("`", "") and "crew.next" in text
-    assert "5. **Hand off a fix.**" in brief and "7. **Write the ledger before ending the turn." in brief
+    assert "5. **Hand off a fix.**" in brief and "8. **Write the ledger before ending the turn." in brief
     tools = json.loads((AGENTS / "slack-radar-crew.json").read_text(encoding="utf-8"))["tools"]
     assert "@kirocrew-core/session_send" not in tools

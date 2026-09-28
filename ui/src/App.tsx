@@ -38,6 +38,7 @@ type NeedEntry = {
   members?: string[]
   words?: string[]
   handoff_title?: string
+  reply_draft?: string
 }
 type NeedGroup = { id: 'decide' | 'unanswered' | 'clusters'; total: number; entries: NeedEntry[] }
 // A fix task the Lead wrote for a coding session (store.py `fix_handoff`, LOCAL).
@@ -51,7 +52,16 @@ type HandoffRow = {
   handled_how: string
   handoff: FixHandoff
 }
-type Needs = { groups: NeedGroup[]; handled_total: number; handoffs?: HandoffRow[]; handoffs_total?: number }
+type Needs = {
+  groups: NeedGroup[]
+  handled_total: number
+  handoffs?: HandoffRow[]
+  handoffs_total?: number
+  replied?: RepliedRow[]
+  replied_total?: number
+}
+// A reply the owner sent to a thread (store.py `replied`).
+type RepliedRow = { key: string; channel: string; summary: string; text: string; at: number; permalink: string }
 
 type Settings = {
   channels: string[]
@@ -796,6 +806,65 @@ function MoreMenu({ label, actions }: { label: string; actions: { label: string;
 
 const small: CSSProperties = { fontSize: 12, padding: '2px 10px' }
 
+// A row whose item carries a reply draft: the draft in an editable box, Send to thread
+// and Ignore. Send saves an edited draft first, then posts as the owner.
+function ReplyRow({
+  e,
+  first,
+  onMark,
+  onWhy,
+  onSend,
+}: {
+  e: NeedEntry
+  first: boolean
+  onMark: (how: HandleHow) => void
+  onWhy: () => void
+  onSend: (text: string, edited: boolean) => void
+}) {
+  const [text, setText] = useState(e.reply_draft || '')
+  useEffect(() => setText(e.reply_draft || ''), [e.reply_draft])
+  const id = `sr-reply-${e.key.replace(/[^A-Za-z0-9]/g, '-')}`
+  const more = [
+    ...(e.permalink ? [{ label: 'Open in Slack', onClick: () => window.open(e.permalink, '_blank', 'noopener,noreferrer') }] : []),
+    { label: 'Done without sending', onClick: () => onMark('done') },
+    { label: 'Why? Ask the lead', onClick: onWhy },
+  ]
+  return (
+    <li className="text-sm" style={{ padding: '10px 0', borderTop: first ? 0 : '1px solid var(--border)' }}>
+      <div className="flex items-start gap-2">
+        <div style={{ flex: 'none', minWidth: 28 }}>{priorityBadge(e.priority)}</div>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{ color: 'var(--text-strong)' }}>{e.summary || '(no text)'}</div>
+          <div className="text-xs text-muted" style={{ marginTop: 2 }}>
+            {e.reason} · <span className="font-mono">{e.channel}</span> · {fmtAge(e.age_hours)}
+          </div>
+          <label htmlFor={id} className="text-xs text-muted" style={{ display: 'block', marginTop: 6 }}>
+            Reply to the thread, sent as you
+          </label>
+          <textarea
+            id={id}
+            value={text}
+            maxLength={1500}
+            rows={3}
+            onChange={(ev) => setText(ev.target.value)}
+            style={{
+              width: '100%', marginTop: 2, fontSize: 13, padding: '6px 8px', borderRadius: 6, resize: 'vertical',
+              border: '1px solid var(--border-strong)', background: 'var(--bg)', color: 'var(--text)',
+            }}
+          />
+        </div>
+        <div className="flex items-center gap-1" style={{ flex: 'none' }}>
+          <Btn style={small} disabled={!text.trim()} onClick={() => onSend(text.trim(), text.trim() !== (e.reply_draft || '').trim())}>
+            Send to thread
+          </Btn>
+          <Btn style={small} onClick={() => onMark('ignored')}>Ignore</Btn>
+          <MoreMenu label="More actions" actions={more} />
+        </div>
+      </div>
+    </li>
+  )
+}
+
 function NeedRow({
   e,
   first,
@@ -935,6 +1004,31 @@ function NeedsCard({
   const [startFix, fixDialog] = useStartFix()
   const handoffs = needs?.handoffs || []
   const byKey = new Map(handoffs.map((h) => [h.key, h.handoff]))
+  const [sendFailed, setSendFailed] = useState<{ key: string; text: string; edited: boolean; why: string } | null>(null)
+  const [sent, setSent] = useState('')
+  useEffect(() => {
+    if (!sent) return
+    const id = window.setTimeout(() => setSent(''), 4000)
+    return () => window.clearTimeout(id)
+  }, [sent])
+  const sendReply = async (key: string, text: string, edited: boolean, rowId: string) => {
+    setSendFailed(null)
+    setGone((prev) => new Set(prev).add(rowId))
+    try {
+      if (edited) await api.post(`${BASE}/items/reply/draft`, { key, text })
+      await api.post(`${BASE}/items/reply/send`, { key })
+      setSent('Sent as you')
+      onChanged()
+    } catch (err) {
+      setGone((prev) => {
+        const next = new Set(prev)
+        next.delete(rowId)
+        return next
+      })
+      setSendFailed({ key, text, edited, why: (err as Error).message || 'unknown error' })
+    }
+  }
+  const replied = needs?.replied || []
   const [dismissFailed, setDismissFailed] = useState('')
   const dismiss = async (key: string) => {
     setDismissFailed('')
@@ -982,6 +1076,17 @@ function NeedsCard({
           {today.at > 0 && <span className="text-xs text-muted"> · {ago(today.at)}</span>}
         </p>
       )}
+      {sent && (
+        <p role="status" className="text-sm" style={{ margin: '0 0 8px', color: 'var(--success, var(--text))' }}>
+          {sent}
+        </p>
+      )}
+      {sendFailed && (
+        <ErrorNotice
+          message={`Could not send that reply: ${sendFailed.why}`}
+          onRetry={() => sendReply(sendFailed.key, sendFailed.text, sendFailed.edited, `decide:${sendFailed.key}`)}
+        />
+      )}
       {failed && (
         <ErrorNotice
           message={`Could not ${verb} that message. Nothing changed.`}
@@ -1000,7 +1105,16 @@ function NeedsCard({
                 {GROUP_TITLE[g.id]} <span className="text-muted" style={{ fontWeight: 400 }}>({g.total - (g.entries.length - g.shown.length)})</span>
               </h4>
               <ul className="flex flex-col">
-                {g.shown.map((e, i) => (
+                {g.shown.map((e, i) => g.id === 'decide' && e.reply_draft && !byKey.has(e.key) ? (
+                  <ReplyRow
+                    key={e.key}
+                    e={e}
+                    first={i === 0}
+                    onMark={(how) => post([e.key], how, `${g.id}:${e.key}`)}
+                    onWhy={() => onWhy(e)}
+                    onSend={(text, edited) => sendReply(e.key, text, edited, `${g.id}:${e.key}`)}
+                  />
+                ) : (
                   <NeedRow
                     key={e.key}
                     e={e}
@@ -1061,6 +1175,37 @@ function NeedsCard({
                   {it.handled_how === 'ignored' ? 'Ignored' : 'Done'} {ago(it.handled_at)}
                 </span>
                 <Btn style={small} onClick={() => post([it.key], 'reopen')}>Reopen</Btn>
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+      {replied.length > 0 && (
+        <details style={{ marginTop: 12 }}>
+          <summary className="text-sm text-muted" style={{ cursor: 'pointer' }}>
+            Replied ({needs?.replied_total ?? replied.length})
+          </summary>
+          <ul className="flex flex-col" style={{ marginTop: 4 }}>
+            {replied.map((r, i) => (
+              <li
+                key={r.key}
+                className="text-sm flex items-center gap-2"
+                style={{ padding: '6px 0', borderTop: i === 0 ? 0 : '1px solid var(--border)' }}
+              >
+                <span style={{ flex: 1, minWidth: 0 }}>
+                  {r.text.length > 120 ? `${r.text.slice(0, 119)}…` : r.text}
+                  <span className="text-xs text-muted">
+                    {' · '}
+                    {r.summary}
+                    {' · '}
+                    <span className="font-mono">{r.channel}</span> · {ago(r.at)}
+                  </span>
+                </span>
+                {r.permalink && (
+                  <a className="underline text-xs" href={r.permalink} target="_blank" rel="noreferrer noopener">
+                    Open reply
+                  </a>
+                )}
               </li>
             ))}
           </ul>
