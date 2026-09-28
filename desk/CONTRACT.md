@@ -98,6 +98,8 @@ One per top-level message. Thread replies are not items; they are signals on the
 | `links` | crew / investigator | public | `https://` URLs only, ≤ 10 |
 | `note` | crew / investigator | local | evidence, doubts, why a flag was cleared |
 | `investigation` | crew / routes | local | spawn id of the investigator working it |
+| `handled_at` | owner | local | epoch s the owner pressed **Done** or **Ignore**; `0` = not handled. Set only by `POST /items/handle`; `slack_radar_record` has no field for it |
+| `handled_how` | owner | local | `done` · `ignored` · `""`. A handled item keeps its `status`; it only leaves the Needs-you list. `reopen` clears both fields |
 
 Retention: closed items (`resolved`, `noise`) are dropped 30 days after their last update; the ledger holds at most 2000 items, closed-oldest evicted first.
 
@@ -134,7 +136,7 @@ The gateway renders the text itself (`watch.render_digest`) from counts and PUBL
 
 ### Event log (`events.jsonl`)
 
-`{at, kind, text, key}` per line. Kinds: `poll`, `source`, `settings`, `crew`, `digest`, `investigate`, `backlog`. The crew adds one via `slack_radar_record.event`. Rendered in the dashboard's Activity tab only — local, but still keep paths and hosts out of it.
+`{at, kind, text, key}` per line. Kinds: `poll`, `source`, `settings`, `crew`, `digest`, `investigate`, `backlog`, `handled`. The crew adds one via `slack_radar_record.event`. Rendered in the dashboard's Activity tab only — local, but still keep paths and hosts out of it.
 
 ### Waking the crew
 
@@ -169,7 +171,9 @@ All paths are under `/api/apps/slack-radar`. "Owner" means `_owner_gate`: the da
 |---|---|---|---|---|
 | GET | `/state` | open | — | settings, crew record + session facts, crew memory, investigations, counts, channels, source state, last poll, digest |
 | GET | `/org` | open | — | `desk/members.json` with a `live` block per member (below) |
-| GET | `/items` | open | `status` (`open` or a status), `channel`, `limit` ≤500 | ledger items, newest first |
+| GET | `/items` | open | `status` (`open` or a status), `channel`, `handled=1`, `limit` ≤500 | ledger items, newest first; `handled=1` keeps only items with `handled_at > 0` (the board's **Handled (N)** fold) |
+| GET | `/needs` | open | — | the Needs-you groups (§6) |
+| POST | `/items/handle` | owner | `{key, how: done\|ignored\|reopen}` | set or clear `handled_at` / `handled_how`; status unchanged. `400 invalid_field`, `404 unknown_item` |
 | GET | `/events` | open | `limit` ≤500 | the event log |
 | PUT | `/settings` | owner | settings patch | validates and writes the vault entry |
 | GET | `/mcp/status` | owner | — | handshake with the Slack MCP: connected · needs_login · incompatible · binary_not_found · error |
@@ -193,3 +197,21 @@ Errors are `{ok: false, code, error}` with an HTTP status.
 | `poller` | `{source_state, last_poll_at}` |
 
 A `members.json` that fails validation returns `500 members_invalid`.
+
+## 6. Needs-you rules (`backend/needs.py`, `GET /needs`)
+
+Fixed rules over the ledger; no model call. Only items that are open (`new` · `triaged` · `investigating`) and not handled (`handled_at == 0`) are considered.
+
+| Group | An item is in it when | `reason` |
+|---|---|---|
+| `decide` | `priority` is `p0` or `p1`; or it has `links` and a non-empty `investigation` that finished (status moved off `investigating`, or the spawn SDK says the spawn is done); or `possibly_resolved` is set. First match gives the reason | `Open p1` · `Matching GitHub work found` · `Looks resolved: <poller reason>` |
+| `unanswered` | not in `decide`; `category == question`; `reply_count == 0` and no `latest_reply`; posted more than 48 h ago | `No reply for N days` |
+| `clusters` | 2+ items in the SAME channel linked by sharing 2+ significant words; links chain (A~B, B~C puts A, B, C together). One entry per cluster, for its top-ranked member, plus `members` (all keys) and `words` (up to 4 shared words) | `N similar messages` |
+
+A significant word: lower-cased `[a-z0-9]{3,}` from `summary` (else the first 200 chars of `text`), not all digits, not in `needs.STOPWORDS` (common English and support-channel filler such as *please*, *thanks*, *issue*). A cluster may name items that are also in `decide` or `unanswered`.
+
+Order: priority `p0` … `p3`, then no priority; within a priority, oldest first. Clusters order by best member priority, then size, then age. Each group returns at most 20 `entries` and its full `total`.
+
+Response: `{ok, groups: [{id, total, entries}], handled_total}` with groups always in the order `decide`, `unanswered`, `clusters`. Entry: `{key, channel, permalink, summary, priority, category, age_hours, reason}` (+ `members`, `words` on clusters). `summary` falls back to `text[:200]`.
+
+**Done** / **Ignore** on a cluster entry posts `/items/handle` for every member.

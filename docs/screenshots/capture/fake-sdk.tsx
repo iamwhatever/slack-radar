@@ -56,6 +56,39 @@ const ITEMS = [
   }),
 ]
 
+const HANDLED = [
+  item(3, 'C0DEMO2', 'frank', 'Typo on the pricing page', {
+    category: 'bug-report', priority: 'p3', summary: 'Typo on the pricing page',
+    handled_at: T0 + 4000, handled_how: 'done',
+  }),
+]
+
+const need = (it: (typeof ITEMS)[number], reason: string, extra: Record<string, unknown> = {}) => ({
+  key: it.key, channel: it.channel, permalink: it.permalink, summary: it.summary || it.text.slice(0, 200),
+  priority: it.priority, category: it.category, age_hours: Math.round((T0 + 7200 - it.ts_float) / 360) / 10,
+  reason, ...extra,
+})
+
+const NEEDS = {
+  ok: true,
+  handled_total: HANDLED.length,
+  groups: [
+    { id: 'decide', total: 3, entries: [
+      need(ITEMS[3], 'Open p1'),
+      need(ITEMS[0], 'Open p1'),
+      need(ITEMS[2], 'Looks resolved: reply says “thanks”'),
+    ] },
+    { id: 'unanswered', total: 1, entries: [
+      need(item(1, 'C0DEMO2', 'gina', 'Is there an SSO option for the free plan?', {
+        category: 'question', summary: 'Is SSO available on the free plan?',
+      }), 'No reply for 3 days', { age_hours: 74 }),
+    ] },
+    { id: 'clusters', total: 1, entries: [
+      need(ITEMS[0], '3 similar messages', { members: [ITEMS[0].key, 'C0DEMO1:1758701000.000100', 'C0DEMO1:1758701200.000100'], words: ['csv', 'export', 'rows'] }),
+    ] },
+  ],
+}
+
 const STATE = {
   ok: true,
   vault_available: true,
@@ -74,6 +107,7 @@ const STATE = {
     name: 'Radar Lead', slot_key: 'crew-slack-radar', session_agent: 'slack-radar-crew',
     enabled: true, paused_reason: '', unattended: false, agent: 'slack-radar-crew', model: '',
     live: true, session_open: true, running: false, trusted: false,
+    today: 'Two p1 bugs need an owner; the CSV export reports look like one problem.',
   },
   investigations: { items: 1, running: 1 },
   crew_memory: {
@@ -116,6 +150,8 @@ function respond(path: string): unknown {
   const [p, qs] = path.split('?')
   const q = new URLSearchParams(qs || '')
   if (p.endsWith('/state')) return STATE
+  if (p.endsWith('/needs')) return NEEDS
+  if (p.endsWith('/items') && q.get('handled') === '1') return { ok: true, items: HANDLED, total: HANDLED.length }
   if (p.endsWith('/items')) {
     const s = q.get('status') || ''
     const rows = s === 'open' ? ITEMS.filter((i) => ['new', 'triaged', 'investigating'].includes(i.status))

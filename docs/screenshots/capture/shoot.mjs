@@ -46,6 +46,8 @@ const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PAT
 
 const shots = [
   { name: 'board', source: 'ok', tab: null },
+  { name: 'needs-you', source: 'ok', tab: null, clip: 'Needs you', openHandled: true },
+  { name: 'chat-expanded', source: 'ok', tab: null, chat: true },
   { name: 'settings', source: 'ok', tab: 'Settings', wait: 'Basics', open: 'Advanced' },
   { name: 'team', source: 'ok', tab: 'Team', wait: 'Only the Radar Lead has a session' },
   { name: 'needs-login', source: 'needs_login', tab: null },
@@ -62,7 +64,18 @@ try {
       await page.getByText(s.wait).first().waitFor()
       if (s.open) await page.getByText(s.open, { exact: true }).click()
     }
+    if (s.chat) await page.getByRole('button', { name: 'What needs me today?' }).first().click()
+    if (s.openHandled) await page.getByText(/^Handled \(/).click()
     await page.waitForTimeout(400)
+    if (s.clip) {
+      // One card only: the Card that holds this title.
+      const card = page.getByText(s.clip, { exact: true }).locator('xpath=ancestor::div[contains(@class,"rounded")][1]')
+      const file = path.join(outDir, `${s.name}.png`)
+      await card.screenshot({ path: file })
+      console.log('wrote', file)
+      await ctx.close()
+      continue
+    }
     // The page scrolls inside its own container; capture the full content height.
     const h = await page.evaluate(() => Math.max(...[...document.querySelectorAll('*')].map((e) => e.scrollHeight)))
     await page.setViewportSize({ width: 1280, height: Math.min(Math.max(h + 40, 900), 2400) })
