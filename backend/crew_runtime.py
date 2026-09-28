@@ -52,6 +52,11 @@ TRUST_TTL_SECS = 900
 TRUST_SCOPE = "crew:slack-radar:autoapprove"
 BACKLOG_REWAKE_SECS = 1800
 _last_backlog_wake = 0.0
+#: Reason of a wake that found the crew mid-turn; the next poll retries it.
+_pending_wake = ""
+#: The gateway's aiohttp Application, bound by ``hooks.on_startup``.
+_http_app: Any = None
+_warned_no_state = False
 
 NO_PERMIT_CARD = (
     "This crew's turn never started: it waited for a free background-turn slot and "
@@ -59,13 +64,70 @@ NO_PERMIT_CARD = (
 )
 
 
-def _gateway_state() -> Any:
-    """The live dashboard state, or None. Published by the gateway after import."""
+def _slack_handler_state() -> Any:
+    """The state the Slack bot publishes. None on a gateway that runs no Slack bot."""
     try:
         from kiro_crew.slack.handler import get_dashboard_state
     except ImportError:  # pragma: no cover
         return None
-    return get_dashboard_state()
+    try:
+        return get_dashboard_state()
+    except Exception:  # noqa: BLE001 - a host change must not break the poll loop
+        logger.debug("slack-radar: get_dashboard_state failed", exc_info=True)
+        return None
+
+
+def _http_app_state() -> Any:
+    """``http_app["state"]``: the same object every route handler reads, or None.
+
+    Read on every call rather than cached, so a state the gateway sets after the
+    app started is still found.
+    """
+    getter = getattr(_http_app, "get", None)
+    if not callable(getter):
+        return None
+    try:
+        return getter("state")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def state_source() -> str:
+    """Which handle :func:`_gateway_state` resolves through: slack-handler, http-app or none."""
+    if _slack_handler_state() is not None:
+        return "slack-handler"
+    if _http_app_state() is not None:
+        return "http-app"
+    return "none"
+
+
+def bind_http_app(http_app: Any) -> str:
+    """Remember the gateway's Application (``ctx.http_app``) and log the state source once."""
+    global _http_app, _warned_no_state
+    _http_app = http_app
+    _warned_no_state = False
+    source = state_source()
+    if source == "none":
+        logger.warning("slack-radar: no gateway state yet (no Slack bot, no http app state); "
+                       "polls cannot wake the crew until one appears")
+    else:
+        logger.info("slack-radar: gateway state source: %s", source)
+    return source
+
+
+def unbind_http_app() -> None:
+    global _http_app
+    _http_app = None
+
+
+def _gateway_state() -> Any:
+    """The live dashboard state, or None.
+
+    The Slack bot's published state first; on a gateway with no Slack bot that is
+    None, so the http app's ``state`` (what the routes read) is the fallback.
+    """
+    state = _slack_handler_state()
+    return state if state is not None else _http_app_state()
 
 
 def _call_if_present(obj: Any, name: str, *args: Any) -> None:
@@ -459,13 +521,15 @@ async def wake_crew(state: Any, data_dir: Path, reason: str) -> bool:
     """
     from . import settings as settings_mod
 
+    global _pending_wake
     try:
         crew = await asyncio.to_thread(store.read_crew, data_dir)
         if not is_live(crew):
             return False
         slot, crew = await ensure_crew_session(state, data_dir, crew)
         if getattr(slot, "running", False):
-            logger.info("slack-radar: crew mid-turn, wake dropped (%s)", reason)
+            _pending_wake = reason
+            logger.info("slack-radar: crew mid-turn, wake deferred to the next poll (%s)", reason)
             return False
         settings = await asyncio.to_thread(settings_mod.read_settings)
         snapshot = await asyncio.to_thread(build_snapshot, data_dir, settings, crew)
@@ -475,6 +539,7 @@ async def wake_crew(state: Any, data_dir: Path, reason: str) -> bool:
             return False
         await asyncio.to_thread(sync_trust, slot, crew)
         started = bool(slot.enqueue_or_run_prompt(prompt, _capped_run_chat, state))
+        _pending_wake = ""
         _call_if_present(state, "push_slots_update")
         logger.info("slack-radar: crew woken (%s): %s", reason, "started" if started else "queued")
         return started
@@ -491,12 +556,19 @@ async def wake_crew(state: Any, data_dir: Path, reason: str) -> bool:
 
 async def after_poll(data_dir: Path, summary: dict[str, Any], *, reason: str = "timer") -> bool:
     """Called by ``watch.poll_once``: renew/revoke the grant, and wake if work moved."""
+    global _last_backlog_wake, _pending_wake, _warned_no_state
     state = _gateway_state()
     if state is None:
+        if not _warned_no_state:
+            _warned_no_state = True
+            logger.warning("slack-radar: no gateway state (no Slack bot, no http app state); "
+                           "the poll cannot wake the crew")
         return False
+    _warned_no_state = False
     crew = await asyncio.to_thread(store.read_crew, data_dir)
     await asyncio.to_thread(observe_member_runs, data_dir, child_runs(state, crew))
     if not is_live(crew):
+        _pending_wake = ""
         revoke(state, crew)
         return False
     # The watchdog renewal, and the self-heal for a slot left on an old agent (e.g.
@@ -511,23 +583,32 @@ async def after_poll(data_dir: Path, summary: dict[str, Any], *, reason: str = "
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     digest_due = bool(digest.get("requested_at")) and digest.get("last_posted_date") != today and not digest.get("pending")
     moved = bool(summary.get("new") or summary.get("thread_changed") or summary.get("possibly_resolved"))
-    # Leftover work (a turn that ended before draining the queue) is re-offered, but
-    # at most every BACKLOG_REWAKE_SECS on the timer, so a crew that keeps failing
-    # on one item cannot turn the poll loop into a turn every five minutes.
+    # Leftover work (a turn that ended before draining the queue: needs_triage or
+    # thread_updates) is re-offered, but at most every BACKLOG_REWAKE_SECS on the
+    # timer, so a crew that keeps failing on one item cannot turn the poll loop into
+    # a turn every five minutes.
     import time as _time
 
-    global _last_backlog_wake
-    backlog = c["needs_triage"] > 0 and (
+    leftover = c["needs_triage"] > 0 or bool(store.pending_view(ledger, limit=1)["thread_updates"])
+    backlog = leftover and (
         reason != "timer" or _time.time() - _last_backlog_wake >= BACKLOG_REWAKE_SECS
     )
     if backlog and not moved:
         _last_backlog_wake = _time.time()
-    if not (moved or digest_due or backlog):
+    # A wake that found the crew mid-turn is retried here, unthrottled, so a long
+    # turn never swallows the work that arrived during it.
+    retry = _pending_wake
+    if not (moved or digest_due or backlog or retry):
         return False
-    why = "digest due" if digest_due and not moved else (
-        f"{summary.get('new', 0)} new, {summary.get('thread_changed', 0)} thread updates, "
-        f"{summary.get('possibly_resolved', 0)} possibly resolved"
-    )
+    if moved:
+        why = (f"{summary.get('new', 0)} new, {summary.get('thread_changed', 0)} thread updates, "
+               f"{summary.get('possibly_resolved', 0)} possibly resolved")
+    elif digest_due:
+        why = "digest due"
+    elif retry:
+        why = f"retry: {retry}"
+    else:
+        why = "backlog"
     return await wake_crew(state, data_dir, why)
 
 

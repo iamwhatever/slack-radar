@@ -12,6 +12,8 @@ logger = logging.getLogger("kirocrew.app.slack-radar")
 
 async def on_startup(ctx: Any) -> None:
     """Start the poll loop. Returns immediately; the loop runs as a gateway task."""
+    # The fallback state handle for a gateway with no Slack bot (see _gateway_state).
+    crew_runtime.bind_http_app(getattr(ctx, "http_app", None))
     watch.start(ctx)
     logger.info("slack-radar: poll loop started (data dir %s)", ctx.data_dir)
 
@@ -23,3 +25,4 @@ async def on_shutdown(ctx: Any) -> None:
         crew_runtime.revoke(crew_runtime._gateway_state())
     except Exception:  # noqa: BLE001 - teardown must complete
         logger.warning("slack-radar: grant revocation on shutdown failed", exc_info=True)
+    crew_runtime.unbind_http_app()  # never pin the gateway's Application past its life
