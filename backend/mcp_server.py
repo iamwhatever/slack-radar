@@ -52,7 +52,7 @@ TOOLS: list[dict[str, Any]] = [
             "note and investigation are local-only. crew.phase: idle|triaging|investigating|"
             "rechecking|digest; crew.next is your resumable next-step intent (local). crew.today is "
             "PUBLIC (shown on the Board): one sentence, at most 240 characters, saying what changed "
-            "and what needs the owner, or 'nothing needs you'; a path, host name or secret is refused. items[].fix_handoff (local, Lead only) hands a code-shaped fix to a coding session the owner starts from the Board: {title <=120, prompt <=4000, repo owner/name, links}; only on a triaged/investigating bug-report or feature-request; the prompt must contain the item key, every link, the coverage verdict and the line 'Do not merge; open a PR for review', and no path, host name or secret. One per item; a new one replaces the old."
+            "and what needs the owner, or 'nothing needs you'; a path, host name or secret is refused. items[].fix_handoff (local, Lead only) hands a code-shaped fix to a coding session the owner starts from the Board: {title <=120, prompt <=4000, repo owner/name, links}; only on a triaged/investigating bug-report or feature-request; the prompt must contain the item key, every link, the coverage verdict and the line 'Do not merge; open a PR for review', and no path, host name or secret. One per item; a new one replaces the old. items[].reply_draft (local, Lead only) drafts a reply for the item's own Slack thread that the OWNER sends with one click from the Board, as themselves: {text <=1500}, or null to withdraw it; only on an open item; short, in the poster's language, no path, host name, secret, or another channel's name or content. You never post; the owner sends it."
         ),
         "inputSchema": {
             "type": "object",
@@ -72,6 +72,11 @@ TOOLS: list[dict[str, Any]] = [
                             "note": {"type": "string"},
                             "investigation": {"type": "string"},
                             "clear_possibly_resolved": {"type": "boolean"},
+                            "reply_draft": {
+                                "type": ["object", "null"],
+                                "properties": {"text": {"type": "string", "maxLength": 1500}},
+                                "required": ["text"],
+                            },
                             "fix_handoff": {
                                 "type": "object",
                                 "properties": {

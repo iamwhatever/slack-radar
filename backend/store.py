@@ -78,6 +78,10 @@ HANDOFF_STATUSES = frozenset({"triaged", "investigating"})
 HANDOFF_CATEGORIES = frozenset({"bug-report", "feature-request"})
 #: The line every hand-off prompt must carry, verbatim.
 HANDOFF_NO_MERGE = "Do not merge; open a PR for review"
+#: ``reply_draft`` (LOCAL, Lead- or owner-written): a thread reply the owner sends.
+MAX_REPLY_DRAFT = 1500
+#: One send attempt per item per this many seconds.
+REPLY_SEND_GAP_SECS = 60.0
 
 _KEY_RE = re.compile(r"^[CGD][A-Z0-9]{2,20}:\d{9,11}\.\d{6}$")
 _CHANNEL_RE = re.compile(r"^[CGD][A-Z0-9]{2,20}$")
@@ -683,6 +687,12 @@ def apply_crew_record(ledger: dict[str, Any], payload: dict[str, Any]) -> dict[s
         if "links" in row:
             links = [str(u) for u in (row["links"] or []) if isinstance(u, str) and _URL_RE.match(u)]
             item["links"] = links[:MAX_LINKS]
+        if "reply_draft" in row:
+            draft, why = reply_draft_value(ledger, item, row["reply_draft"], by="lead")
+            if why:
+                problems.append(why)
+            else:
+                item["reply_draft"] = draft
         if "fix_handoff" in row:
             handoff, why = _handoff_value(item, row["fix_handoff"])
             if why:
@@ -767,6 +777,130 @@ def _handoff_value(item: dict[str, Any], value: Any) -> tuple[dict[str, Any] | N
     return {"title": title, "prompt": prompt, "repo": repo, "links": links, "at": now()}, ""
 
 
+# ── reply draft: the Lead drafts, the owner sends (POST /items/reply/*) ───────
+
+#: A Slack channel id or an ``archives/<id>`` link inside draft text.
+_CHANNEL_MENTION_RE = re.compile(r"(?<![A-Za-z0-9])[CG](?=[A-Z0-9]*\d)[A-Z0-9]{8,20}(?![A-Za-z0-9])")
+#: A line of another channel's message at least this long, found verbatim, is a quote.
+_QUOTE_MIN = 40
+
+
+def _quotes_other_channel(ledger: dict[str, Any], item: dict[str, Any], text: str) -> bool:
+    """True when ``text`` names a different channel or carries a line of its messages."""
+    own = str(item.get("channel") or "")
+    if any(c != own for c in _CHANNEL_MENTION_RE.findall(text)):
+        return True
+    folded = " ".join(text.split()).lower()
+    for other in (ledger.get("items") or {}).values():
+        if not isinstance(other, dict) or other.get("channel") == own:
+            continue
+        sources = [str(other.get("text") or "")] + [str(r.get("text") or "") for r in other.get("replies") or [] if isinstance(r, dict)]
+        for source in sources:
+            for line in source.splitlines():
+                line = " ".join(line.split()).lower()
+                if len(line) >= _QUOTE_MIN and line in folded:
+                    return True
+    return False
+
+
+def reply_draft_value(
+    ledger: dict[str, Any], item: dict[str, Any], value: Any, by: str
+) -> tuple[dict[str, Any] | None, str]:
+    """Validate a ``reply_draft``; return ``(value, "")`` or ``(None, why)``.
+
+    ``None`` clears the draft. The text is sent to the item's own Slack thread when the
+    owner clicks Send, so the Lead's draft gets the PUBLIC text check and may not name or
+    quote another channel. The owner's own edit (``by="owner"``) is checked for length
+    and open status only: it is the owner's words, sent under the owner's name.
+    """
+    if value is None:
+        return None, ""
+    if item.get("status") not in OPEN_STATUSES:
+        return None, "reply_draft needs an open item (new, triaged or investigating)"
+    text = value.get("text") if isinstance(value, dict) else value
+    if not isinstance(text, str) or not text.strip():
+        return None, "reply_draft must be non-empty text"
+    text = text.strip()
+    if len(text) > MAX_REPLY_DRAFT:
+        return None, f"reply_draft must be at most {MAX_REPLY_DRAFT} characters"
+    if by == "lead":
+        why = public_text_problem(text)
+        if why:
+            return None, f"reply_draft is sent to Slack and {why}"
+        if _quotes_other_channel(ledger, item, text):
+            return None, "reply_draft is sent to this item's thread and may not name or quote another channel"
+    return {"text": text, "at": now(), "by": "owner" if by == "owner" else "lead"}, ""
+
+
+def has_reply_draft(item: dict[str, Any]) -> bool:
+    d = item.get("reply_draft")
+    return isinstance(d, dict) and bool(str(d.get("text") or "").strip())
+
+
+def apply_reply_draft_edit(ledger: dict[str, Any], key: str, text: Any) -> tuple[dict[str, Any] | None, str]:
+    """Owner saves an edited draft. ``(item, "")``, ``(None, "")`` for an unknown key, or ``(item, why)``."""
+    item = (ledger.get("items") or {}).get(key)
+    if item is None:
+        return None, ""
+    draft, why = reply_draft_value(ledger, item, {"text": text}, by="owner")
+    if why:
+        return item, why
+    item["reply_draft"] = draft
+    item["updated_at"] = now()
+    return item, ""
+
+
+def reserve_reply_send(ledger: dict[str, Any], key: str) -> dict[str, Any]:
+    """Check one send and stamp the attempt, under the ledger lock.
+
+    Returns ``{"code": ""|<refusal>, ...}``. On success it carries the ``channel``, the
+    ``thread_ts`` to reply in and the ``text`` to send, and stamps ``reply_send_at`` so a
+    second click inside :data:`REPLY_SEND_GAP_SECS` is refused rather than posted twice.
+    """
+    item = (ledger.get("items") or {}).get(key)
+    if item is None:
+        return {"code": "unknown_item"}
+    if (ledger.get("source_state") or "ok") != "ok":
+        return {"code": "needs_login"}
+    if not has_reply_draft(item):
+        return {"code": "no_draft"}
+    if item.get("status") not in OPEN_STATUSES:
+        return {"code": "not_open"}
+    last = float(item.get("reply_send_at") or 0)
+    wait = REPLY_SEND_GAP_SECS - (now() - last)
+    if last and wait > 0:
+        return {"code": "rate_limited", "retry_after": -int(-wait // 1)}
+    item["reply_send_at"] = now()
+    return {
+        "code": "",
+        "channel": str(item.get("channel") or ""),
+        "thread_ts": str(item.get("thread_ts") or item.get("ts") or key.split(":", 1)[1]),
+        "text": str(item["reply_draft"]["text"]),
+    }
+
+
+def release_reply_send(ledger: dict[str, Any], key: str) -> None:
+    """Clear the attempt stamp after a send that certainly posted nothing."""
+    item = (ledger.get("items") or {}).get(key)
+    if item is not None:
+        item["reply_send_at"] = 0.0
+
+
+def apply_reply_sent(
+    ledger: dict[str, Any], key: str, text: str, reply_ts: str, link: str, keep_open: bool
+) -> dict[str, Any] | None:
+    """Record a sent reply: set ``replied``, clear ``reply_draft``, mark handled unless ``keep_open``."""
+    item = (ledger.get("items") or {}).get(key)
+    if item is None:
+        return None
+    item["replied"] = {"ts": reply_ts, "at": now(), "text": text, "permalink": link}
+    item["reply_draft"] = None
+    if not keep_open:
+        apply_handle(ledger, key, "done")
+    item["updated_at"] = now()
+    return item
+
+
 def _today_problem(value: Any) -> str:
     """``crew.today`` is PUBLIC (the Board shows it): one line, ≤ MAX_TODAY, no path/host/secret."""
     if not isinstance(value, str) or not value.strip():
@@ -803,6 +937,8 @@ def pending_view(ledger: dict[str, Any], limit: int = 40) -> dict[str, Any]:
         }
         if with_text:
             out["text"] = it.get("text")
+        out["reply_draft"] = (it.get("reply_draft") or {}).get("text") if has_reply_draft(it) else None
+        out["replied"] = bool(it.get("replied"))
         if with_replies:
             out["replies"] = [
                 {"ts": r.get("ts"), "user": r.get("user"), "text": clip(r.get("text"), MAX_REPLY_TEXT)}

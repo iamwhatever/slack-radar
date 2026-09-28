@@ -46,7 +46,7 @@ const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PAT
 
 const shots = [
   { name: 'board', source: 'ok', tab: null },
-  { name: 'needs-you', source: 'ok', tab: null, clip: 'Needs you', openHandled: true, openHandoffs: true },
+  { name: 'needs-you', source: 'ok', tab: null, clip: 'Needs you', openHandled: true, openHandoffs: true, openReplied: true },
   { name: 'chat-expanded', source: 'ok', tab: null, chat: true },
   { name: 'settings', source: 'ok', tab: 'Settings', wait: 'Basics', open: 'Advanced' },
   { name: 'team', source: 'ok', tab: 'Team', wait: 'Only the Radar Lead has a session' },
@@ -68,6 +68,7 @@ try {
     if (s.chat) await page.getByRole('button', { name: 'What needs me today?' }).first().click()
     if (s.openHandled) await page.getByText(/^Handled \(/).click()
     if (s.openHandoffs) await page.getByText(/^Fixes handed off \(/).click()
+    if (s.openReplied) await page.getByText(/^Replied \(/).click()
     await page.waitForTimeout(400)
     if (s.clip) {
       // One card only: the Card that holds this title.
@@ -117,6 +118,30 @@ try {
       && launched[0].message.includes('Do not merge; open a PR for review')
     if (!ok) errors.push(`[handoff] buttons ${JSON.stringify(buttons)} launched ${JSON.stringify(launched)}`)
     else console.log('check handoff: ok', JSON.stringify(buttons))
+    await ctx.close()
+  }
+  // DOM check: a reply row shows the draft in a textbox with Send to thread + Ignore;
+  // Send posts the send route for that key, the row leaves and "Sent as you" shows.
+  {
+    const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, timezoneId: 'UTC', locale: 'en-US' })
+    const page = await ctx.newPage()
+    page.on('pageerror', (e) => errors.push(`[reply] ${e.message}`))
+    await page.goto('http://127.0.0.1:5287/index.html?source=ok')
+    const box = page.getByRole('textbox', { name: 'Reply to the thread, sent as you' })
+    await box.waitFor({ timeout: 30000 })
+    const row = box.locator('xpath=ancestor::li[1]')
+    const draft = await box.inputValue()
+    const buttons = await row.locator(':scope > div > div:last-child > button').allTextContents()
+    await row.getByRole('button', { name: 'Send to thread' }).click()
+    await page.getByRole('status').filter({ hasText: 'Sent as you' }).waitFor({ timeout: 5000 })
+    const posts = await page.evaluate(() => window.__posts || [])
+    const sends = posts.filter((p) => p.path.endsWith('/items/reply/send'))
+    const left = await page.getByRole('textbox', { name: 'Reply to the thread, sent as you' }).count()
+    const ok = JSON.stringify(buttons) === JSON.stringify(['Send to thread', 'Ignore'])
+      && draft.startsWith('Yes. The export uses') && sends.length === 1 && sends[0].body.key.startsWith('C0DEMO2:')
+      && !posts.some((p) => p.path.endsWith('/items/reply/draft')) && left === 0
+    if (!ok) errors.push(`[reply] buttons ${JSON.stringify(buttons)} posts ${JSON.stringify(posts)} left ${left}`)
+    else console.log('check reply: ok', JSON.stringify(buttons), JSON.stringify(sends))
     await ctx.close()
   }
 } finally {
