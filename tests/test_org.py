@@ -187,6 +187,7 @@ def test_org_paused_crew_with_no_session(routes, tmp_path: Path) -> None:
     assert resp.status == 200 and resp.body["ok"] is True
     by_id = {m["id"]: m for m in resp.body["members"]}
     assert list(by_id) == ["lead", "investigator", "watcher", "poller"]
+    assert [by_id[k]["live"].pop("now")["id"] for k in by_id] == list(by_id)
     assert by_id["lead"]["live"] == {
         "session_open": False, "running": False, "paused": True,
         "paused_reason": "", "slot_key": "crew-slack-radar",
@@ -212,6 +213,7 @@ def test_org_live_running_crew_and_in_flight_investigations(routes, tmp_path: Pa
     assert by_id["lead"]["live"]["session_open"] is True
     assert by_id["lead"]["live"]["running"] is True and by_id["lead"]["live"]["paused"] is False
     # s-1 still running (two items share it); s-2 done; s-3 is on a triaged item, so not counted
+    assert by_id["investigator"]["live"].pop("now")["count"] == 1
     assert by_id["investigator"]["live"] == {"in_flight": 1, "items": 3}
 
 
@@ -229,6 +231,7 @@ def test_org_agrees_with_state(routes, tmp_path: Path, monkeypatch: pytest.Monke
     assert lead["live"]["session_open"] == st["crew"]["session_open"]
     assert lead["live"]["running"] == st["crew"]["running"]
     assert lead["live"]["paused"] is (not st["crew"]["live"])
+    assert inv["live"].pop("now") == st["now"]["members"][1]
     assert inv["live"] == {"in_flight": st["investigations"]["running"], "items": st["investigations"]["items"]}
 
 

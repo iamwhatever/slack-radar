@@ -12,6 +12,8 @@ member may touch, for the UI and for readers. The agents' real tool lists are in
 from __future__ import annotations
 
 import json
+import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -93,15 +95,23 @@ def org_view(
     crew: dict[str, Any],
     investigations: dict[str, int],
     ledger: dict[str, Any],
+    now: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """``members`` with a ``live`` block each.
 
     ``crew`` is the ``crew`` object ``GET /state`` returns (record plus ``live``,
-    ``session_open``, ``running``); ``investigations`` is its ``investigations``.
+    ``session_open``, ``running``); ``investigations`` is its ``investigations``;
+    ``now`` is its ``now`` (:func:`now_view`), built here from the same facts when
+    the caller passes none. Each ``live`` block carries that member's ``now`` row and
+    takes its in-flight count from it, so the Team tab and the Board cannot disagree.
     """
+    if now is None:
+        now = now_view(crew=crew, ledger=ledger, investigations=investigations, members=members)
+    rows = {r["id"]: r for r in now["members"]}
     out = []
     for m in members:
         mid = m["id"]
+        row = rows.get(mid)
         if mid == "lead":
             live: dict[str, Any] = {
                 "session_open": bool(crew.get("session_open")),
@@ -111,13 +121,163 @@ def org_view(
                 "slot_key": str(crew.get("slot_key") or ""),
             }
         elif mid == "investigator":
-            live = {"in_flight": int(investigations.get("running") or 0),
+            live = {"in_flight": int((row or {}).get("count") or 0),
                     "items": int(investigations.get("items") or 0)}
         elif mid == "watcher":
-            # No watcher spawns are tracked yet; the count is 0 until it ships.
-            live = {"in_flight": 0, "planned": m["residency"] == "planned"}
+            live = {"in_flight": int((row or {}).get("count") or 0), "planned": m["residency"] == "planned"}
         else:
             live = {"source_state": ledger.get("source_state") or "ok",
                     "last_poll_at": ledger.get("last_poll_at")}
+        if row is not None:
+            live["now"] = row
         out.append({**m, "live": live})
     return out
+
+
+# ── live per-member status (``GET /now``) ──────────────────────────────────
+
+INVESTIGATOR_AGENT = "slack-radar-investigator"
+WATCHER_AGENT = "slack-radar-watcher"
+DEFAULT_POLL_INTERVAL = 300
+MIN_POLL_INTERVAL = 60
+MAX_DOING = 80
+
+#: A filesystem path inside a task line: ``/abs``, ``~/x``, ``./x``, ``../x``. The
+#: lookbehind keeps a URL's ``//`` and a plain ``a/b`` word pair out of it.
+_PATH_RE = re.compile(r"(?<![\w:/.~-])(?:~|\.{1,2})?/[^\s'\"`,;)]*")
+
+
+def agent_matches(run_agent: str, name: str) -> bool:
+    """A run's agent is ``name`` itself or the app's materialized ``<app>--<name>``."""
+    return run_agent == name or run_agent.endswith(f"--{name}")
+
+
+def task_line(task: Any) -> str:
+    """One public line from a run's task: first line, paths cut, at most :data:`MAX_DOING` chars."""
+    text = str(task or "").strip()
+    text = text.splitlines()[0] if text else ""
+    text = " ".join(_PATH_RE.sub("…", text).split())
+    return text[:MAX_DOING].rstrip()
+
+
+def ago(secs: float) -> str:
+    """``42s`` / ``5m`` / ``3h``."""
+    secs = max(0, int(secs))
+    if secs < 90:
+        return f"{secs}s"
+    if secs < 90 * 60:
+        return f"{round(secs / 60)}m"
+    return f"{round(secs / 3600)}h"
+
+
+def _lead_row(crew: dict[str, Any], ledger: dict[str, Any], counts: dict[str, Any]) -> dict[str, Any]:
+    mem = ledger.get("crew_memory") or {}
+    digest = ledger.get("digest") or {}
+    phase = str(mem.get("phase") or "idle")
+    triage = int(counts.get("needs_triage") or 0)
+    resolved = int(counts.get("possibly_resolved") or 0)
+    investigating = int((counts.get("by_status") or {}).get("investigating") or 0)
+    if not crew.get("live"):
+        state, doing = "paused", str(crew.get("paused_reason") or "") or "paused"
+    elif crew.get("running"):
+        state = "working"
+        by_phase = {
+            "triaging": f"triaging {triage} new items",
+            "rechecking": f"judging {resolved} possibly-resolved threads",
+            "digest": "writing the digest",
+            "investigating": f"following {investigating} investigations",
+        }
+        if phase in by_phase:
+            doing = by_phase[phase]
+        elif digest.get("requested_at") and not digest.get("pending"):
+            doing = "writing the digest"
+        elif triage:
+            doing = f"triaging {triage} new items"
+        elif resolved:
+            doing = f"judging {resolved} possibly-resolved threads"
+        else:
+            doing = "working"
+    else:
+        state = "idle"
+        doing = f"{triage} new items wait for the next turn" if triage else "idle"
+    turn = crew.get("turn_started_at")
+    if isinstance(turn, (int, float)) and not isinstance(turn, bool) and turn > 0:
+        since: float | None = float(turn)
+    else:
+        since = float(mem.get("updated_at") or 0) or float(crew.get("updated_at") or 0) or None
+    return {"id": "lead", "state": state, "doing": doing, "since": since,
+            "count": 1 if state == "working" else 0,
+            "source": "gateway" if crew.get("session_open") else "ledger"}
+
+
+def _leaf_row(mid: str, agent: str, runs: list[dict[str, Any]] | None, fallback: int,
+              planned: bool, extra_ids: frozenset[str] = frozenset()) -> dict[str, Any]:
+    if runs is None:
+        mine: list[dict[str, Any]] = []
+        count, source = fallback, "ledger"
+    else:
+        mine = [r for r in runs if agent_matches(str(r.get("agent") or ""), agent)]
+        seen = {str(r.get("id") or "") for r in mine}
+        count, source = len(mine) + len(extra_ids - seen), "gateway"
+    mine.sort(key=lambda r: float(r.get("startedAt") or 0))
+    if count:
+        state = "working"
+        first = task_line(mine[0].get("task")) if mine else ""
+        doing = first or ("1 run in flight" if count == 1 else f"{count} runs in flight")
+        if first and count > 1:
+            doing = f"{doing} (+{count - 1} more)"
+    else:
+        state, doing = ("planned", "not started yet") if planned else ("idle", "idle")
+    since = (float(mine[0].get("startedAt") or 0) or None) if mine else None
+    return {"id": mid, "state": state, "doing": doing, "since": since, "count": count, "source": source}
+
+
+def _poller_row(ledger: dict[str, Any], interval: int, t: float) -> dict[str, Any]:
+    last = float(ledger.get("last_poll_at") or 0)
+    source_state = ledger.get("source_state") or "ok"
+    if last:
+        doing = f"last poll {ago(t - last)} ago · next in {ago(last + interval - t)}"
+    else:
+        doing = "has not polled yet"
+    state = "idle"
+    if source_state == "needs_login":
+        state, doing = "paused", f"Slack login expired · {doing}"
+    elif source_state != "ok":
+        state, doing = "paused", f"Slack MCP unavailable · {doing}"
+    return {"id": "poller", "state": state, "doing": doing, "since": last or None,
+            "count": len(ledger.get("channels") or {}), "source": "ledger"}
+
+
+def now_view(
+    *,
+    crew: dict[str, Any],
+    ledger: dict[str, Any],
+    investigations: dict[str, int],
+    runs: list[dict[str, Any]] | None = None,
+    open_spawn_ids: frozenset[str] = frozenset(),
+    poll_interval: int = DEFAULT_POLL_INTERVAL,
+    members: list[dict[str, Any]] | None = None,
+    at: float | None = None,
+) -> dict[str, Any]:
+    """What each member is doing right now: ``{"members": [row, ...]}`` in roster order.
+
+    ``runs`` is the gateway's list of the crew session's unfinished child runs
+    (``id``, ``agent``, ``task``, ``startedAt``); ``None`` means the gateway gave no
+    run list, and the investigator's count falls back to ``investigations["running"]``
+    with ``source: "ledger"``. ``open_spawn_ids`` are ledger-recorded spawns the host
+    says are still running (the Board's Investigate button spawns outside the crew
+    session); each one not already in ``runs`` adds one to the investigator's count.
+    """
+    from . import store
+
+    t = time.time() if at is None else at
+    c = store.counts(ledger)
+    planned = {m["id"]: m.get("residency") == "planned" for m in (members or [])}
+    interval = max(MIN_POLL_INTERVAL, int(poll_interval or DEFAULT_POLL_INTERVAL))
+    return {"members": [
+        _lead_row(crew, ledger, c),
+        _leaf_row("investigator", INVESTIGATOR_AGENT, runs, int(investigations.get("running") or 0),
+                  planned.get("investigator", False), open_spawn_ids),
+        _leaf_row("watcher", WATCHER_AGENT, runs, 0, planned.get("watcher", False)),
+        _poller_row(ledger, interval, t),
+    ]}

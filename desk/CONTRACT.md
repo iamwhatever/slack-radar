@@ -137,7 +137,7 @@ The gateway renders the text itself (`watch.render_digest`) from counts and PUBL
 
 ### Event log (`events.jsonl`)
 
-`{at, kind, text, key}` per line. Kinds: `poll`, `source`, `settings`, `crew`, `digest`, `investigate`, `backlog`, `handled`. The crew adds one via `slack_radar_record.event`. Rendered in the dashboard's Activity tab only — local, but still keep paths and hosts out of it.
+`{at, kind, text, key}` per line. Kinds: `poll`, `source`, `settings`, `crew`, `digest`, `investigate`, `backlog`, `handled`, `member`. A `member` line (`investigator started: <task line>`, `watcher finished`) is written when a child run of the crew session appears in or leaves the gateway's run list; the last list seen is kept in `<data>/member_runs.json`, and the comparison runs on every poll and every `/now`, `/state`, `/org` read. The crew adds one via `slack_radar_record.event`. Rendered in the dashboard's Activity tab only — local, but still keep paths and hosts out of it.
 
 ### Waking the crew
 
@@ -170,8 +170,9 @@ All paths are under `/api/apps/slack-radar`. "Owner" means `_owner_gate`: the da
 
 | Method | Path | Gate | Body / query | What it does |
 |---|---|---|---|---|
-| GET | `/state` | open | — | settings, crew record + session facts + `today` (`{text, at}` from `crew_memory.today`), crew memory, investigations, counts, channels, source state, last poll, digest |
+| GET | `/state` | open | — | settings, crew record + session facts + `today` (`{text, at}` from `crew_memory.today`), crew memory, investigations, `now` (the `/now` object), counts, channels, source state, last poll, digest |
 | GET | `/org` | open | — | `desk/members.json` with a `live` block per member (below) |
+| GET | `/now` | open | — | `{ok, members: [row]}` — what each member is doing right now (below) |
 | GET | `/items` | open | `status` (`open` or a status), `channel`, `handled=1`, `limit` ≤500 | ledger items, newest first; `handled=1` keeps only items with `handled_at > 0` (the board's **Handled (N)** fold) |
 | GET | `/needs` | open | — | the Needs-you groups (§6) |
 | POST | `/items/handle` | owner | `{key, how: done\|ignored\|reopen}` | set or clear `handled_at` / `handled_how`; status unchanged. `400 invalid_field`, `404 unknown_item` |
@@ -193,11 +194,27 @@ Errors are `{ok: false, code, error}` with an HTTP status.
 | Member | `live` |
 |---|---|
 | `lead` | `{session_open, running, paused, paused_reason, slot_key}` — the same slot facts `/state` reports as `crew` |
-| `investigator` | `{in_flight, items}` — `/state` `investigations.running` and `.items` |
-| `watcher` | `{in_flight: 0, planned}` — `planned` mirrors `residency` |
+| `investigator` | `{in_flight, items}` — `in_flight` is the `/now` row's `count`; `items` is `/state` `investigations.items` |
+| `watcher` | `{in_flight, planned}` — `in_flight` is the `/now` row's `count`; `planned` mirrors `residency` |
 | `poller` | `{source_state, last_poll_at}` |
 
-A `members.json` that fails validation returns `500 members_invalid`.
+Every `live` block also carries `now`: that member's `/now` row. Both come from one `org.now_view` call per request, so the Team tab and the Board agree. A `members.json` that fails validation returns `500 members_invalid`.
+
+`GET /now` rows, in roster order — `{id, state, doing, since, count, source}`:
+
+| Field | Meaning |
+|---|---|
+| `state` | `idle` · `working` · `paused` · `planned` |
+| `doing` | one public line, ≤80 chars for a run's task, paths replaced by `…` |
+| `since` | epoch seconds or `null` |
+| `count` | lead: 1 while its turn runs · investigator/watcher: runs in flight · poller: channels watched |
+| `source` | `gateway` (host facts) or `ledger` (the app's own record) |
+
+| Member | Built from |
+|---|---|
+| `lead` | `paused` when the crew is not live (`doing` = `paused_reason`); `working` while the slot runs, `doing` from `crew_memory.phase` (`triaging N new items`, `judging N possibly-resolved threads`, `writing the digest`, `following N investigations`), else from counts and `digest.requested_at`; `idle` otherwise. `since` = `crew_memory.updated_at`, else the crew record's `updated_at` (the host exposes no turn start). `source` is `gateway` when the slot is open |
+| `investigator`, `watcher` | the host's `state.subagents.running_agents_for("dashboard:<slot key>")`, filtered by agent `slack-radar-investigator` / `slack-radar-watcher` (or `<app>--<name>`); `doing` = the oldest run's task line, `(+N more)` beyond one; `since` = its start. The investigator also counts ledger `spawn <id>` ids the spawn SDK says are still running and that are not already listed (the Board's Investigate button spawns outside the crew session). With no run list from the host: the investigator's count is `/state` `investigations.running`, the watcher's 0, both `source: "ledger"`. An idle member whose `residency` is `planned` reads `planned` |
+| `poller` | `last poll Ns ago · next in Ms` from `ledger.last_poll_at` and `poll_interval_secs` (floor 60); `paused` with a prefix while `source_state` is not `ok`; `since` = `last_poll_at` |
 
 ## 6. Needs-you rules (`backend/needs.py`, `GET /needs`)
 

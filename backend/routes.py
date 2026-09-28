@@ -107,14 +107,18 @@ async def _handle_state(request: web.Request, ctx: Any) -> web.Response:
     except store.StoreError as exc:
         return _err(500, "ledger_corrupt", str(exc))
     crew = await asyncio.to_thread(store.read_crew, data_dir)
+    crew_view = _crew_view(request, crew)
+    investigations = _investigations(ledger, ctx)
+    now = await _now(request, ctx, crew, crew_view, ledger, investigations, settings)
     return web.json_response(
         {
             "ok": True,
             "vault_available": vault_ok,
             "settings": settings,
-            "crew": {**_crew_view(request, crew), "today": _today(ledger)},
+            "crew": {**crew_view, "today": _today(ledger)},
             "crew_memory": ledger.get("crew_memory"),
-            "investigations": _investigations(ledger, ctx),
+            "investigations": investigations,
+            "now": now,
             "counts": store.counts(ledger),
             "channels": ledger.get("channels"),
             "source_state": ledger.get("source_state") or "ok",
@@ -159,13 +163,65 @@ async def _handle_org(request: web.Request, ctx: Any) -> web.Response:
     except store.StoreError as exc:
         return _err(500, "ledger_corrupt", str(exc))
     crew = await asyncio.to_thread(store.read_crew, data_dir)
-    view = org.org_view(
-        members,
-        crew=_crew_view(request, crew),
-        investigations=_investigations(ledger, ctx),
-        ledger=ledger,
-    )
+    crew_view = _crew_view(request, crew)
+    investigations = _investigations(ledger, ctx)
+    now = await _now(request, ctx, crew, crew_view, ledger, investigations, members=members)
+    view = org.org_view(members, crew=crew_view, investigations=investigations, ledger=ledger, now=now)
     return web.json_response({"ok": True, "members": view})
+
+
+async def _handle_now(request: web.Request, ctx: Any) -> web.Response:
+    """Who is doing what right now (``org.now_view``); the same object as ``/state``'s ``now``."""
+    data_dir = _data_dir(ctx)
+    try:
+        ledger = await asyncio.to_thread(store.read_ledger, data_dir)
+    except store.StoreError as exc:
+        return _err(500, "ledger_corrupt", str(exc))
+    crew = await asyncio.to_thread(store.read_crew, data_dir)
+    now = await _now(request, ctx, crew, _crew_view(request, crew), ledger, _investigations(ledger, ctx))
+    return web.json_response({"ok": True, **now})
+
+
+async def _now(
+    request: web.Request,
+    ctx: Any,
+    crew: dict[str, Any],
+    crew_view: dict[str, Any],
+    ledger: dict[str, Any],
+    investigations: dict[str, int],
+    settings: dict[str, Any] | None = None,
+    members: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Gather the live facts for :func:`org.now_view` and log run starts/ends on the way.
+
+    The run list is the gateway's (``crew_runtime.child_runs``); reading it also
+    records ``member`` events for runs that started or ended since the last look,
+    so the work log moves while the page is open, not only on the poll timer.
+    """
+    if settings is None:
+        try:
+            settings = await asyncio.to_thread(settings_mod.read_settings)
+        except settings_mod.SettingsUnavailable:
+            settings = settings_mod.defaults()
+    if members is None:
+        try:
+            members = await asyncio.to_thread(org.load_members)
+        except org.MembersError:
+            members = None
+    runs = crew_runtime.child_runs(_state(request), crew)
+    try:
+        await asyncio.to_thread(crew_runtime.observe_member_runs, _data_dir(ctx), runs)
+    except (OSError, store.StoreError):
+        logger.debug("slack-radar: could not record member events", exc_info=True)
+    return org.now_view(
+        crew=crew_view,
+        ledger=ledger,
+        investigations=investigations,
+        runs=runs,
+        open_spawn_ids=_open_spawn_ids(ledger, ctx) if runs is not None else frozenset(),
+        poll_interval=int(settings.get("poll_interval_secs") or org.DEFAULT_POLL_INTERVAL),
+        members=members,
+    )
 
 
 def _investigations(ledger: dict[str, Any], ctx: Any) -> dict[str, int]:
@@ -174,16 +230,25 @@ def _investigations(ledger: dict[str, Any], ctx: Any) -> dict[str, int]:
     ``running`` asks the host whether each recorded spawn has finished; with no
     spawn SDK it is 0 rather than a guess.
     """
+    running = len(_open_spawn_ids(ledger, ctx))
+    items = sum(1 for it in (ledger.get("items") or {}).values() if it.get("status") == "investigating")
+    return {"items": items, "running": running}
+
+
+def _open_spawn_ids(ledger: dict[str, Any], ctx: Any) -> frozenset[str]:
+    """Spawn ids recorded as ``spawn <id>`` on investigating items that the host says
+    are still running. The host's probe reads the gateway's whole run table, so an id
+    the crew spawned counts too; an id it no longer tracks reads as done."""
     spawn = getattr(ctx, "spawn", None)
+    if spawn is None:
+        return frozenset()
     ids = {
-        str(it.get("investigation") or "")[len("spawn "):]
+        str(it.get("investigation") or "")[len("spawn "):].strip()
         for it in (ledger.get("items") or {}).values()
         if it.get("status") == "investigating" and str(it.get("investigation") or "").startswith("spawn ")
     }
     ids.discard("")
-    running = sum(1 for i in ids if spawn is not None and not spawn.is_done(i))
-    items = sum(1 for it in (ledger.get("items") or {}).values() if it.get("status") == "investigating")
-    return {"items": items, "running": running}
+    return frozenset(i for i in ids if not spawn.is_done(i))
 
 
 async def _handle_items(request: web.Request, ctx: Any) -> web.Response:
@@ -432,6 +497,7 @@ def register_routes(ctx: Any) -> list[Any]:
     return [
         r("GET", "/state", _handle_state),
         r("GET", "/org", _handle_org),
+        r("GET", "/now", _handle_now),
         r("GET", "/items", _handle_items),
         r("GET", "/needs", _handle_needs),
         r("POST", "/items/handle", _owner_only(_handle_item_handle)),
