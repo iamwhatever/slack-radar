@@ -14,7 +14,7 @@ What the code, the agents and the UI agree on. The people-level rules are in [CH
 | Crew slot | `crew-slack-radar`, then `crew-slack-radar-g<N>` | `store.SLOT_KEY`, `store.next_slot_key` |
 | Ledger MCP server | `@slack-radar:ledger` | `app.json` `mcpServers.ledger` |
 | Unattended grant scope | `crew:slack-radar:autoapprove` (900 s) | `crew_runtime.TRUST_SCOPE` |
-| Brief sentinel | `<!-- slack-radar-crew-brief v3 -->` | first line of `backend/crew_brief.md` |
+| Brief sentinel | `<!-- slack-radar-crew-brief v4 -->` | first line of `backend/crew_brief.md` |
 
 These names are part of the install: renaming one orphans a session, a spec or a grant.
 
@@ -87,6 +87,7 @@ One per top-level message. Thread replies are not items; they are signals on the
 | `text` | poller | local | credential-shaped strings redacted, ≤ 4000 chars. UNTRUSTED |
 | `permalink` | poller | public | the message's own `permalink` when the MCP supplies one, else built from the `workspace_url` setting |
 | `reply_count`, `latest_reply`, `reactions` | poller | — | refreshed by the thread re-check |
+| `replies` | poller | local | `[{ts, user, text}]`, the newest 5 thread replies, text redacted and ≤ 400 chars, oldest first. Refreshed by every thread re-check; `[]` at ingest. Emptied when the item leaves `new`/`triaged`/`investigating` or is older than 7 days, so reply text is bounded to 5 × 400 chars per open, recent item. UNTRUSTED. Never in `summary`, the digest, `crew.today` or any other public output; `slack_radar_record` has no field for it. `slack_radar_read` returns it on `thread_updates` items |
 | `needs_triage` | poller sets, crew clears | — | true on ingest |
 | `thread_changed` | poller sets, crew clears | — | a new reply since the crew last recorded this item |
 | `possibly_resolved` | poller sets, crew clears | — | `{reason, at}` — a QUESTION for the crew, never a verdict |
@@ -105,7 +106,13 @@ Retention: closed items (`resolved`, `noise`) are dropped 30 days after their la
 
 #### The re-check window
 
-Each cycle the poller re-reads up to `recheck_max_per_cycle` (default 20) open items from watched channels posted within `recheck_days` (default 7), least-recently-checked first, in one `batch_get_thread_replies` call. It flags `possibly_resolved` when the parent has a ✅-family reaction, a new reply matches a resolution word (`fixed`, `resolved`, `merged`, `shipped`, `thanks`, …), or the parent was deleted. It never changes `status`.
+Each cycle the poller re-reads up to `recheck_max_per_cycle` (default 20) open items from watched channels posted within `recheck_days` (default 7), least-recently-checked first, in one `batch_get_thread_replies` call. It stores the newest 5 replies on the item (`replies`) and flags `possibly_resolved` when:
+
+- the ORIGINAL POSTER put a ✅-family reaction (`white_check_mark`, `heavy_check_mark`, `ballot_box_with_check`, …) on the parent — a reaction by anyone else, or one without a user list, does not count; or
+- a new reply by someone OTHER than the poster contains a resolution word: `fixed`, `resolved`, `solved`, `merged`, `shipped`, `deployed`, `released in`, `works now`, `working now`, `that did it`. A word right after a negation (`not fixed`, `isn't resolved`) does not count. Gratitude (`thanks`, `thank you`, `ty`) and `done` are not resolution words; or
+- the parent was deleted.
+
+The flag is a keyword hint. The Lead or the Thread Watcher judges it from `replies`. The poller never changes `status`.
 
 ### Source state (`ledger.source_state`, `ledger.source_error`)
 
@@ -145,7 +152,7 @@ There is no idle nudge loop. `watch.poll_once` → `crew_runtime.after_poll` wak
 
 #### Brief injection — presence check
 
-The brief (`crew_brief.md`, first line `<!-- slack-radar-crew-brief v3 -->`) is prepended to the nudge whenever no message in the session both contains the sentinel and is at least as long as the brief. Session start, compaction and restart are all the same case.
+The brief (`crew_brief.md`, first line `<!-- slack-radar-crew-brief v4 -->`) is prepended to the nudge whenever no message in the session both contains the sentinel and is at least as long as the brief. Session start, compaction and restart are all the same case.
 
 ## 4. MCP tools (`backend/mcp_server.py`)
 
@@ -153,7 +160,7 @@ One stdio server, declared in `app.json` `mcpServers.ledger`, reached by agents 
 
 | Tool | Arguments | Returns |
 |---|---|---|
-| `slack_radar_read` | `{limit?: int 1–100}` (default 40) | `crew` (`name`, `enabled`, `paused_reason`), `crew_memory`, `counts`, `slack_source` (`state`, `error`), `digest` (`requested_at`, `pending`, `last_posted_date`, `last_error`), `channels` (`last_polled_at`, `last_error`), `needs_triage`, `thread_updates` |
+| `slack_radar_read` | `{limit?: int 1–100}` (default 40) | `crew` (`name`, `enabled`, `paused_reason`), `crew_memory`, `counts`, `slack_source` (`state`, `error`), `digest` (`requested_at`, `pending`, `last_posted_date`, `last_error`), `channels` (`last_polled_at`, `last_error`), `needs_triage`, `thread_updates` (each item also carries its LOCAL `replies`) |
 | `slack_radar_record` | `{items?: [...≤100], crew?: {...}, event?: str}` | `{ok, applied, refused}` |
 | `slack_radar_digest` | `{headline: str ≤400, top_keys?: [item key ≤10]}` | `{ok, queued}`; sets `digest.pending` and `crew_memory.phase: idle` |
 | `slack_radar_request_digest` | `{}` | `{ok, requested}`; sets `digest.requested_at` |

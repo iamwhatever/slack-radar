@@ -64,6 +64,11 @@ MAX_TODAY = 240
 MAX_LINKS = 10
 MAX_TRIED = 30
 MAX_ITEMS = 2000
+#: Thread replies kept on an item (LOCAL, poller-owned): the newest N, each clipped.
+MAX_REPLIES = 5
+MAX_REPLY_TEXT = 400
+#: Replies are dropped from an item older than this, or one that left OPEN_STATUSES.
+REPLIES_MAX_AGE_DAYS = 7
 MAX_EVENTS_BYTES = 2 * 1024 * 1024
 
 _KEY_RE = re.compile(r"^[CGD][A-Z0-9]{2,20}:\d{9,11}\.\d{6}$")
@@ -309,8 +314,18 @@ def mutate(data_dir: Path, fn: Callable[[dict[str, Any]], Any]) -> Any:
 
 
 def _prune(ledger: dict[str, Any], retention_days: int = 30) -> None:
-    """Drop closed items past retention, then cap the total (oldest closed first)."""
+    """Drop closed items past retention, then cap the total (oldest closed first).
+
+    Also drops the kept thread ``replies`` from every item that is closed or older than
+    :data:`REPLIES_MAX_AGE_DAYS`, so reply text is bounded to open, recent items.
+    """
     items: dict[str, dict[str, Any]] = ledger.get("items") or {}
+    replies_horizon = now() - REPLIES_MAX_AGE_DAYS * 86400
+    for it in items.values():
+        if it.get("replies") and (
+            it.get("status") not in OPEN_STATUSES or float(it.get("ts_float") or 0) < replies_horizon
+        ):
+            it["replies"] = []
     horizon = now() - retention_days * 86400
     for key in [k for k, it in items.items() if it.get("status") not in OPEN_STATUSES]:
         if float(items[key].get("updated_at") or 0) < horizon:
@@ -391,6 +406,8 @@ def normalize_message(
         "reply_count": int(msg.get("reply_count") or 0),
         "latest_reply": str(msg.get("latest_reply") or ""),
         "reactions": sorted({str(r.get("name")) for r in msg.get("reactions") or [] if r.get("name")}),
+        # poller-owned, LOCAL: the newest thread replies, refreshed by the re-check
+        "replies": [],
         # crew-owned (public: may appear in the digest)
         "status": "new",
         "category": "",
@@ -413,6 +430,23 @@ def normalize_message(
         "first_seen_at": t,
         "updated_at": t,
     }
+
+
+def normalize_replies(replies: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The newest :data:`MAX_REPLIES` thread replies as ``[{ts, user, text}]``, oldest first.
+
+    LOCAL and poller-owned: text is redacted and clipped to :data:`MAX_REPLY_TEXT`.
+    """
+    rows = [r for r in replies if isinstance(r, dict) and r.get("ts")]
+    rows.sort(key=lambda r: float(r.get("ts") or 0))
+    return [
+        {
+            "ts": str(r.get("ts") or ""),
+            "user": str(r.get("user") or r.get("bot_id") or ""),
+            "text": clip(r.get("text"), MAX_REPLY_TEXT),
+        }
+        for r in rows[-MAX_REPLIES:]
+    ]
 
 
 # ── crew record ────────────────────────────────────────────────────────────
@@ -676,7 +710,7 @@ def pending_view(ledger: dict[str, Any], limit: int = 40) -> dict[str, Any]:
     items = list((ledger.get("items") or {}).values())
     items.sort(key=lambda it: float(it.get("ts_float") or 0))
 
-    def brief(it: dict[str, Any], with_text: bool) -> dict[str, Any]:
+    def brief(it: dict[str, Any], with_text: bool, with_replies: bool = False) -> dict[str, Any]:
         out = {
             k: it.get(k)
             for k in (
@@ -696,11 +730,17 @@ def pending_view(ledger: dict[str, Any], limit: int = 40) -> dict[str, Any]:
         }
         if with_text:
             out["text"] = it.get("text")
+        if with_replies:
+            out["replies"] = [
+                {"ts": r.get("ts"), "user": r.get("user"), "text": clip(r.get("text"), MAX_REPLY_TEXT)}
+                for r in (it.get("replies") or [])[-MAX_REPLIES:]
+                if isinstance(r, dict)
+            ]
         return out
 
     triage = [brief(it, True) for it in items if it.get("needs_triage")][:limit]
     changed = [
-        brief(it, True)
+        brief(it, True, with_replies=True)
         for it in items
         if not it.get("needs_triage") and (it.get("thread_changed") or it.get("possibly_resolved"))
     ][:limit]

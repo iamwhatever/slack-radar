@@ -62,11 +62,15 @@ SOURCE_NEEDS_LOGIN = "needs_login"
 SOURCE_NOT_FOUND = "binary_not_found"
 SOURCE_ERROR = "error"
 
+#: Words that say a thread reached an answer or a fix. Gratitude ("thanks", "ty") and
+#: "done" are deliberately absent: they are said to answers and non-answers alike.
 _RESOLVED_WORDS = re.compile(
-    r"\b(fixed|resolved|done|merged|shipped|deployed|released|closing|closed|answered|"
-    r"works now|working now|thanks|thank you|ty|solved)\b",
+    r"\b(fixed|resolved|solved|merged|shipped|deployed|released in|works now|working now|"
+    r"that did it)\b",
     re.IGNORECASE,
 )
+#: A resolution word right after one of these is a negation ("not fixed", "isn't resolved").
+_NEGATION_BEFORE = re.compile(r"\b(not|never|isn't|isnt|wasn't|hasn't|haven't|still no|no longer)\s+$", re.IGNORECASE)
 _RESOLVED_REACTIONS = frozenset(
     {"white_check_mark", "heavy_check_mark", "ballot_box_with_check", "done", "resolved", "merged"}
 )
@@ -183,18 +187,35 @@ def fetch_replies(client: SlackMcpClient, threads: list[tuple[str, str]]) -> lis
     return out
 
 
-def _resolution_signal(parent: dict[str, Any], replies: list[dict[str, Any]], since: str) -> str:
-    """A human-readable reason this thread MAY be resolved, or ""."""
-    names = {str(r.get("name")) for r in parent.get("reactions") or []}
-    hit = names & _RESOLVED_REACTIONS
-    if hit:
-        return f"parent has :{sorted(hit)[0]}: reaction"
+def _resolved_word(text: str) -> str:
+    """The first non-negated resolution word in ``text``, or ""."""
+    for m in _RESOLVED_WORDS.finditer(text):
+        if not _NEGATION_BEFORE.search(text[max(0, m.start() - 16) : m.start()]):
+            return m.group(0)
+    return ""
+
+
+def _resolution_signal(
+    parent: dict[str, Any], replies: list[dict[str, Any]], since: str, poster: str = ""
+) -> str:
+    """A human-readable reason this thread MAY be resolved, or "".
+
+    Two signals only: the POSTER put a ✅-family reaction on the parent, or a new reply by
+    someone OTHER than the poster carries a resolution word (see ``_RESOLVED_WORDS``).
+    A reaction whose user list is missing, or a reply with no user, does not count.
+    """
+    for r in parent.get("reactions") or []:
+        if str(r.get("name")) in _RESOLVED_REACTIONS and poster and poster in (r.get("users") or []):
+            return f"poster reacted :{r.get('name')}:"
     for rep in reversed(replies):
         if since and str(rep.get("ts") or "") <= since:
             break
-        m = _RESOLVED_WORDS.search(str(rep.get("text") or ""))
-        if m:
-            return f"reply says “{m.group(0)}”"
+        user = str(rep.get("user") or rep.get("bot_id") or "")
+        if not user or user == poster:
+            continue
+        word = _resolved_word(str(rep.get("text") or ""))
+        if word:
+            return f"reply by another user says “{word}”"
     return ""
 
 
@@ -326,8 +347,11 @@ def _run_cycle_body(
                 if latest and latest != item.get("latest_reply"):
                     changed = True
                     item["thread_changed"] = True
-                reason = _resolution_signal(parent, replies, item.get("latest_reply") or "")
+                reason = _resolution_signal(
+                    parent, replies, item.get("latest_reply") or "", str(item.get("user") or "")
+                )
                 item["reply_count"] = len(replies)
+                item["replies"] = store.normalize_replies(replies)
                 item["latest_reply"] = latest or item.get("latest_reply", "")
                 if parent:
                     item["reactions"] = sorted(
