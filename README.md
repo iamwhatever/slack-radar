@@ -32,7 +32,12 @@ KiroCrew's built-in Issue Radar app.
    lead judges each flag.
 6. **Digest.** When a digest is requested, the lead picks the top items and
    writes a headline. The gateway renders the text from the ledger and delivers
-   it as a DM to yourself or as a dashboard notification.
+   it as a DM to yourself or as a dashboard notification, and keeps the text as
+   the Board's last digest. The `daily-digest` cron asks for one every weekday at
+   16:00 UTC.
+7. **Today.** Whenever a turn changed anything, the lead also writes one public
+   sentence for the Board: what changed and what needs you, or "nothing needs
+   you".
 
 ### Architecture
 
@@ -158,9 +163,15 @@ The page has four tabs. The header shows the tabs, a **Crew** switch (start or p
 | Activity | The work log: polls that moved something, login lost or restored, crew notes, digests, settings changes, crew session moves |
 | Settings | **Basics** first: Slack connection check, watched channels, digest destination (plus your Slack login for a DM), poll interval. **Advanced** (folded): Slack MCP command, workspace URL, backfill, and the crew agent, model and the *Unattended mode (auto-approve investigator commands)* switch |
 
-To get a digest on a schedule, resume the paused `daily-digest` cron (weekdays
-16:00 UTC) in the Schedule view. To get one now, press **Request digest** on the
-Board.
+A digest arrives every weekday at 16:00 UTC from the `daily-digest` cron, which
+is on by default. To get one now, press **Request digest** on the Board. To stop
+the daily one, pause the cron in the Schedule view.
+
+**Existing installs** (before this default changed): updating the app keeps your
+`daily-digest` job as it was, paused. The gateway only adds an app cron that does
+not exist yet. Either resume `daily-digest` in the Schedule view, or disable and
+re-enable the app (disabling removes the app's cron jobs, enabling adds them back
+with the new default).
 
 ## The team
 
@@ -203,9 +214,10 @@ never modified), `model` (empty = the agent's default), and `unattended` (the
   stopped on shutdown. It runs every `poll_interval_secs` once at least one
   channel is set, and costs no model turns. It wakes the crew only when a poll
   moved something or a digest is due, so an idle workspace costs nothing.
-- **The `daily-digest` cron.** Shipped paused (`0 16 * * 1-5`, UTC). When you
-  resume it, it calls `slack_radar_request_digest` once and stops; the Radar
-  Lead composes the digest in its own session and the poller delivers it.
+- **The `daily-digest` cron.** On by default (`0 16 * * 1-5`, UTC). Each run
+  calls `slack_radar_request_digest` once and stops; the Radar Lead composes the
+  digest in its own session and the poller delivers it (default destination:
+  dashboard notification).
 
 Disabling the app stops the loop and revokes the crew's auto-approve grant.
 
@@ -348,7 +360,10 @@ Slack Radar 是一个“有记性”的 Slack 分诊小组。它通过你自己�
    （✅ 表情、“fixed”“merged”“thanks”之类的回复、原消息被删除）。代码从不自行关闭条目，
    每个标记都由组长判断。
 6. **摘要。** 请求摘要时，组长挑出最重要的条目并写一句标题；网关从台账渲染出正文，
-   以私信发给你自己，或作为仪表盘通知送达。
+   以私信发给你自己，或作为仪表盘通知送达，并把正文留作看板上的“最近一次摘要”。
+   `daily-digest` 定时任务每个工作日 UTC 16:00 请求一份。
+7. **今日一句。** 只要一轮工作有变化，组长还会为看板写一句公开的话：变了什么、哪里需要你，
+   或者“没有需要你的事”。
 
 架构图和单轮轮询的时序图见英文部分的 [Architecture](#architecture)，这里不再重复。
 
@@ -409,8 +424,12 @@ kirocrew app enable slack-radar
 | Activity（动态） | 工作日志：有变化的轮询、登录失效与恢复、小组备注、摘要、设置变更、小组会话迁移 |
 | Settings（设置） | 先是 **Basics**：Slack 连接检查、监听的频道、摘要去向（选私信时还有 Slack 登录名）、轮询间隔。**Advanced**（默认折叠）：Slack MCP 命令、工作区地址、回溯时长，以及小组的 agent、模型和 *Unattended mode (auto-approve investigator commands)* 开关 |
 
-想定时收摘要，就在 Schedule 页面恢复已暂停的 `daily-digest` 定时任务（工作日 UTC 16:00）；
-想马上要一份，点看板上的 **Request digest**。
+`daily-digest` 定时任务默认开启，每个工作日 UTC 16:00 送来一份摘要。想马上要一份，点看板上的
+**Request digest**；不想要每日摘要，就在 Schedule 页面暂停这个任务。
+
+**已安装的旧版本**（默认值改变之前装的）：更新应用不会改动你已有的 `daily-digest` 任务，它仍是暂停的，
+因为网关只添加尚不存在的应用定时任务。要么在 Schedule 页面恢复 `daily-digest`，要么停用再启用应用
+（停用会删除应用的定时任务，启用时按新的默认值重新添加）。
 
 ## 团队
 
@@ -450,8 +469,8 @@ kirocrew app enable slack-radar
 - **轮询循环。** 由应用的 `on_startup` 钩子作为网关任务启动，关闭时停止。设置了至少一个频道后，
   每隔 `poll_interval_secs` 跑一次，不消耗模型调用。只有轮询发现变化或到了该出摘要时才唤醒小组，
   所以工作区安静时不花任何成本。
-- **`daily-digest` 定时任务。** 随应用附带，默认暂停（`0 16 * * 1-5`，UTC）。恢复后，它只调用一次
-  `slack_radar_request_digest` 就结束；摘要由雷达组长在自己的会话里撰写，再由轮询器投递。
+- **`daily-digest` 定时任务。** 随应用附带，默认开启（`0 16 * * 1-5`，UTC）。每次只调用一次
+  `slack_radar_request_digest` 就结束；摘要由雷达组长在自己的会话里撰写，再由轮询器投递（默认去向：仪表盘通知）。
 
 停用应用会停止轮询循环，并撤销小组的自动批准授权。
 

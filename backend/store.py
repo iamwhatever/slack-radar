@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import socket
 import tempfile
 import time
 from contextlib import contextmanager
@@ -57,6 +58,7 @@ MAX_TEXT = 4000
 MAX_SUMMARY = 600
 MAX_NOTE = 1000
 MAX_NEXT = 500
+MAX_TODAY = 240
 MAX_LINKS = 10
 MAX_TRIED = 30
 MAX_ITEMS = 2000
@@ -80,6 +82,16 @@ _CREDENTIAL_PATTERNS = (
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"),
 )
 REDACTED = "[redacted]"
+
+# What a PUBLIC field may not carry: a filesystem path, a host name or address, or a
+# credential. Public text leaves this machine (digest DM, notification, the Board), so
+# these are refused outright rather than rewritten.
+_PUBLIC_PATH_RE = re.compile(r"(?<![\w.:/~])(?:/[\w.-]+){2,}|~/|\b[A-Za-z]:\\")
+_PUBLIC_HOST_RE = re.compile(
+    r"\blocalhost\b|\b\d{1,3}(?:\.\d{1,3}){3}\b|\bip-\d{1,3}(?:-\d{1,3}){3}\b"
+    r"|\b[\w-]+(?:\.[\w-]+)*\.(?:local|localdomain|internal|lan|corp)\b",
+    re.IGNORECASE,
+)
 
 
 class StoreError(Exception):
@@ -132,6 +144,23 @@ def redact(text: str) -> str:
 def clip(text: Any, limit: int) -> str:
     s = redact(str(text or ""))
     return s if len(s) <= limit else s[: limit - 1] + "…"
+
+
+def public_text_problem(text: str) -> str:
+    """Why ``text`` may not go into a PUBLIC field, or "" when it may."""
+    if redact(text) != text:
+        return "contains a credential"
+    if _PUBLIC_PATH_RE.search(text):
+        return "contains a filesystem path"
+    if _PUBLIC_HOST_RE.search(text):
+        return "contains a host name or address"
+    try:
+        host = socket.gethostname().split(".")[0].lower()
+    except OSError:
+        host = ""
+    if len(host) >= 4 and re.search(rf"(?<![\w-]){re.escape(host)}(?![\w-])", text, re.IGNORECASE):
+        return "contains this machine's host name"
+    return ""
 
 
 def is_channel_id(value: Any) -> bool:
@@ -220,6 +249,7 @@ def empty_ledger() -> dict[str, Any]:
             "next": "",
             "tried": [],
             "rejected": [],
+            "today": {"text": "", "at": 0.0},
             "updated_at": 0.0,
         },
         "digest": {
@@ -254,6 +284,8 @@ def _coerce_ledger(raw: Any) -> dict[str, Any]:
         base[key] = value
     for key, default in empty_ledger()["crew_memory"].items():
         base["crew_memory"].setdefault(key, default)
+    if not isinstance(base["crew_memory"].get("today"), dict):
+        base["crew_memory"]["today"] = {"text": "", "at": 0.0}
     for key, default in empty_ledger()["digest"].items():
         base["digest"].setdefault(key, default)
     return base
@@ -572,8 +604,25 @@ def apply_crew_record(ledger: dict[str, Any], payload: dict[str, Any]) -> dict[s
             add = crew.get(f"{field}_add")
             if isinstance(add, list):
                 mem[field] = (list(mem.get(field) or []) + [clip(x, 200) for x in add])[-MAX_TRIED:]
+        if "today" in crew:
+            why = _today_problem(crew["today"])
+            if why:
+                refused.append({"key": "crew.today", "why": why})
+            else:
+                mem["today"] = {"text": " ".join(crew["today"].split()), "at": now()}
         mem["updated_at"] = now()
     return {"applied": applied, "refused": refused}
+
+
+def _today_problem(value: Any) -> str:
+    """``crew.today`` is PUBLIC (the Board shows it): one line, ≤ MAX_TODAY, no path/host/secret."""
+    if not isinstance(value, str) or not value.strip():
+        return "crew.today must be a non-empty string"
+    text = " ".join(value.split())
+    if len(text) > MAX_TODAY:
+        return f"crew.today must be at most {MAX_TODAY} characters"
+    why = public_text_problem(text)
+    return f"crew.today is public and {why}" if why else ""
 
 
 def pending_view(ledger: dict[str, Any], limit: int = 40) -> dict[str, Any]:
