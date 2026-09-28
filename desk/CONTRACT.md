@@ -142,6 +142,7 @@ The gateway renders the text itself (`watch.render_digest`) from counts and PUBL
 ### Waking the crew
 
 There is no idle nudge loop. `watch.poll_once` → `crew_runtime.after_poll` wakes the crew when a poll ingested new items, saw a thread change or a new flag, or a digest is due; leftover `needs_triage` is re-offered at most every 30 minutes. A crew that is mid-turn is not woken (the wake is dropped, not queued: the next poll re-offers everything).
+With no Slack bot on the gateway the poller reads the http app's `state` (the one the routes read), so every poll wakes, renews the grant and observes member runs; leftover `thread_updates` are re-offered like `needs_triage`, and a wake dropped mid-turn is retried on the next poll.
 
 #### Brief injection — presence check
 
