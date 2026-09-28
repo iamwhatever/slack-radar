@@ -415,6 +415,24 @@ async def _handle_item_handle(request: web.Request, ctx: Any) -> web.Response:
     return web.json_response({"ok": True, "item": item})
 
 
+async def _handle_handoff_dismiss(request: web.Request, ctx: Any) -> web.Response:
+    """Owner clears an item's fix hand-off (the "Fixes handed off" fold's Dismiss)."""
+    body = await _json_body(request)
+    if body is None:
+        return _err(400, "body_not_object", "request body must be a JSON object")
+    key = body.get("key")
+    if not store.is_item_key(key):
+        return _err(400, "invalid_field", "key must be a ledger item key")
+    try:
+        item = await asyncio.to_thread(store.mutate, _data_dir(ctx), lambda led: store.apply_handoff_dismiss(led, key))
+    except store.StoreError as exc:
+        return _err(500, "ledger_corrupt", str(exc))
+    if item is None:
+        return _err(404, "unknown_item", "that item is not in the ledger")
+    store.append_event(_data_dir(ctx), "handoff", "owner dismissed a fix hand-off", key=key)
+    return web.json_response({"ok": True, "item": item})
+
+
 async def _handle_digest_request(request: web.Request, ctx: Any) -> web.Response:
     def _req(led: dict[str, Any]) -> None:
         led["digest"]["requested_at"] = store.now()
@@ -501,6 +519,7 @@ def register_routes(ctx: Any) -> list[Any]:
         r("GET", "/items", _handle_items),
         r("GET", "/needs", _handle_needs),
         r("POST", "/items/handle", _owner_only(_handle_item_handle)),
+        r("POST", "/items/handoff/dismiss", _owner_only(_handle_handoff_dismiss)),
         r("GET", "/events", _handle_events),
         r("PUT", "/settings", _owner_only(_handle_put_settings)),
         r("GET", "/mcp/status", _owner_only(_handle_mcp_status)),

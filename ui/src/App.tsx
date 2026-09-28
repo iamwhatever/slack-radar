@@ -1,3 +1,4 @@
+import * as sdk from '@kirocrew/app-sdk'
 import { ChatEmbed, useAppApi } from '@kirocrew/app-sdk'
 import { Badge, Btn, Card, CardTitle, EmptyState, Input, PageHeader, StatCard, Toggle } from '@kirocrew/app-sdk/ui'
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
@@ -36,9 +37,21 @@ type NeedEntry = {
   reason: string
   members?: string[]
   words?: string[]
+  handoff_title?: string
 }
 type NeedGroup = { id: 'decide' | 'unanswered' | 'clusters'; total: number; entries: NeedEntry[] }
-type Needs = { groups: NeedGroup[]; handled_total: number }
+// A fix task the Lead wrote for a coding session (store.py `fix_handoff`, LOCAL).
+type FixHandoff = { title: string; prompt: string; repo: string; links: string[]; at: number }
+type HandoffRow = {
+  key: string
+  channel: string
+  permalink: string
+  summary: string
+  status: string
+  handled_how: string
+  handoff: FixHandoff
+}
+type Needs = { groups: NeedGroup[]; handled_total: number; handoffs?: HandoffRow[]; handoffs_total?: number }
 
 type Settings = {
   channels: string[]
@@ -783,13 +796,27 @@ function MoreMenu({ label, actions }: { label: string; actions: { label: string;
 
 const small: CSSProperties = { fontSize: 12, padding: '2px 10px' }
 
-function NeedRow({ e, first, onMark, onWhy }: { e: NeedEntry; first: boolean; onMark: (how: HandleHow) => void; onWhy: () => void }) {
+function NeedRow({
+  e,
+  first,
+  onMark,
+  onWhy,
+  onStartFix,
+}: {
+  e: NeedEntry
+  first: boolean
+  onMark: (how: HandleHow) => void
+  onWhy: () => void
+  onStartFix?: () => void
+}) {
+  const fix = !!e.handoff_title && !!onStartFix
   return (
     <li className="text-sm" style={{ padding: '10px 0', borderTop: first ? 0 : '1px solid var(--border)' }}>
       <div className="flex items-start gap-2">
         <div style={{ flex: 'none', minWidth: 28 }}>{priorityBadge(e.priority)}</div>
         <div style={{ minWidth: 0, flex: 1 }}>
           <div style={{ color: 'var(--text-strong)' }}>{e.summary || '(no text)'}</div>
+          {fix && <div className="text-xs" style={{ marginTop: 2 }}>Fix: {e.handoff_title}</div>}
           <div className="text-xs text-muted" style={{ marginTop: 2 }}>
             {e.reason}
             {e.words && e.words.length > 0 && <> ({e.words.join(', ')})</>}
@@ -806,13 +833,89 @@ function NeedRow({ e, first, onMark, onWhy }: { e: NeedEntry; first: boolean; on
           </div>
         </div>
         <div className="flex items-center gap-1" style={{ flex: 'none' }}>
-          <Btn style={small} onClick={() => onMark('done')}>Done</Btn>
-          <Btn style={small} onClick={() => onMark('ignored')}>Ignore</Btn>
-          <MoreMenu label="More actions" actions={[{ label: 'Why? Ask the lead', onClick: onWhy }]} />
+          {fix ? (
+            <>
+              <Btn style={small} onClick={onStartFix}>Start fix session</Btn>
+              <Btn style={small} onClick={() => onMark('ignored')}>Ignore</Btn>
+              <MoreMenu
+                label="More actions"
+                actions={[
+                  { label: 'Done', onClick: () => onMark('done') },
+                  { label: 'Why? Ask the lead', onClick: onWhy },
+                ]}
+              />
+            </>
+          ) : (
+            <>
+              <Btn style={small} onClick={() => onMark('done')}>Done</Btn>
+              <Btn style={small} onClick={() => onMark('ignored')}>Ignore</Btn>
+              <MoreMenu label="More actions" actions={[{ label: 'Why? Ask the lead', onClick: onWhy }]} />
+            </>
+          )}
         </div>
       </div>
     </li>
   )
+}
+
+type Launcher = { openChat: (opts: { message?: string; autoSend?: boolean }) => void }
+// `useChatLauncher` is read off the SDK namespace so an older host without it still loads the app.
+const useLauncher: () => Launcher | null =
+  typeof (sdk as { useChatLauncher?: unknown }).useChatLauncher === 'function'
+    ? (sdk as unknown as { useChatLauncher: () => Launcher }).useChatLauncher
+    : () => null
+
+// Start fix session: a NEW chat whose composer holds the prompt. Nothing is sent until
+// the owner presses Send. Without the SDK launcher, a dialog to copy the prompt instead.
+function useStartFix(): [(h: FixHandoff) => void, ReactNode] {
+  const launcher = useLauncher()
+  const [shown, setShown] = useState<FixHandoff | null>(null)
+  const [copied, setCopied] = useState(false)
+  const start = (h: FixHandoff) => {
+    if (launcher) launcher.openChat({ message: h.prompt, autoSend: false })
+    else {
+      setCopied(false)
+      setShown(h)
+    }
+  }
+  const copy = async () => {
+    if (!shown) return
+    try {
+      await navigator.clipboard.writeText(shown.prompt)
+      setCopied(true)
+    } catch {
+      setCopied(false)
+    }
+  }
+  const dialog = shown ? (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="sr-fix-title"
+      style={{ position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(0,0,0,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+      onKeyDown={(ev) => ev.key === 'Escape' && setShown(null)}
+    >
+      <div style={{ width: 'min(720px, 92vw)', background: 'var(--card)', border: '1px solid var(--border-strong)', borderRadius: 10, padding: 16 }}>
+        <h3 id="sr-fix-title" className="text-sm" style={{ margin: '0 0 6px', fontWeight: 600 }}>{shown.title}</h3>
+        <p className="text-xs text-muted" style={{ margin: '0 0 8px' }}>
+          Copy this task into a new chat. Nothing is sent for you.
+        </p>
+        <textarea
+          readOnly
+          aria-label="Fix task"
+          value={shown.prompt}
+          style={{ width: '100%', height: 260, fontSize: 12, fontFamily: 'var(--font-mono, monospace)' }}
+        />
+        <div className="flex items-center gap-2" style={{ marginTop: 8 }}>
+          <Btn onClick={copy}>{copied ? 'Copied' : 'Copy prompt'}</Btn>
+          <a className="underline text-sm" href="/chat?new=1">New chat</a>
+          <div className="flex-1" />
+          <Btn onClick={() => setShown(null)}>Close</Btn>
+        </div>
+      </div>
+    </div>
+  ) : null
+  return [start, dialog]
 }
 
 function NeedsCard({
@@ -829,6 +932,19 @@ function NeedsCard({
   onWhy: (e: NeedEntry) => void
 }) {
   const api = useAppApi()
+  const [startFix, fixDialog] = useStartFix()
+  const handoffs = needs?.handoffs || []
+  const byKey = new Map(handoffs.map((h) => [h.key, h.handoff]))
+  const [dismissFailed, setDismissFailed] = useState('')
+  const dismiss = async (key: string) => {
+    setDismissFailed('')
+    try {
+      await api.post(`${BASE}/items/handoff/dismiss`, { key })
+      onChanged()
+    } catch {
+      setDismissFailed(key)
+    }
+  }
   // Rows marked here leave the list at once; a failed save puts them back.
   const [gone, setGone] = useState<Set<string>>(new Set())
   const [failed, setFailed] = useState<{ keys: string[]; how: HandleHow; rowId?: string } | null>(null)
@@ -891,12 +1007,44 @@ function NeedsCard({
                     first={i === 0}
                     onMark={(how) => post(e.members?.length ? e.members : [e.key], how, `${g.id}:${e.key}`)}
                     onWhy={() => onWhy(e)}
+                    onStartFix={g.id === 'decide' && byKey.has(e.key) ? () => startFix(byKey.get(e.key)!) : undefined}
                   />
                 ))}
               </ul>
             </section>
           ),
         )
+      )}
+      {dismissFailed && (
+        <ErrorNotice message="Could not dismiss that hand-off. Nothing changed." onRetry={() => dismiss(dismissFailed)} />
+      )}
+      {handoffs.length > 0 && (
+        <details style={{ marginTop: 12 }}>
+          <summary className="text-sm text-muted" style={{ cursor: 'pointer' }}>
+            Fixes handed off ({needs?.handoffs_total ?? handoffs.length})
+          </summary>
+          <ul className="flex flex-col" style={{ marginTop: 4 }}>
+            {handoffs.map((h, i) => (
+              <li
+                key={h.key}
+                className="text-sm flex items-center gap-2"
+                style={{ padding: '6px 0', borderTop: i === 0 ? 0 : '1px solid var(--border)' }}
+              >
+                <span style={{ flex: 1, minWidth: 0 }}>
+                  {h.handoff.title}
+                  <span className="text-xs text-muted">
+                    {' · '}
+                    {h.summary}
+                    {' · '}
+                    <span className="font-mono">{h.handoff.repo}</span> · {ago(h.handoff.at)}
+                  </span>
+                </span>
+                <Btn style={small} onClick={() => startFix(h.handoff)}>Start fix session</Btn>
+                <Btn style={small} onClick={() => dismiss(h.key)}>Dismiss</Btn>
+              </li>
+            ))}
+          </ul>
+        </details>
       )}
       {(needs?.handled_total || 0) > 0 && (
         <details style={{ marginTop: 12 }}>
@@ -918,6 +1066,7 @@ function NeedsCard({
           </ul>
         </details>
       )}
+      {fixDialog}
     </Card>
   )
 }

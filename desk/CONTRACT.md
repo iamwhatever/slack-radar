@@ -14,7 +14,7 @@ What the code, the agents and the UI agree on. The people-level rules are in [CH
 | Crew slot | `crew-slack-radar`, then `crew-slack-radar-g<N>` | `store.SLOT_KEY`, `store.next_slot_key` |
 | Ledger MCP server | `@slack-radar:ledger` | `app.json` `mcpServers.ledger` |
 | Unattended grant scope | `crew:slack-radar:autoapprove` (900 s) | `crew_runtime.TRUST_SCOPE` |
-| Brief sentinel | `<!-- slack-radar-crew-brief v4 -->` | first line of `backend/crew_brief.md` |
+| Brief sentinel | `<!-- slack-radar-crew-brief v5 -->` | first line of `backend/crew_brief.md` |
 
 These names are part of the install: renaming one orphans a session, a spec or a grant.
 
@@ -99,6 +99,7 @@ One per top-level message. Thread replies are not items; they are signals on the
 | `links` | crew / investigator | public | `https://` URLs only, ≤ 10 |
 | `note` | crew / investigator | local | evidence, doubts, why a flag was cleared |
 | `investigation` | crew / routes | local | spawn id of the investigator working it |
+| `fix_handoff` | crew (Lead) / owner clears | local | `{title ≤120, prompt ≤4000, repo owner/name, links [https ≤10], at}` or `null`. A fix task for a coding session the owner starts from the Board. Only on a `triaged`/`investigating` `bug-report`/`feature-request`; one per item, a new write replaces it. Title and prompt get the public check (`store.public_text_problem`: no path, host or secret). The prompt must contain the item key, every link, the word `coverage` (the verdict) and the line `Do not merge; open a PR for review`; `links` defaults to the item's `links`. Cleared only by `POST /items/handoff/dismiss` |
 | `handled_at` | owner | local | epoch s the owner pressed **Done** or **Ignore**; `0` = not handled. Set only by `POST /items/handle`; `slack_radar_record` has no field for it |
 | `handled_how` | owner | local | `done` · `ignored` · `""`. A handled item keeps its `status`; it only leaves the Needs-you list. `reopen` clears both fields |
 
@@ -153,7 +154,7 @@ With no Slack bot on the gateway the poller reads the http app's `state` (the on
 
 #### Brief injection — presence check
 
-The brief (`crew_brief.md`, first line `<!-- slack-radar-crew-brief v4 -->`) is prepended to the nudge whenever no message in the session both contains the sentinel and is at least as long as the brief. Session start, compaction and restart are all the same case.
+The brief (`crew_brief.md`, first line `<!-- slack-radar-crew-brief v5 -->`) is prepended to the nudge whenever no message in the session both contains the sentinel and is at least as long as the brief. Session start, compaction and restart are all the same case.
 
 ## 4. MCP tools (`backend/mcp_server.py`)
 
@@ -166,7 +167,7 @@ One stdio server, declared in `app.json` `mcpServers.ledger`, reached by agents 
 | `slack_radar_digest` | `{headline: str ≤400, top_keys?: [item key ≤10]}` | `{ok, queued}`; sets `digest.pending` and `crew_memory.phase: idle` |
 | `slack_radar_request_digest` | `{}` | `{ok, requested}`; sets `digest.requested_at` |
 
-`slack_radar_record` item shape: `{key, category?, priority?, status?, summary?, links?, note?, investigation?, clear_possibly_resolved?: bool}`. `key` must be one `slack_radar_read` returned. `status` may not be `new`. Enums are `store.CATEGORIES`, `store.PRIORITIES`, `store.STATUSES`. Unknown keys and bad enums are refused per item; recording any field on an item clears its `needs_triage` and `thread_changed`.
+`slack_radar_record` item shape: `{key, category?, priority?, status?, summary?, links?, note?, investigation?, clear_possibly_resolved?: bool, fix_handoff?: {title, prompt, repo, links?}}`. `fix_handoff` is checked after `status`/`category` in the same row; a refused one is reported per item and the other fields still apply. `key` must be one `slack_radar_read` returned. `status` may not be `new`. Enums are `store.CATEGORIES`, `store.PRIORITIES`, `store.STATUSES`. Unknown keys and bad enums are refused per item; recording any field on an item clears its `needs_triage` and `thread_changed`.
 
 `slack_radar_record` crew shape: `{phase?: idle|triaging|investigating|rechecking|digest, next?: str ≤500, today?: str ≤240, tried_add?: [str], rejected_add?: [str]}`. A refused `today` is reported in `refused` as key `crew.today`; the other crew fields still apply.
 
@@ -184,6 +185,7 @@ All paths are under `/api/apps/slack-radar`. "Owner" means `_owner_gate`: the da
 | GET | `/items` | open | `status` (`open` or a status), `channel`, `handled=1`, `limit` ≤500 | ledger items, newest first; `handled=1` keeps only items with `handled_at > 0` (the board's **Handled (N)** fold) |
 | GET | `/needs` | open | — | the Needs-you groups (§6) |
 | POST | `/items/handle` | owner | `{key, how: done\|ignored\|reopen}` | set or clear `handled_at` / `handled_how`; status unchanged. `400 invalid_field`, `404 unknown_item` |
+| POST | `/items/handoff/dismiss` | owner | `{key}` | set `fix_handoff` to `null`; nothing else changes. Event kind `handoff`. `400 invalid_field`, `404 unknown_item` |
 | GET | `/events` | open | `limit` ≤500 | the event log |
 | PUT | `/settings` | owner | settings patch | validates and writes the vault entry |
 | GET | `/mcp/status` | owner | — | handshake with the Slack MCP: connected · needs_login · incompatible · binary_not_found · error |
@@ -230,7 +232,7 @@ Fixed rules over the ledger; no model call. Only items that are open (`new` · `
 
 | Group | An item is in it when | `reason` |
 |---|---|---|
-| `decide` | `priority` is `p0` or `p1`; or it has `links` and a non-empty `investigation` that finished (status moved off `investigating`, or the spawn SDK says the spawn is done); or `possibly_resolved` is set. First match gives the reason | `Open p1` · `Matching GitHub work found` · `Looks resolved: <poller reason>` |
+| `decide` | it carries a `fix_handoff`; or `priority` is `p0` or `p1`; or it has `links` and a non-empty `investigation` that finished (status moved off `investigating`, or the spawn SDK says the spawn is done); or `possibly_resolved` is set. First match gives the reason | `Fix ready to hand off` · `Open p1` · `Matching GitHub work found` · `Looks resolved: <poller reason>` |
 | `unanswered` | not in `decide`; `category == question`; `reply_count == 0` and no `latest_reply`; posted more than 48 h ago | `No reply for N days` |
 | `clusters` | 2+ items in the SAME channel linked by sharing 2+ significant words; links chain (A~B, B~C puts A, B, C together). One entry per cluster, for its top-ranked member, plus `members` (all keys) and `words` (up to 4 shared words) | `N similar messages` |
 
@@ -238,6 +240,8 @@ A significant word: lower-cased `[a-z0-9]{3,}` from `summary` (else the first 20
 
 Order: priority `p0` … `p3`, then no priority; within a priority, oldest first. Clusters order by best member priority, then size, then age. Each group returns at most 20 `entries` and its full `total`.
 
-Response: `{ok, groups: [{id, total, entries}], handled_total}` with groups always in the order `decide`, `unanswered`, `clusters`. Entry: `{key, channel, permalink, summary, priority, category, age_hours, reason}` (+ `members`, `words` on clusters). `summary` falls back to `text[:200]`.
+Response: `{ok, groups: [{id, total, entries}], handled_total, handoffs, handoffs_total}` with groups always in the order `decide`, `unanswered`, `clusters`. Entry: `{key, channel, permalink, summary, priority, category, age_hours, reason}` (+ `members`, `words` on clusters; + `handoff_title` when the item carries a `fix_handoff`). `summary` falls back to `text[:200]`. `handoffs`: every item with a `fix_handoff`, any status, handled or not, newest hand-off first, at most 50: `{key, channel, permalink, summary, status, handled_how, handoff: {title, prompt, repo, links, at}}` (the board's **Fixes handed off (N)** fold).
+
+A `decide` row with a hand-off shows **Start fix session** and **Ignore** (Done moves into ⋯). **Start fix session** calls the app SDK's `useChatLauncher().openChat({message: prompt, autoSend: false})`: a new chat session with the prompt in its composer, never sent. On a host without `useChatLauncher` it opens a dialog with the prompt, **Copy prompt** and a **New chat** link.
 
 **Done** / **Ignore** on a cluster entry posts `/items/handle` for every member.

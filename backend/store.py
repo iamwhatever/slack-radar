@@ -70,10 +70,19 @@ MAX_REPLY_TEXT = 400
 #: Replies are dropped from an item older than this, or one that left OPEN_STATUSES.
 REPLIES_MAX_AGE_DAYS = 7
 MAX_EVENTS_BYTES = 2 * 1024 * 1024
+#: ``fix_handoff`` (LOCAL, Lead-written): a task for a coding session the owner starts.
+MAX_HANDOFF_TITLE = 120
+MAX_HANDOFF_PROMPT = 4000
+#: Only these items may carry a hand-off: open work that code could fix.
+HANDOFF_STATUSES = frozenset({"triaged", "investigating"})
+HANDOFF_CATEGORIES = frozenset({"bug-report", "feature-request"})
+#: The line every hand-off prompt must carry, verbatim.
+HANDOFF_NO_MERGE = "Do not merge; open a PR for review"
 
 _KEY_RE = re.compile(r"^[CGD][A-Z0-9]{2,20}:\d{9,11}\.\d{6}$")
 _CHANNEL_RE = re.compile(r"^[CGD][A-Z0-9]{2,20}$")
 _URL_RE = re.compile(r"^https://[^\s<>\"']{1,500}$")
+_REPO_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$")
 
 # Credential-shaped strings in MESSAGE CONTENT are masked before anything is stored.
 # This has nothing to do with how Slack Radar authenticates (it holds no credential):
@@ -417,6 +426,8 @@ def normalize_message(
         # crew-owned (local: never rendered outside this machine)
         "note": "",
         "investigation": "",
+        # Lead-owned, LOCAL: a fix task the owner may start in another session
+        "fix_handoff": None,
         # poller-owned signals for the crew
         "needs_triage": True,
         "thread_changed": False,
@@ -600,6 +611,15 @@ def apply_handle(ledger: dict[str, Any], key: str, how: str) -> dict[str, Any] |
     return item
 
 
+def apply_handoff_dismiss(ledger: dict[str, Any], key: str) -> dict[str, Any] | None:
+    """Owner clears an item's ``fix_handoff``. Returns the item, or None for an unknown key."""
+    item = (ledger.get("items") or {}).get(key)
+    if item is None:
+        return None
+    item["fix_handoff"] = None
+    return item
+
+
 def swap_seen_runs(data_dir: Path, current: dict[str, dict[str, str]]) -> dict[str, dict[str, str]]:
     """Store ``current`` as the seen child runs and return what was stored before.
 
@@ -663,6 +683,12 @@ def apply_crew_record(ledger: dict[str, Any], payload: dict[str, Any]) -> dict[s
         if "links" in row:
             links = [str(u) for u in (row["links"] or []) if isinstance(u, str) and _URL_RE.match(u)]
             item["links"] = links[:MAX_LINKS]
+        if "fix_handoff" in row:
+            handoff, why = _handoff_value(item, row["fix_handoff"])
+            if why:
+                problems.append(why)
+            else:
+                item["fix_handoff"] = handoff
         if problems:
             refused.append({"key": key, "why": "; ".join(problems)})
         # Reading an item and recording anything about it clears the poller's flags:
@@ -692,6 +718,53 @@ def apply_crew_record(ledger: dict[str, Any], payload: dict[str, Any]) -> dict[s
                 mem["today"] = {"text": " ".join(crew["today"].split()), "at": now()}
         mem["updated_at"] = now()
     return {"applied": applied, "refused": refused}
+
+
+def _handoff_value(item: dict[str, Any], value: Any) -> tuple[dict[str, Any] | None, str]:
+    """Validate a ``fix_handoff``; return ``(value, "")`` or ``(None, why)``.
+
+    The prompt leaves this machine when the owner pastes it into another session, so it
+    gets the PUBLIC text check, and it must be self-contained: the item key, every
+    link, the coverage verdict and the no-merge line.
+    """
+    if not isinstance(value, dict):
+        return None, "fix_handoff must be an object {title, prompt, repo, links}"
+    if item.get("status") not in HANDOFF_STATUSES:
+        return None, "fix_handoff needs an item with status triaged or investigating"
+    if item.get("category") not in HANDOFF_CATEGORIES:
+        return None, "fix_handoff needs a bug-report or feature-request item"
+    title = " ".join(str(value.get("title") or "").split())
+    prompt = str(value.get("prompt") or "").strip()
+    repo = str(value.get("repo") or "").strip()
+    raw_links = value.get("links", item.get("links") or [])
+    if not title or len(title) > MAX_HANDOFF_TITLE:
+        return None, f"fix_handoff.title must be 1-{MAX_HANDOFF_TITLE} characters"
+    if not prompt or len(prompt) > MAX_HANDOFF_PROMPT:
+        return None, f"fix_handoff.prompt must be 1-{MAX_HANDOFF_PROMPT} characters"
+    if not _REPO_RE.match(repo):
+        return None, "fix_handoff.repo must be owner/name"
+    if not isinstance(raw_links, list) or not raw_links or len(raw_links) > MAX_LINKS:
+        return None, f"fix_handoff.links must list 1-{MAX_LINKS} https URLs"
+    links = [u for u in raw_links if isinstance(u, str) and _URL_RE.match(u)]
+    if len(links) != len(raw_links):
+        return None, "fix_handoff.links must be https URLs"
+    for field, text in (("title", title), ("prompt", prompt)):
+        why = public_text_problem(text)
+        if why:
+            return None, f"fix_handoff.{field} leaves this machine and {why}"
+    missing = [
+        label
+        for label, ok in (
+            ("the item key", str(item.get("key") or "") in prompt),
+            ("every link", all(u in prompt for u in links)),
+            ("the coverage verdict", "coverage" in prompt.lower()),
+            (f'the line "{HANDOFF_NO_MERGE}"', HANDOFF_NO_MERGE in prompt),
+        )
+        if not ok
+    ]
+    if missing:
+        return None, "fix_handoff.prompt must include " + ", ".join(missing)
+    return {"title": title, "prompt": prompt, "repo": repo, "links": links, "at": now()}, ""
 
 
 def _today_problem(value: Any) -> str:

@@ -70,13 +70,30 @@ const need = (it: (typeof ITEMS)[number], reason: string, extra: Record<string, 
   reason, ...extra,
 })
 
+const HANDOFF = {
+  title: 'Raise the CSV export row limit (issue #412)',
+  prompt: `Repo example-org/example-app. Slack Radar item ${ITEMS[0].key}.\n` +
+    'Links: https://github.com/example-org/example-app/issues/412\n' +
+    'Coverage verdict: FULL, #412 describes the same 50k-row failure.\n' +
+    'Change: stream the export instead of building it in memory. Verify: export a 60k-row file.\n' +
+    'Do not merge; open a PR for review.',
+  repo: 'example-org/example-app',
+  links: ['https://github.com/example-org/example-app/issues/412'],
+  at: T0 + 6000,
+}
+
 const NEEDS = {
   ok: true,
   handled_total: HANDLED.length,
+  handoffs_total: 1,
+  handoffs: [{
+    key: ITEMS[0].key, channel: ITEMS[0].channel, permalink: ITEMS[0].permalink,
+    summary: ITEMS[0].summary, status: ITEMS[0].status, handled_how: '', handoff: HANDOFF,
+  }],
   groups: [
     { id: 'decide', total: 3, entries: [
+      need(ITEMS[0], 'Fix ready to hand off', { handoff_title: HANDOFF.title }),
       need(ITEMS[3], 'Open p1'),
-      need(ITEMS[0], 'Open p1'),
       need(ITEMS[2], 'Looks resolved: reply says “thanks”'),
     ] },
     { id: 'unanswered', total: 1, entries: [
@@ -180,6 +197,18 @@ const api = {
 
 export function useAppApi() {
   return api
+}
+
+/** Stand-in for the host's chat launcher: records the launch for the DOM check. */
+export function useChatLauncher() {
+  return {
+    openChat: (opts: { message?: string; autoSend?: boolean }) => {
+      ;(window as unknown as { __launched?: unknown[] }).__launched = [
+        ...((window as unknown as { __launched?: unknown[] }).__launched || []),
+        opts,
+      ]
+    },
+  }
 }
 
 /** Stand-in for the host's ChatEmbed: a static, fake transcript. The real embed
