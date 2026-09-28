@@ -193,7 +193,7 @@ def test_org_paused_crew_with_no_session(routes, tmp_path: Path) -> None:
         "paused_reason": "", "slot_key": "crew-slack-radar",
     }
     assert by_id["investigator"]["live"] == {"in_flight": 0, "items": 0}
-    assert by_id["watcher"]["live"] == {"in_flight": 0, "planned": True}
+    assert by_id["watcher"]["live"] == {"in_flight": 0, "planned": False}
     assert by_id["poller"]["live"]["source_state"] == "ok"
     assert by_id["lead"]["display"] == {"en": "Radar Lead", "zh": "雷达组长"}  # members.json passed through
 

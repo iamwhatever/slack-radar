@@ -154,12 +154,12 @@ until you start it.
 
 ## Usage
 
-The page has four tabs. The header shows the tabs, a **Crew** switch (start or pause the crew) and a status line such as *Watching 2 channels · running*. When the Slack sign-in expires, a full-width banner at the top says *Slack connection: sign in again*, with a **Details** fold for the technical error.
+The page has four tabs. The header shows the tabs, a **Crew** switch (start or pause the crew), *Unattended: on* or *off* beside it (whether the crew's commands run without asking you), and a status line such as *Watching 2 channels · running*. When the Slack sign-in expires, a full-width banner at the top says *Slack connection: sign in again*, with a **Details** fold for the technical error.
 
 | Tab | What it shows |
 |---|---|
-| Board | Slack connection, last poll and **Poll now**. Then **Ask the lead…**: one line with three quick questions (*What needs me today?*, *Draft today's digest*, *Re-check resolved threads*); your first question opens it into the full Radar Lead chat, which stays open (also after a reload) until you press **Collapse**. Then **Needs you**, built by fixed rules from the ledger, no model call: *Needs a decision* (open p0/p1, finished investigations with GitHub links, threads that look resolved), *Questions nobody answered* (no reply for over 2 days) and *Reported more than once* (similar messages in one channel). Each row has **Done** and **Ignore**, which only take it off this list (its status is unchanged), a link to Slack, and a **⋯** menu with *Why? Ask the lead*. **Handled (N)** at the bottom lists what you took off, each with **Reopen**. Below: counts, the ledger filtered by status (at most two tags per row), the last digest with **Request digest**, and per-channel poll health. Select ledger items and press **Investigate** (optionally naming an `owner/name` repo) to spawn the Investigator on them |
-| Team | Who is on the crew: Radar Lead (*Resident*), Investigator (*Joins on demand*), Thread Watcher (*Coming soon*) and the Poller (code, no model), each with a live status. Agent ids are in a **Details** fold |
+| Board | Slack connection, last poll and **Poll now**. Then **Ask the lead…**: one line with three quick questions (*What needs me today?*, *Draft today's digest*, *Which threads look resolved?*); your first question opens it into the full Radar Lead chat, which stays open (also after a reload) until you press **Collapse**. Then **Needs you**, built by fixed rules from the ledger, no model call: *Needs a decision* (open p0/p1, finished investigations with GitHub links, threads that look resolved), *Questions nobody answered* (no reply for over 2 days) and *Reported more than once* (similar messages in one channel). Each row has **Done** and **Ignore**, which only take it off this list (its status is unchanged), a link to Slack, and a **⋯** menu with *Why? Ask the lead*. **Handled (N)** at the bottom lists what you took off, each with **Reopen**. Below: counts, the ledger filtered by status (at most two tags per row), the last digest with **Request digest**, and per-channel poll health. Select ledger items and press **Investigate** (optionally naming an `owner/name` repo) to spawn the Investigator on them |
+| Team | Who is on the crew: Radar Lead (*Resident*), Investigator (*Joins on demand*), Thread Watcher (*Joins on demand*) and the Poller (code, no model), each with a live status. Agent ids are in a **Details** fold |
 | Activity | The work log: polls that moved something, login lost or restored, crew notes, digests, settings changes, crew session moves |
 | Settings | **Basics** first: Slack connection check, watched channels, digest destination (plus your Slack login for a DM), poll interval. **Advanced** (folded): Slack MCP command, workspace URL, backfill, and the crew agent, model and the *Unattended mode (auto-approve investigator commands)* switch |
 
@@ -179,7 +179,7 @@ with the new default).
 |---|---|---|
 | Radar Lead | Lead · resident | The crew session itself (agent `slack-radar-crew`, slot `crew-slack-radar`). Triages each new item (category, priority, summary), decides clusters, judges possibly-resolved threads, writes the digest headline, and is the one you talk to |
 | Investigator | Research · leaf | Spawned per cluster (agent `slack-radar-investigator`). Runs read-only `gh search` / `gh issue view` / `gh pr view` and records matching issue and PR links on the items. Never writes to GitHub or Slack |
-| Thread Watcher | Review · leaf | **Coming soon**, not shipped yet. Will judge batches of possibly-resolved threads. Today the Radar Lead does this itself |
+| Thread Watcher | Review · leaf | Spawned by the lead on demand (agent `slack-radar-watcher`). Judges a batch of possibly-resolved threads and records resolved or not in the ledger. Ledger only, no shell |
 | Poller | System · code, no model | Runs inside the gateway. Cursor reads, thread re-checks, login-expiry detection, and digest delivery. Wakes the lead only when something moved |
 
 ### Desk
@@ -233,22 +233,27 @@ Disabling the app stops the loop and revokes the crew's auto-approve grant.
   `fs_write`. Its only tools are the ledger tools, `spawn_run` / `spawn_status` /
   `spawn_list`, `fs_read`, `grep`, `glob` and `thinking`, and all of them are
   pre-approved, so the lead never prompts and never gains a tool, in either mode.
-- **The Investigator has a shell, and the crew's investigator always asks.** When
-  the Radar Lead spawns it with `spawn_run`, the host asks you to approve the spawn
-  and then each command. Unattended mode does not change that: the host passes a
-  child only the parent's interactive trust flag, never a scoped grant. An
-  unanswered prompt is denied after two hours.
+- **The Investigator has a shell, and unattended mode lets it run without asking.**
+  When the Radar Lead spawns an Investigator or a Thread Watcher with `spawn_run`,
+  the crew's scoped grant reaches the child (Kiro Crew core since
+  kirodotdev/KiroCrew#14497). While unattended mode is on, the spawn and every
+  Investigator shell command are approved without a prompt, each one SEL-audited.
+  While it is off, the host asks you to approve the spawn and then each command,
+  and an unanswered prompt is denied after two hours.
 - **The board's Investigate button needs unattended mode.** It spawns through the
   app spawn SDK, which the host runs with every command auto-approved for the whole
   run. So the button is refused (`unattended_required`) while unattended mode is
   off.
-- **Unattended mode is off by default.** When on, the crew's session holds a
-  scoped, 15-minute, SEL-audited grant renewed by each poll while the crew is
-  live, never the interactive trust flag, and re-checked on every approval, so a
-  grant that lapses mid-turn makes the next prompt ask again. Because the lead's
-  tools are already pre-approved, the grant changes nothing for crew turns today;
-  what the toggle does in practice is let the Investigate button run. Turn it on
-  only when every watched channel is trusted. See
+- **Unattended mode is off by default.** When on and the crew is live, the
+  crew's session holds a scoped, 15-minute, SEL-audited grant, never the
+  interactive trust flag. Every poll renews it while the toggle is on, so the
+  crew runs unattended continuously, not for a window. Each approval re-checks
+  the grant, so a grant that lapses makes the next request ask again. Picking
+  **Normal** in the chat's trust menu ends the grant only until the next poll
+  arms it again; the app's own toggle is the off switch that lasts. Risk: Slack
+  text anyone in a watched channel can write reaches an agent with a shell, so a
+  crafted message could steer a command nobody reviews. Turn it on only when
+  every watched channel is trusted. See
   [docs/unattended-mode.md](docs/unattended-mode.md) for the approval chain.
 - **Prompt injection.** The crew reads text anyone in your channels can write.
   The ledger tools and the investigation prompt label message text as untrusted
@@ -418,12 +423,12 @@ kirocrew app enable slack-radar
 
 ## 使用
 
-页面有四个标签页。页头放着标签页、一个 **Crew** 开关（启动或暂停小组）和一行状态，例如 *Watching 2 channels · running*。Slack 登录过期时，页面顶部会出现一条通栏横幅 *Slack connection: sign in again*，技术细节收在 **Details** 折叠里。
+页面有四个标签页。页头放着标签页、一个 **Crew** 开关（启动或暂停小组）、旁边的 *Unattended: on* 或 *off*（小组的命令是否无需你确认就运行）和一行状态，例如 *Watching 2 channels · running*。Slack 登录过期时，页面顶部会出现一条通栏横幅 *Slack connection: sign in again*，技术细节收在 **Details** 折叠里。
 
 | 标签页 | 内容 |
 |---|---|
-| Board（看板） | Slack 连接、最近一次轮询和 **Poll now**。接着是 **Ask the lead…**：一行输入框加三个快捷问题（*What needs me today?*、*Draft today's digest*、*Re-check resolved threads*）；问出第一个问题后，它展开成完整的雷达组长聊天，一直开着（刷新后也是），直到你点 **Collapse**。然后是 **Needs you（需要你处理）**，按固定规则从台账算出，不调用模型：*Needs a decision*（未关闭的 p0/p1、带 GitHub 链接且已查完的调查、看起来已解决的线程）、*Questions nobody answered*（超过 2 天没人回的问题）和 *Reported more than once*（同一频道里相似的消息）。每行有 **Done** 和 **Ignore**，只是把它移出这个列表（状态不变），一个 Slack 链接，以及 **⋯** 菜单里的 *Why? Ask the lead*。底部的 **Handled (N)** 列出你移走的条目，每条可 **Reopen**。再往下：计数、按状态筛选的台账（每行最多两个标签）、最近一次摘要和 **Request digest**、各频道轮询健康度。在台账里勾选条目后点 **Investigate**（可选填一个 `owner/name` 仓库）即可派调查员去查 |
-| Team（团队） | 小组成员：雷达组长（*Resident*，常驻）、调查员（*Joins on demand*，按需加入）、线程观察员（*Coming soon*，即将推出）和轮询器（代码，不用模型），各带实时状态。agent id 收在 **Details** 折叠里 |
+| Board（看板） | Slack 连接、最近一次轮询和 **Poll now**。接着是 **Ask the lead…**：一行输入框加三个快捷问题（*What needs me today?*、*Draft today's digest*、*Which threads look resolved?*）；问出第一个问题后，它展开成完整的雷达组长聊天，一直开着（刷新后也是），直到你点 **Collapse**。然后是 **Needs you（需要你处理）**，按固定规则从台账算出，不调用模型：*Needs a decision*（未关闭的 p0/p1、带 GitHub 链接且已查完的调查、看起来已解决的线程）、*Questions nobody answered*（超过 2 天没人回的问题）和 *Reported more than once*（同一频道里相似的消息）。每行有 **Done** 和 **Ignore**，只是把它移出这个列表（状态不变），一个 Slack 链接，以及 **⋯** 菜单里的 *Why? Ask the lead*。底部的 **Handled (N)** 列出你移走的条目，每条可 **Reopen**。再往下：计数、按状态筛选的台账（每行最多两个标签）、最近一次摘要和 **Request digest**、各频道轮询健康度。在台账里勾选条目后点 **Investigate**（可选填一个 `owner/name` 仓库）即可派调查员去查 |
+| Team（团队） | 小组成员：雷达组长（*Resident*，常驻）、调查员（*Joins on demand*，按需加入）、线程观察员（*Joins on demand*，按需加入）和轮询器（代码，不用模型），各带实时状态。agent id 收在 **Details** 折叠里 |
 | Activity（动态） | 工作日志：有变化的轮询、登录失效与恢复、小组备注、摘要、设置变更、小组会话迁移 |
 | Settings（设置） | 先是 **Basics**：Slack 连接检查、监听的频道、摘要去向（选私信时还有 Slack 登录名）、轮询间隔。**Advanced**（默认折叠）：Slack MCP 命令、工作区地址、回溯时长，以及小组的 agent、模型和 *Unattended mode (auto-approve investigator commands)* 开关 |
 
@@ -440,7 +445,7 @@ kirocrew app enable slack-radar
 |---|---|---|
 | 雷达组长 | 组长 · 常驻 | 就是小组会话本身（agent `slack-radar-crew`，槽位 `crew-slack-radar`）。给每条新条目分诊（类别、优先级、摘要），决定如何聚簇，判断“可能已解决”的线程，写摘要标题，也是你对话的对象 |
 | 调查员 | 调研 · 临时 | 每簇派一个（agent `slack-radar-investigator`）。只读地运行 `gh search` / `gh issue view` / `gh pr view`，把匹配的 issue、PR 链接记到条目上。从不写 GitHub 或 Slack |
-| 线程观察员（即将推出） | 复核 · 临时 | **即将推出，目前尚未提供。** 届时负责成批判断“可能已解决”的线程；现阶段由雷达组长自己判断 |
+| 线程观察员 | 复核 · 临时 | 由组长按需派出（agent `slack-radar-watcher`）。成批判断“可能已解决”的线程，把是否已解决记到台账上。只有台账，没有 shell |
 | 轮询器 | 系统 · 代码，不用模型 | 运行在网关内。负责游标读取、线程复查、登录失效检测和摘要投递；只有真有变化时才唤醒组长 |
 
 ### Desk（工作台）
@@ -486,17 +491,19 @@ kirocrew app enable slack-radar
 - **组长没有 shell。** 雷达组长的 agent 没有 `execute_bash` 和 `fs_write`。它只有台账工具、
   `spawn_run` / `spawn_status` / `spawn_list`、`fs_read`、`grep`、`glob` 和 `thinking`，
   而且都已预先批准，所以无论哪种模式，组长都不会弹确认，也不会多出别的工具。
-- **调查员有 shell，小组派出的调查员总是要确认。** 雷达组长用 `spawn_run` 派出调查员时，
-  网关会先请你批准这次派出，再逐条批准它的命令。开启无人值守模式也不会改变这一点：
-  网关只把父会话的交互式信任开关传给子 agent，从不传限定范围的授权。无人应答的确认两小时后自动拒绝。
+- **调查员有 shell，无人值守模式下它运行时不再询问你。** 雷达组长用 `spawn_run` 派出调查员或线程观察员时，
+  小组的限定范围授权会传到子 agent（Kiro Crew 核心自 kirodotdev/KiroCrew#14497 起）。无人值守模式打开时，
+  这次派出和调查员的每条 shell 命令都会自动批准，每条都记入 SEL 审计。模式关闭时，网关会先请你批准派出，
+  再逐条批准命令，无人应答的确认两小时后自动拒绝。
 - **看板上的 Investigate 按钮需要无人值守模式。** 它通过应用的 spawn SDK 派出调查员，
   网关对这类派出在整个运行期间自动批准每条命令。所以无人值守模式关闭时，这个按钮会被拒绝
   （`unattended_required`）。
-- **无人值守模式默认关闭。** 开启后，小组会话持有一个限定范围、15 分钟有效、记入 SEL 审计的授权，
-  在小组运行期间由每次轮询续期，绝不是交互式的信任开关；每次审批都会重新检查它，所以授权在
-  一轮中途过期后，下一次确认会重新询问你。由于组长的工具都已预先批准，这个授权目前对小组的回合
-  没有任何影响；这个开关实际的作用是允许 Investigate 按钮运行。只有当所有监听频道都可信时才建议开启。
-  审批链的细节见 [docs/unattended-mode.md](docs/unattended-mode.md)。
+- **无人值守模式默认关闭。** 开启且小组在运行时，小组会话持有一个限定范围、15 分钟有效、记入 SEL 审计的授权，
+  绝不是交互式的信任开关。只要开关开着，每次轮询都会续期，所以小组是持续无人值守运行，而不是只有一段时间。
+  每次审批都会重新检查授权，授权过期后下一次请求会重新询问你。在聊天的信任菜单里选 **Normal** 只会结束授权到
+  下一次轮询为止，下一次轮询会重新授权；应用自己的开关才是长期有效的关闭方式。风险：监听频道里任何人都能写的
+  Slack 文字会到达一个有 shell 的 agent，精心构造的消息可能引导一条没人审核的命令。只有当所有监听频道都可信时
+  才建议开启。审批链的细节见 [docs/unattended-mode.md](docs/unattended-mode.md)。
 - **提示注入。** 小组读的是频道里任何人都能写的文字。台账工具和调查提示都把消息正文标为不可信数据，
   两个 agent 也都被要求绝不执行其中的指令。这只是缓解而非保证，所以组长不给 shell，自动批准也需要主动开启。
 - **不存令牌。** 不保存任何 Slack 凭据，Slack MCP 用的是你自己的登录会话。

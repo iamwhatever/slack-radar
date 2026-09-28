@@ -52,11 +52,12 @@ const shots = [
   { name: 'team', source: 'ok', tab: 'Team', wait: 'Only the Radar Lead has a session' },
   { name: 'needs-login', source: 'needs_login', tab: null },
 ]
+const errors = []
 try {
   for (const s of shots) {
     const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, reducedMotion: 'reduce', timezoneId: 'UTC', locale: 'en-US' })
     const page = await ctx.newPage()
-    page.on('pageerror', (e) => console.error(`[${s.name}] pageerror:`, e.message))
+    page.on('pageerror', (e) => errors.push(`[${s.name}] ${e.message}`))
     await page.goto(`http://127.0.0.1:5287/index.html?source=${s.source}`)
     await page.getByText('Slack connection:').first().waitFor({ timeout: 30000 })
     if (s.tab) {
@@ -85,7 +86,24 @@ try {
     console.log('wrote', file)
     await ctx.close()
   }
+  // DOM checks: the Lead's line renders as text when set and not at all when empty.
+  for (const [q, want] of [['', 'set'], ['&today=empty', 'empty']]) {
+    const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, timezoneId: 'UTC', locale: 'en-US' })
+    const page = await ctx.newPage()
+    page.on('pageerror', (e) => errors.push(`[today ${want}] ${e.message}`))
+    await page.goto(`http://127.0.0.1:5287/index.html?source=ok${q}`)
+    await page.getByText('Needs you', { exact: true }).first().waitFor({ timeout: 30000 })
+    const lines = await page.getByTestId('crew-today').allTextContents()
+    const ok = want === 'set' ? lines.length === 1 && lines[0].startsWith('Two p1 bugs need an owner') : lines.length === 0
+    if (!ok) errors.push(`[today ${want}] crew-today lines: ${JSON.stringify(lines)}`)
+    else console.log(`check today ${want}: ok`, JSON.stringify(lines))
+    await ctx.close()
+  }
 } finally {
   await browser.close()
   await server.close()
+}
+if (errors.length) {
+  console.error(errors.join('\n'))
+  process.exit(1)
 }

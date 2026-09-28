@@ -149,14 +149,24 @@ def test_four_member_rows_from_gateway_runs(routes, live_crew) -> None:
     assert inv["doing"].startswith("Investigate this cluster of Slack reports")
     assert "/home" not in inv["doing"] and "~/" not in inv["doing"] and len(inv["doing"]) <= 80
 
-    wat = rows["watcher"]  # its only run is done; members.json still lists it as planned
-    assert (wat["state"], wat["count"], wat["source"]) == ("planned", 0, "gateway")
+    wat = rows["watcher"]  # its only run is done
+    assert (wat["state"], wat["count"], wat["source"]) == ("idle", 0, "gateway")
 
     pol = rows["poller"]
     assert pol["state"] == "idle" and pol["source"] == "ledger" and pol["count"] == 1
     assert pol["doing"].startswith("last poll 4") and "· next in 4m" in pol["doing"]
 
     assert state.subagents.asked and set(state.subagents.asked) == {f"dashboard:{SLOT}"}
+
+
+def test_running_watcher_reads_working(routes, live_crew) -> None:
+    data, state = live_crew
+    for r in state.subagents.runs:
+        if r["id"] == "r-wat":
+            r["done"] = False
+    rows = {r["id"]: r for r in asyncio.run(routes._handle_now(_Req(state), _ctx(data))).body["members"]}
+    wat = rows["watcher"]
+    assert (wat["state"], wat["count"], wat["doing"], wat["since"]) == ("working", 1, "Judge 6 threads", 900.0)
 
 
 def test_ledger_fallback_without_a_run_list(routes, live_crew) -> None:

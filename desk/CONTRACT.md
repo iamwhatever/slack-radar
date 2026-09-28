@@ -9,7 +9,7 @@ What the code, the agents and the UI agree on. The people-level rules are in [CH
 | App | `slack-radar` | `app.json` `name`; API root `/api/apps/slack-radar` |
 | Radar Lead agent | `slack-radar-crew` | `agents/slack-radar-crew.json`, `store.CREW_AGENT` |
 | Investigator agent | `slack-radar-investigator` | `agents/slack-radar-investigator.json`, `routes.INVESTIGATOR_AGENT` |
-| Thread Watcher agent | `slack-radar-watcher` | planned; not in `agents/` yet |
+| Thread Watcher agent | `slack-radar-watcher` | `agents/slack-radar-watcher.json`, `org.WATCHER_AGENT` |
 | Crew record id | `slack-radar` | `crew.json` `id` |
 | Crew slot | `crew-slack-radar`, then `crew-slack-radar-g<N>` | `store.SLOT_KEY`, `store.next_slot_key` |
 | Ledger MCP server | `@slack-radar:ledger` | `app.json` `mcpServers.ledger` |
