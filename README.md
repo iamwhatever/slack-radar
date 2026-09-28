@@ -158,7 +158,7 @@ The page has four tabs. The header shows the tabs, a **Crew** switch (start or p
 
 | Tab | What it shows |
 |---|---|
-| Board | Slack connection, last poll and **Poll now**. Then **Ask the lead…**: one line with three quick questions (*What needs me today?*, *Draft today's digest*, *Which threads look resolved?*); your first question opens it into the full Radar Lead chat, which stays open (also after a reload) until you press **Collapse**. Then **Needs you**, built by fixed rules from the ledger, no model call: *Needs a decision* (open p0/p1, finished investigations with GitHub links, threads that look resolved), *Questions nobody answered* (no reply for over 2 days) and *Reported more than once* (similar messages in one channel). Each row has **Done** and **Ignore**, which only take it off this list (its status is unchanged), a link to Slack, and a **⋯** menu with *Why? Ask the lead*. **Handled (N)** at the bottom lists what you took off, each with **Reopen**. Below: counts, the ledger filtered by status (at most two tags per row), the last digest with **Request digest**, and per-channel poll health. Select ledger items and press **Investigate** (optionally naming an `owner/name` repo) to spawn the Investigator on them |
+| Board | Slack connection, last poll and **Poll now**. Then **Ask the lead…**: one line with three quick questions (*What needs me today?*, *Draft today's digest*, *Which threads look resolved?*); your first question opens it into the full Radar Lead chat, which stays open (also after a reload) until you press **Collapse**. Then **Needs you**, built by fixed rules from the ledger, no model call: *Needs a decision* (a fix ready to hand off, open p0/p1, finished investigations with GitHub links, threads that look resolved), *Questions nobody answered* (no reply for over 2 days) and *Reported more than once* (similar messages in one channel). Each row has **Done** and **Ignore**, which only take it off this list (its status is unchanged), a link to Slack, and a **⋯** menu with *Why? Ask the lead*. A row with a fix ready shows **Start fix session** and **Ignore** instead (Done is in **⋯**). **Fixes handed off (N)** lists every hand-off, each with **Start fix session** and **Dismiss**. **Handled (N)** at the bottom lists what you took off, each with **Reopen**. Below: counts, the ledger filtered by status (at most two tags per row), the last digest with **Request digest**, and per-channel poll health. Select ledger items and press **Investigate** (optionally naming an `owner/name` repo) to spawn the Investigator on them |
 | Team | Who is on the crew: Radar Lead (*Resident*), Investigator (*Joins on demand*), Thread Watcher (*Joins on demand*) and the Poller (code, no model), each with a live status. Agent ids are in a **Details** fold |
 | Activity | The work log: polls that moved something, login lost or restored, crew notes, digests, settings changes, crew session moves |
 | Settings | **Basics** first: Slack connection check, watched channels, digest destination (plus your Slack login for a DM), poll interval. **Advanced** (folded): Slack MCP command, workspace URL, backfill, and the crew agent, model and the *Unattended mode (auto-approve investigator commands)* switch |
@@ -172,6 +172,10 @@ the daily one, pause the cron in the Schedule view.
 not exist yet. Either resume `daily-digest` in the Schedule view, or disable and
 re-enable the app (disabling removes the app's cron jobs, enabling adds them back
 with the new default).
+
+### Getting a fix started
+
+When an investigation finds a concrete fix (a linked issue with a known cause, or a PR to backport), the Radar Lead writes one hand-off on the item: a self-contained task for a coding session with the repo, the item key, the links, the coverage verdict, what to change, how to verify, and "Do not merge; open a PR for review". The row shows up under *Needs a decision* as "Fix ready to hand off". Press **Start fix session** and a new chat opens with that task already typed into its box; nothing is sent until you press Send, and you can edit it first. Slack Radar never starts the fix itself, never messages another session, and writes nothing to Slack or GitHub. If you ask the Lead to do dev work, it answers with a hand-off instead. On an older Kiro Crew without the SDK's chat launcher, the button opens the task in a dialog with **Copy prompt** and a **New chat** link.
 
 ## The team
 
@@ -336,7 +340,7 @@ Rendered from fake demo data (`docs/screenshots/capture/`); no real Slack conten
 | ![Sign in again state](docs/screenshots/needs-login.png) | ![Team tab](docs/screenshots/team.png) |
 | Sign-in expired: a banner says so and polling pauses, instead of an empty queue | Team: who is on the crew and what each one is doing |
 | ![Needs you card](docs/screenshots/needs-you.png) | ![Chat opened](docs/screenshots/chat-expanded.png) |
-| Needs you: three groups, **Done** / **Ignore** per row, and the opened **Handled** fold with **Reopen** | After the first question the lead chat opens in place; **Collapse** folds it back to one line |
+| Needs you: a fix ready to hand off with **Start fix session** / **Ignore**, other rows with **Done** / **Ignore**, and the opened **Fixes handed off** and **Handled** folds | After the first question the lead chat opens in place; **Collapse** folds it back to one line |
 
 ## License
 
@@ -427,7 +431,7 @@ kirocrew app enable slack-radar
 
 | 标签页 | 内容 |
 |---|---|
-| Board（看板） | Slack 连接、最近一次轮询和 **Poll now**。接着是 **Ask the lead…**：一行输入框加三个快捷问题（*What needs me today?*、*Draft today's digest*、*Which threads look resolved?*）；问出第一个问题后，它展开成完整的雷达组长聊天，一直开着（刷新后也是），直到你点 **Collapse**。然后是 **Needs you（需要你处理）**，按固定规则从台账算出，不调用模型：*Needs a decision*（未关闭的 p0/p1、带 GitHub 链接且已查完的调查、看起来已解决的线程）、*Questions nobody answered*（超过 2 天没人回的问题）和 *Reported more than once*（同一频道里相似的消息）。每行有 **Done** 和 **Ignore**，只是把它移出这个列表（状态不变），一个 Slack 链接，以及 **⋯** 菜单里的 *Why? Ask the lead*。底部的 **Handled (N)** 列出你移走的条目，每条可 **Reopen**。再往下：计数、按状态筛选的台账（每行最多两个标签）、最近一次摘要和 **Request digest**、各频道轮询健康度。在台账里勾选条目后点 **Investigate**（可选填一个 `owner/name` 仓库）即可派调查员去查 |
+| Board（看板） | Slack 连接、最近一次轮询和 **Poll now**。接着是 **Ask the lead…**：一行输入框加三个快捷问题（*What needs me today?*、*Draft today's digest*、*Which threads look resolved?*）；问出第一个问题后，它展开成完整的雷达组长聊天，一直开着（刷新后也是），直到你点 **Collapse**。然后是 **Needs you（需要你处理）**，按固定规则从台账算出，不调用模型：*Needs a decision*（可以交接的修复、未关闭的 p0/p1、带 GitHub 链接且已查完的调查、看起来已解决的线程）、*Questions nobody answered*（超过 2 天没人回的问题）和 *Reported more than once*（同一频道里相似的消息）。每行有 **Done** 和 **Ignore**，只是把它移出这个列表（状态不变），一个 Slack 链接，以及 **⋯** 菜单里的 *Why? Ask the lead*。有修复可交接的行改为显示 **Start fix session** 和 **Ignore**（Done 在 **⋯** 里）。**Fixes handed off (N)** 列出所有交接，每条有 **Start fix session** 和 **Dismiss**。底部的 **Handled (N)** 列出你移走的条目，每条可 **Reopen**。再往下：计数、按状态筛选的台账（每行最多两个标签）、最近一次摘要和 **Request digest**、各频道轮询健康度。在台账里勾选条目后点 **Investigate**（可选填一个 `owner/name` 仓库）即可派调查员去查 |
 | Team（团队） | 小组成员：雷达组长（*Resident*，常驻）、调查员（*Joins on demand*，按需加入）、线程观察员（*Joins on demand*，按需加入）和轮询器（代码，不用模型），各带实时状态。agent id 收在 **Details** 折叠里 |
 | Activity（动态） | 工作日志：有变化的轮询、登录失效与恢复、小组备注、摘要、设置变更、小组会话迁移 |
 | Settings（设置） | 先是 **Basics**：Slack 连接检查、监听的频道、摘要去向（选私信时还有 Slack 登录名）、轮询间隔。**Advanced**（默认折叠）：Slack MCP 命令、工作区地址、回溯时长，以及小组的 agent、模型和 *Unattended mode (auto-approve investigator commands)* 开关 |
@@ -438,6 +442,10 @@ kirocrew app enable slack-radar
 **已安装的旧版本**（默认值改变之前装的）：更新应用不会改动你已有的 `daily-digest` 任务，它仍是暂停的，
 因为网关只添加尚不存在的应用定时任务。要么在 Schedule 页面恢复 `daily-digest`，要么停用再启用应用
 （停用会删除应用的定时任务，启用时按新的默认值重新添加）。
+
+### 开始一个修复
+
+调查找到明确的修复时（一个原因已知的关联 issue，或一个要回移的 PR），雷达组长会在条目上写一个交接：给编码会话的自包含任务，含仓库、条目 key、链接、覆盖结论、改什么、怎么验证，以及 "Do not merge; open a PR for review"。这一行会出现在 *Needs a decision* 里，原因是 "Fix ready to hand off"。点 **Start fix session** 会打开一个新聊天，任务已经填在输入框里；你按发送之前什么都不会发出去，也可以先改。Slack Radar 从不自己开始修复，从不给别的会话发消息，也不向 Slack 或 GitHub 写任何东西。你让组长做开发工作时，它会用一个交接来回答。在没有 SDK 聊天启动器的旧版 Kiro Crew 上，这个按钮会弹出对话框，带 **Copy prompt** 和 **New chat** 链接。
 
 ## 团队
 
@@ -572,7 +580,7 @@ slack-radar/
 | ![需要重新登录](docs/screenshots/needs-login.png) | ![团队](docs/screenshots/team.png) |
 | 登录过期：顶部横幅直接说明，轮询暂停，而不是显示一个空队列 | 团队：小组有哪些成员、各自在做什么 |
 | ![需要你处理](docs/screenshots/needs-you.png) | ![展开的聊天](docs/screenshots/chat-expanded.png) |
-| Needs you：三组，每行 **Done** / **Ignore**，以及展开后带 **Reopen** 的 **Handled** 折叠 | 问出第一个问题后，组长聊天就地展开；**Collapse** 收回成一行 |
+| Needs you：可交接的修复带 **Start fix session** / **Ignore**，其他行带 **Done** / **Ignore**，以及展开的 **Fixes handed off** 和 **Handled** 折叠 | 问出第一个问题后，组长聊天就地展开；**Collapse** 收回成一行 |
 
 ## 许可
 

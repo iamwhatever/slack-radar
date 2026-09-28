@@ -46,7 +46,7 @@ const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PAT
 
 const shots = [
   { name: 'board', source: 'ok', tab: null },
-  { name: 'needs-you', source: 'ok', tab: null, clip: 'Needs you', openHandled: true },
+  { name: 'needs-you', source: 'ok', tab: null, clip: 'Needs you', openHandled: true, openHandoffs: true },
   { name: 'chat-expanded', source: 'ok', tab: null, chat: true },
   { name: 'settings', source: 'ok', tab: 'Settings', wait: 'Basics', open: 'Advanced' },
   { name: 'team', source: 'ok', tab: 'Team', wait: 'Only the Radar Lead has a session' },
@@ -67,6 +67,7 @@ try {
     }
     if (s.chat) await page.getByRole('button', { name: 'What needs me today?' }).first().click()
     if (s.openHandled) await page.getByText(/^Handled \(/).click()
+    if (s.openHandoffs) await page.getByText(/^Fixes handed off \(/).click()
     await page.waitForTimeout(400)
     if (s.clip) {
       // One card only: the Card that holds this title.
@@ -97,6 +98,25 @@ try {
     const ok = want === 'set' ? lines.length === 1 && lines[0].startsWith('Two p1 bugs need an owner') : lines.length === 0
     if (!ok) errors.push(`[today ${want}] crew-today lines: ${JSON.stringify(lines)}`)
     else console.log(`check today ${want}: ok`, JSON.stringify(lines))
+    await ctx.close()
+  }
+  // DOM check: a hand-off row shows Start fix session + Ignore (Done in the menu), and
+  // clicking it opens a draft-only chat carrying the prompt.
+  {
+    const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, timezoneId: 'UTC', locale: 'en-US' })
+    const page = await ctx.newPage()
+    page.on('pageerror', (e) => errors.push(`[handoff] ${e.message}`))
+    await page.goto('http://127.0.0.1:5287/index.html?source=ok')
+    const row = page.getByText('Fix: Raise the CSV export row limit (issue #412)').locator('xpath=ancestor::li[1]')
+    await row.waitFor({ timeout: 30000 })
+    const buttons = await row.locator(':scope > div > div:last-child > button').allTextContents()
+    await row.getByRole('button', { name: 'Start fix session' }).click()
+    const launched = await page.evaluate(() => window.__launched || [])
+    const ok = JSON.stringify(buttons) === JSON.stringify(['Start fix session', 'Ignore'])
+      && launched.length === 1 && launched[0].autoSend === false
+      && launched[0].message.includes('Do not merge; open a PR for review')
+    if (!ok) errors.push(`[handoff] buttons ${JSON.stringify(buttons)} launched ${JSON.stringify(launched)}`)
+    else console.log('check handoff: ok', JSON.stringify(buttons))
     await ctx.close()
   }
 } finally {

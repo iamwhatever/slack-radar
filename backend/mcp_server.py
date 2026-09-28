@@ -52,7 +52,7 @@ TOOLS: list[dict[str, Any]] = [
             "note and investigation are local-only. crew.phase: idle|triaging|investigating|"
             "rechecking|digest; crew.next is your resumable next-step intent (local). crew.today is "
             "PUBLIC (shown on the Board): one sentence, at most 240 characters, saying what changed "
-            "and what needs the owner, or 'nothing needs you'; a path, host name or secret is refused."
+            "and what needs the owner, or 'nothing needs you'; a path, host name or secret is refused. items[].fix_handoff (local, Lead only) hands a code-shaped fix to a coding session the owner starts from the Board: {title <=120, prompt <=4000, repo owner/name, links}; only on a triaged/investigating bug-report or feature-request; the prompt must contain the item key, every link, the coverage verdict and the line 'Do not merge; open a PR for review', and no path, host name or secret. One per item; a new one replaces the old."
         ),
         "inputSchema": {
             "type": "object",
@@ -72,6 +72,16 @@ TOOLS: list[dict[str, Any]] = [
                             "note": {"type": "string"},
                             "investigation": {"type": "string"},
                             "clear_possibly_resolved": {"type": "boolean"},
+                            "fix_handoff": {
+                                "type": "object",
+                                "properties": {
+                                    "title": {"type": "string", "maxLength": 120},
+                                    "prompt": {"type": "string", "maxLength": 4000},
+                                    "repo": {"type": "string"},
+                                    "links": {"type": "array", "items": {"type": "string"}, "maxItems": 10},
+                                },
+                                "required": ["title", "prompt", "repo"],
+                            },
                         },
                         "required": ["key"],
                     },

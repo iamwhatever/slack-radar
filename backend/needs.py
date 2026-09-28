@@ -6,8 +6,9 @@ The rules are written out for people in ``desk/CONTRACT.md`` §6; keep the two i
 
 Three groups, in this order:
 
-* ``decide``     — open items that want a call from the owner: priority p0/p1, an
-  investigation that finished with links, or a thread the poller thinks is resolved.
+* ``decide``     — open items that want a call from the owner: a fix hand-off the Lead
+  wrote, priority p0/p1, an investigation that finished with links, or a thread the
+  poller thinks is resolved.
 * ``unanswered`` — open questions nobody in the thread has replied to for over 48 hours.
 * ``clusters``   — two or more open items in one channel that share at least two
   significant summary words, one entry per cluster.
@@ -48,6 +49,11 @@ STOPWORDS = frozenset(
     """.split()
 )
 
+#: The ``decide`` reason for an item carrying a ``fix_handoff``.
+HANDOFF_REASON = "Fix ready to hand off"
+#: Hand-offs listed in the "Fixes handed off" fold.
+HANDOFF_CAP = 50
+
 _PRIORITY_RANK = {"p0": 0, "p1": 1, "p2": 2, "p3": 3}
 
 
@@ -85,7 +91,27 @@ def _entry(item: dict[str, Any], now: float, reason: str) -> dict[str, Any]:
         "category": item.get("category") or "",
         "age_hours": age_hours(item, now),
         "reason": reason,
+        **({"handoff_title": item["fix_handoff"].get("title") or ""} if has_handoff(item) else {}),
     }
+
+
+def handoff_entry(item: dict[str, Any]) -> dict[str, Any]:
+    """One row of the "Fixes handed off" fold: the item plus its whole hand-off."""
+    h = item["fix_handoff"]
+    return {
+        "key": item.get("key") or "",
+        "channel": item.get("channel") or "",
+        "permalink": item.get("permalink") or "",
+        "summary": item.get("summary") or str(item.get("text") or "")[:200],
+        "status": item.get("status") or "",
+        "handled_how": item.get("handled_how") or "",
+        "handoff": {k: h.get(k) for k in ("title", "prompt", "repo", "links", "at")},
+    }
+
+
+def has_handoff(item: dict[str, Any]) -> bool:
+    h = item.get("fix_handoff")
+    return isinstance(h, dict) and bool(h.get("prompt"))
 
 
 def _investigation_done(item: dict[str, Any], spawn_done: Callable[[str], bool] | None) -> bool:
@@ -110,6 +136,8 @@ def _investigation_done(item: dict[str, Any], spawn_done: Callable[[str], bool] 
 
 def decide_reason(item: dict[str, Any], spawn_done: Callable[[str], bool] | None = None) -> str:
     """Why an open, unhandled item needs a call, or ``""``. First match wins."""
+    if has_handoff(item):
+        return HANDOFF_REASON
     if item.get("priority") in URGENT_PRIORITIES:
         return f"Open {item['priority']}"
     if _investigation_done(item, spawn_done):
@@ -217,7 +245,13 @@ def build_needs(
         ("clusters", clusters),
     ]
     handled = sum(1 for it in (ledger.get("items") or {}).values() if isinstance(it, dict) and is_handled(it))
+    handoffs = sorted(
+        (it for it in (ledger.get("items") or {}).values() if isinstance(it, dict) and has_handoff(it)),
+        key=lambda it: -float(it["fix_handoff"].get("at") or 0),
+    )
     return {
         "groups": [{"id": gid, "total": len(rows), "entries": rows[:cap]} for gid, rows in groups],
         "handled_total": handled,
+        "handoffs": [handoff_entry(it) for it in handoffs[:HANDOFF_CAP]],
+        "handoffs_total": len(handoffs),
     }
