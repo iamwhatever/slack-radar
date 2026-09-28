@@ -72,7 +72,7 @@ def test_watcher_is_a_ledger_only_leaf() -> None:
 
 def test_brief_carries_the_watcher_rule_and_the_current_marker() -> None:
     brief = (ROOT / "backend" / "crew_brief.md").read_text(encoding="utf-8")
-    assert brief.splitlines()[0] == crew_runtime.BRIEF_SENTINEL == "<!-- slack-radar-crew-brief v2 -->"
+    assert brief.splitlines()[0] == crew_runtime.BRIEF_SENTINEL == "<!-- slack-radar-crew-brief v3 -->"
     assert "slack-radar-watcher" in brief and "5 or more" in brief
     assert "Never more than one Watcher in flight" in brief
 

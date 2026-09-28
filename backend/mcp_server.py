@@ -50,7 +50,9 @@ TOOLS: list[dict[str, Any]] = [
             "already-answered|noise. priority: p0|p1|p2|p3. status: triaged|investigating|"
             "resolved|noise. summary and links are PUBLIC (they appear in the Slack digest); "
             "note and investigation are local-only. crew.phase: idle|triaging|investigating|"
-            "rechecking|digest; crew.next is your resumable next-step intent."
+            "rechecking|digest; crew.next is your resumable next-step intent (local). crew.today is "
+            "PUBLIC (shown on the Board): one sentence, at most 240 characters, saying what changed "
+            "and what needs the owner, or 'nothing needs you'; a path, host name or secret is refused."
         ),
         "inputSchema": {
             "type": "object",
@@ -79,6 +81,7 @@ TOOLS: list[dict[str, Any]] = [
                     "properties": {
                         "phase": {"type": "string", "enum": list(store.CREW_PHASES)},
                         "next": {"type": "string"},
+                        "today": {"type": "string", "maxLength": 240},
                         "tried_add": {"type": "array", "items": {"type": "string"}},
                         "rejected_add": {"type": "array", "items": {"type": "string"}},
                     },

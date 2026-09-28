@@ -112,7 +112,7 @@ async def _handle_state(request: web.Request, ctx: Any) -> web.Response:
             "ok": True,
             "vault_available": vault_ok,
             "settings": settings,
-            "crew": _crew_view(request, crew),
+            "crew": {**_crew_view(request, crew), "today": _today(ledger)},
             "crew_memory": ledger.get("crew_memory"),
             "investigations": _investigations(ledger, ctx),
             "counts": store.counts(ledger),
@@ -124,6 +124,13 @@ async def _handle_state(request: web.Request, ctx: Any) -> web.Response:
             "digest": ledger.get("digest"),
         }
     )
+
+
+def _today(ledger: dict[str, Any]) -> dict[str, Any]:
+    """The Lead's standing one-line note (``crew_memory.today``), PUBLIC by contract."""
+    raw = (ledger.get("crew_memory") or {}).get("today")
+    raw = raw if isinstance(raw, dict) else {}
+    return {"text": str(raw.get("text") or ""), "at": float(raw.get("at") or 0)}
 
 
 def _crew_view(request: web.Request, crew: dict[str, Any]) -> dict[str, Any]:

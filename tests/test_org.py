@@ -239,3 +239,16 @@ def test_org_reports_a_broken_roster(routes, tmp_path: Path, monkeypatch: pytest
     monkeypatch.setattr(org.load_members, "__defaults__", (bad,))
     resp = asyncio.run(routes._handle_org(_Req(_FakeState()), _ctx(tmp_path / "data")))
     assert resp.status == 500 and resp.body["code"] == "members_invalid"
+
+
+def test_state_exposes_crew_today(routes, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from backend import settings as settings_mod
+
+    monkeypatch.setattr(settings_mod, "read_settings", settings_mod.defaults)
+    st = asyncio.run(routes._handle_state(_Req(_FakeState()), _ctx(tmp_path))).body
+    assert st["crew"]["today"] == {"text": "", "at": 0.0}
+    store.mutate(tmp_path, lambda led: store.apply_crew_record(led, {"crew": {"today": "nothing needs you"}}))
+    st = asyncio.run(routes._handle_state(_Req(_FakeState()), _ctx(tmp_path))).body
+    assert st["crew"]["today"]["text"] == "nothing needs you" and st["crew"]["today"]["at"] > 0
+    assert st["crew_memory"]["today"] == st["crew"]["today"]
+    assert "last_text" in st["digest"]

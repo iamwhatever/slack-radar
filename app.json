@@ -80,7 +80,7 @@
       "timezone": "UTC",
       "silent": true,
       "persistent_session": false,
-      "enabled": false,
+      "enabled": true,
       "message": "Call the slack_radar_request_digest tool exactly once with no arguments, then stop. Do not read the ledger, do not compose anything, and produce NO other output - the Slack Radar crew composes the digest in its own session."
     }
   ],

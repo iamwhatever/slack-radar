@@ -14,7 +14,7 @@ What the code, the agents and the UI agree on. The people-level rules are in [CH
 | Crew slot | `crew-slack-radar`, then `crew-slack-radar-g<N>` | `store.SLOT_KEY`, `store.next_slot_key` |
 | Ledger MCP server | `@slack-radar:ledger` | `app.json` `mcpServers.ledger` |
 | Unattended grant scope | `crew:slack-radar:autoapprove` (900 s) | `crew_runtime.TRUST_SCOPE` |
-| Brief sentinel | `<!-- slack-radar-crew-brief v2 -->` | first line of `backend/crew_brief.md` |
+| Brief sentinel | `<!-- slack-radar-crew-brief v3 -->` | first line of `backend/crew_brief.md` |
 
 These names are part of the install: renaming one orphans a session, a spec or a grant.
 
@@ -118,13 +118,14 @@ The crew's resumable position across turns, compaction and restarts.
 | `phase` | `idle` · `triaging` · `investigating` · `rechecking` · `digest` |
 | `next` | **the resumable intent**, ≤ 500 chars. "next: re-check C0ABC:1727… once its thread moves" — not "triaging" |
 | `tried` / `rejected` | append-only, newest 30 kept |
+| `today` | `{text, at}`. **PUBLIC**: the Lead's standing one-line note for the Board, ≤ 240 chars, set whenever a turn changed anything — what changed and what needs the owner, or "nothing needs you". Refused (not clipped) when longer, empty, or carrying a path, host name/address or credential (`store.public_text_problem`). `at` is when it was written. `GET /state` returns it as `crew.today` |
 | `updated_at` | epoch s |
 
 ### Digest (`ledger.digest`)
 
 | Field | Owner | Notes |
 |---|---|---|
-| `requested_at` | cron tool / owner route | the daily cron calls `slack_radar_request_digest`; the next poll wakes the crew |
+| `requested_at` | cron tool / owner route | the daily cron (`daily-digest`, on by default, 16:00 UTC Mon–Fri) calls `slack_radar_request_digest`; the next poll wakes the crew |
 | `pending` | crew | `{headline, top_keys, submitted_at}` from `slack_radar_digest` |
 | `last_posted_at` / `last_posted_date` | poller | a digest is "due" when requested and not yet posted today (UTC) |
 | `last_destination` / `last_text` | poller | `self_dm` or `dashboard`, and the rendered text (shown on the board) |
@@ -142,7 +143,7 @@ There is no idle nudge loop. `watch.poll_once` → `crew_runtime.after_poll` wak
 
 #### Brief injection — presence check
 
-The brief (`crew_brief.md`, first line `<!-- slack-radar-crew-brief v2 -->`) is prepended to the nudge whenever no message in the session both contains the sentinel and is at least as long as the brief. Session start, compaction and restart are all the same case.
+The brief (`crew_brief.md`, first line `<!-- slack-radar-crew-brief v3 -->`) is prepended to the nudge whenever no message in the session both contains the sentinel and is at least as long as the brief. Session start, compaction and restart are all the same case.
 
 ## 4. MCP tools (`backend/mcp_server.py`)
 
@@ -157,7 +158,7 @@ One stdio server, declared in `app.json` `mcpServers.ledger`, reached by agents 
 
 `slack_radar_record` item shape: `{key, category?, priority?, status?, summary?, links?, note?, investigation?, clear_possibly_resolved?: bool}`. `key` must be one `slack_radar_read` returned. `status` may not be `new`. Enums are `store.CATEGORIES`, `store.PRIORITIES`, `store.STATUSES`. Unknown keys and bad enums are refused per item; recording any field on an item clears its `needs_triage` and `thread_changed`.
 
-`slack_radar_record` crew shape: `{phase?: idle|triaging|investigating|rechecking|digest, next?: str ≤500, tried_add?: [str], rejected_add?: [str]}`.
+`slack_radar_record` crew shape: `{phase?: idle|triaging|investigating|rechecking|digest, next?: str ≤500, today?: str ≤240, tried_add?: [str], rejected_add?: [str]}`. A refused `today` is reported in `refused` as key `crew.today`; the other crew fields still apply.
 
 `event` is one line for the Activity tab: no paths, no hosts.
 
@@ -167,7 +168,7 @@ All paths are under `/api/apps/slack-radar`. "Owner" means `_owner_gate`: the da
 
 | Method | Path | Gate | Body / query | What it does |
 |---|---|---|---|---|
-| GET | `/state` | open | — | settings, crew record + session facts, crew memory, investigations, counts, channels, source state, last poll, digest |
+| GET | `/state` | open | — | settings, crew record + session facts + `today` (`{text, at}` from `crew_memory.today`), crew memory, investigations, counts, channels, source state, last poll, digest |
 | GET | `/org` | open | — | `desk/members.json` with a `live` block per member (below) |
 | GET | `/items` | open | `status` (`open` or a status), `channel`, `limit` ≤500 | ledger items, newest first |
 | GET | `/events` | open | `limit` ≤500 | the event log |

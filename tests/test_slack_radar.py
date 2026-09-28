@@ -631,3 +631,79 @@ def test_owner_message_goes_to_the_agent_checked_crew_slot(crew_env) -> None:
     assert out["ok"] and out["slot_key"] == "crew-slack-radar-g2"
     assert closed == [("crew-slack-radar", "kirocrew")]  # never sent to the wrong-agent slot
     assert sent == [("crew-slack-radar-g2", crew_runtime._owner_run_chat)]
+
+
+# ── crew.today (public one-line note) + digest defaults ────────────────────
+
+
+def test_crew_today_is_recorded_with_a_timestamp(tmp_path: Path) -> None:
+    before = time.time()
+    result = store.mutate(tmp_path, lambda led: store.apply_crew_record(
+        led, {"crew": {"phase": "idle", "next": "n", "today": "  3 reports triaged;\n one p1 crash needs you  "}}))
+    assert result["refused"] == []
+    today = store.read_ledger(tmp_path)["crew_memory"]["today"]
+    assert today["text"] == "3 reports triaged; one p1 crash needs you"
+    assert today["at"] >= before
+
+
+@pytest.mark.parametrize(
+    ("value", "why"),
+    [
+        ("x" * 241, "at most 240"),
+        ("", "non-empty"),
+        (42, "non-empty string"),
+        ("log is in /home/jdoe/slack-radar/data", "path"),
+        ("see ~/notes for details", "path"),
+        ("repro on 10.0.3.7 only", "host"),
+        ("build box buildhost.corp is down", "host"),
+        ("token xoxb-1234567890-abcdefghij leaked", "credential"),
+    ],
+    ids=["too-long", "empty", "not-a-string", "abs-path", "home-path", "ipv4", "corp-host", "credential"],
+)
+def test_crew_today_refuses_non_public_text(tmp_path: Path, value: Any, why: str) -> None:
+    store.mutate(tmp_path, lambda led: store.apply_crew_record(led, {"crew": {"today": "nothing needs you"}}))
+    result = store.mutate(tmp_path, lambda led: store.apply_crew_record(
+        led, {"crew": {"next": "still applied", "today": value}}))
+    assert [r["key"] for r in result["refused"]] == ["crew.today"]
+    assert why in result["refused"][0]["why"]
+    mem = store.read_ledger(tmp_path)["crew_memory"]
+    assert mem["today"]["text"] == "nothing needs you" and mem["next"] == "still applied"
+
+
+def test_crew_today_accepts_urls_and_ordinary_slashes(tmp_path: Path) -> None:
+    text = "p1/p2 bugs linked to https://github.com/o/r/issues/12 and/or a docs page; nothing needs you"
+    assert store.public_text_problem(text) == ""
+    result = store.mutate(tmp_path, lambda led: store.apply_crew_record(led, {"crew": {"today": text}}))
+    assert result["refused"] == []
+
+
+def test_crew_today_refuses_this_machines_host_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(store.socket, "gethostname", lambda: "radarbox7.example")
+    assert "host name" in store.public_text_problem("the poller on radarbox7 restarted")
+    assert store.public_text_problem("the poller restarted") == ""
+
+
+def test_older_ledger_without_today_reads_cleanly(tmp_path: Path) -> None:
+    store.ledger_path(tmp_path).write_text(json.dumps({"crew_memory": {"phase": "idle", "today": "bad"}}), encoding="utf-8")
+    assert store.read_ledger(tmp_path)["crew_memory"]["today"] == {"text": "", "at": 0.0}
+
+
+def test_digest_dashboard_mode_keeps_the_text_for_the_board(tmp_path: Path) -> None:
+    fake = FakeMcp()
+    _pending_digest(tmp_path, fake)
+    notified: list[str] = []
+    watch.deliver_pending_digest(tmp_path, fake, settings(digest_destination="dashboard"),
+                                 lambda t, b: notified.append(b))
+    d = store.read_ledger(tmp_path)["digest"]
+    assert d["last_text"] == notified[0] and "One p1 bug today" in d["last_text"]
+    assert d["last_destination"] == "dashboard" and d["last_posted_at"] > 0 and d["pending"] is None
+
+
+def test_daily_digest_cron_ships_enabled_and_only_requests() -> None:
+    manifest = json.loads((ROOT / "app.json").read_text(encoding="utf-8"))
+    (cron,) = manifest["crons"]
+    assert cron["name"] == "daily-digest" and cron["enabled"] is True
+    assert (cron["cron_expr"], cron["timezone"]) == ("0 16 * * 1-5", "UTC")
+    assert "slack_radar_request_digest" in cron["message"]
+    assert "slack_radar_digest " not in cron["message"] and "slack_radar_record" not in cron["message"]
+    assert DEFAULT_SETTINGS["digest_destination"] == "dashboard"
