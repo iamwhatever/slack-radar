@@ -19,7 +19,8 @@ The rules the crew works by. The exact names, fields and routes are in [CONTRACT
 
 - The Poller wakes the Lead when a poll moved something or a digest is due. It never spawns anyone.
 - Only the Lead spawns. It uses `spawn_run` for the Investigator and the Thread Watcher, at most two investigations in flight.
-- The owner can also start an Investigator from the Board's **Investigate** button. That is an owner action, not a crew action.
+- The owner can also start an Investigator from the Ledger tab's **Investigate** button. That is an owner action, not a crew action.
+- The Board shows only what needs the owner: the Now strip, the Lead's line and the digest, and the Needs-you groups (priority first, then newest; 5 rows per group; each row has ONE button naming the next step: Dispatch fix, Reply, Done or Decide). Every ledger item, its filters and **Investigate** are on the Ledger tab. Neither page adds a way to post or dispatch: **Send to thread** and **Dispatch fix** stay the owner's clicks.
 - Leaves never spawn. The Investigator and the Thread Watcher have no spawn tool; they record into the ledger and stop.
 - A fix is never dispatched by the crew. When an investigation ends with a code-shaped fix, the Lead writes ONE `fix_handoff` on the item: a self-contained task for a coding session (repo, item keys, links, coverage verdict, what to change, how to verify, "Do not merge; open a PR for review"). The Board shows **Dispatch fix**. One click by the owner is the consent: the app opens ONE `kirocrew-conductor` session, sends it the hand-off plus the Slack context (quoted as untrusted data), and tracks it on the Board until it reports a PR. No confirmation dialog: the click is the decision.
 - Several hand-offs can go as one batch. With two or more waiting, **Dispatch all fixes (N)** opens a list of them, all checked, on the Board itself. The owner reviews it and unchecks any to leave out; one click on **Dispatch N to one conductor** is the consent for the whole list. The app opens ONE `kirocrew-conductor` session with one seed holding a section per hand-off (each with its own quoted Slack context), and that conductor splits the work into its own items. One repo per batch, at most 10 fixes. Replies are never sent in a batch.
@@ -54,7 +55,7 @@ See [docs/unattended-mode.md](../docs/unattended-mode.md) for the full approval 
 - The grant reaches the children the Lead spawns (Kiro Crew core since kirodotdev/KiroCrew#14497). While unattended mode is on, an Investigator or Thread Watcher spawn and every Investigator shell command are auto-approved, each SEL-audited. While it is off, the owner approves the spawn and each command, and an unanswered prompt is denied after two hours.
 - Picking **Normal** in the chat's trust menu ends the grant until the next poll arms it again. The app's own toggle is the off switch that lasts.
 - Risk: Slack text anyone in a watched channel can write reaches an agent with a shell. Turn unattended mode on only when every watched channel is trusted.
-- The Board's **Investigate** button runs the Investigator fully auto-approved, so it is refused unless unattended mode is on.
+- The Ledger tab's **Investigate** button runs the Investigator fully auto-approved, so it is refused unless unattended mode is on.
 
 ### 6. Stop conditions
 
@@ -83,7 +84,8 @@ See [docs/unattended-mode.md](../docs/unattended-mode.md) for the full approval 
 
 - 轮询有变化或摘要到期时，轮询器唤醒组长。它从不派生任何成员。
 - 只有组长会派生。它用 `spawn_run` 派出调查员和线程观察员，同时最多两个调查在进行。
-- 所有者也可以用看板上的 **Investigate** 按钮启动调查员。这是所有者的操作，不是小组的操作。
+- 所有者也可以用 Ledger（台账）标签页的 **Investigate** 按钮启动调查员。这是所有者的操作，不是小组的操作。
+- 看板只显示需要所有者处理的东西：Now 条、组长的一句话和摘要，以及 Needs-you 各组（先按优先级，再新的在前；每组 5 行；每行只有一个写明下一步的按钮：Dispatch fix、Reply、Done 或 Decide）。台账的全部条目、筛选和 **Investigate** 都在 Ledger 标签页。两个页面都没有新增发消息或派发的途径：**Send to thread** 和 **Dispatch fix** 仍然只能由所有者点击。
 - 叶子成员从不派生。调查员和线程观察员没有派生工具；它们写入台账后就结束。
 - 小组从不自己派发修复。调查得出一个代码层面的修复时，组长在条目上写一个 `fix_handoff`：给编码会话的自包含任务（仓库、条目 key、链接、覆盖结论、改什么、怎么验证、"Do not merge; open a PR for review"）。看板显示 **Dispatch fix**。所有者点一次就是同意：应用开一个 `kirocrew-conductor` 会话，把交接和 Slack 上下文（作为不可信数据引用）发给它，并在看板上跟踪，直到它报告一个 PR。没有确认对话框：点击本身就是决定。
 - 多个交接可以作为一批一起派发。有两个或以上待派发时，**Dispatch all fixes (N)** 会在看板上直接展开一个清单，全部勾选。所有者检查清单，取消不想要的；点一次 **Dispatch N to one conductor** 就是对整张清单的同意。应用只开一个 `kirocrew-conductor` 会话，发一份种子，每个交接一节（各自带引用的 Slack 上下文），由这个 conductor 自己拆成工作项。每批只能一个仓库，最多 10 个修复。回复从不批量发送。
@@ -118,7 +120,7 @@ See [docs/unattended-mode.md](../docs/unattended-mode.md) for the full approval 
 - 这个授权会传到组长派出的子 agent（Kiro Crew 核心自 kirodotdev/KiroCrew#14497 起）。无人值守模式打开时，派出调查员或线程观察员，以及调查员的每条 shell 命令，都会自动批准，每条都有 SEL 审计。模式关闭时，派生和每条命令都要所有者批准，无人响应的提示两小时后被拒绝。
 - 在聊天的信任菜单里选 **Normal**，授权只结束到下一次轮询为止。应用自己的开关才是长期有效的关闭方式。
 - 风险：监听频道里任何人都能写的 Slack 文字会到达一个有 shell 的 agent。只有当所有监听频道都可信时才打开无人值守模式。
-- 看板的 **Investigate** 按钮会让调查员全程自动批准运行，所以只有无人值守模式打开时才允许。
+- Ledger 标签页的 **Investigate** 按钮会让调查员全程自动批准运行，所以只有无人值守模式打开时才允许。
 
 ### 6. 停止条件
 
