@@ -27,7 +27,7 @@ from typing import Any, Awaitable, Callable
 
 from aiohttp import web
 
-from . import crew_runtime, needs, org, settings as settings_mod, slack_mcp, store, watch
+from . import crew_runtime, dispatch, handoff, needs, org, settings as settings_mod, slack_mcp, store, watch
 
 logger = logging.getLogger("kirocrew.app.slack-radar")
 
@@ -281,7 +281,8 @@ async def _handle_needs(request: web.Request, ctx: Any) -> web.Response:
         return _err(500, "ledger_corrupt", str(exc))
     spawn = getattr(ctx, "spawn", None)
     done = spawn.is_done if spawn is not None and hasattr(spawn, "is_done") else None
-    return web.json_response({"ok": True, **needs.build_needs(ledger, store.now(), done)})
+    fix_live = await dispatch.observe(_state(request), _data_dir(ctx), ledger)
+    return web.json_response({"ok": True, **needs.build_needs(ledger, store.now(), done, fix_live=fix_live)})
 
 
 async def _handle_events(request: web.Request, ctx: Any) -> web.Response:
@@ -416,7 +417,7 @@ async def _handle_item_handle(request: web.Request, ctx: Any) -> web.Response:
 
 
 async def _handle_handoff_dismiss(request: web.Request, ctx: Any) -> web.Response:
-    """Owner clears an item's fix hand-off (the "Fixes handed off" fold's Dismiss)."""
+    """Owner clears an item's fix hand-off (the "Fixes in flight" fold's Dismiss)."""
     body = await _json_body(request)
     if body is None:
         return _err(400, "body_not_object", "request body must be a JSON object")
@@ -431,6 +432,77 @@ async def _handle_handoff_dismiss(request: web.Request, ctx: Any) -> web.Respons
         return _err(404, "unknown_item", "that item is not in the ledger")
     store.append_event(_data_dir(ctx), "handoff", "owner dismissed a fix hand-off", key=key)
     return web.json_response({"ok": True, "item": item})
+
+
+# ── Dispatch fix (owner click -> a kirocrew-conductor session) ─────────────
+
+
+async def _handle_fixes(request: web.Request, ctx: Any) -> web.Response:
+    """Every dispatched fix with its session's live state and PR (``needs.fix_entry``)."""
+    try:
+        ledger = await asyncio.to_thread(store.read_ledger, _data_dir(ctx))
+    except store.StoreError as exc:
+        return _err(500, "ledger_corrupt", str(exc))
+    fix_live = await dispatch.observe(_state(request), _data_dir(ctx), ledger)
+    out = needs.build_needs(ledger, store.now(), fix_live=fix_live)
+    return web.json_response({"ok": True, "fixes": out["fixes"], "total": out["fixes_total"]})
+
+
+async def _handle_handoff_dispatch(request: web.Request, ctx: Any) -> web.Response:
+    """Owner's **Dispatch fix**: one click opens a kirocrew-conductor session fed with
+    the hand-off and its Slack context. The click is the consent; nothing else calls
+    this route (the crew has no path to it: internal-auth callers are refused).
+
+    Server path when the gateway lets this route create a session: the session is
+    created, the seed sent once, and ``fix_handoff.dispatch`` stored. Otherwise the
+    seed comes back with ``mode: "client"`` for the UI's chat launcher to send.
+    """
+    body = await _json_body(request)
+    if body is None:
+        return _err(400, "body_not_object", "request body must be a JSON object")
+    key = body.get("key")
+    if not store.is_item_key(key):
+        return _err(400, "invalid_field", "key must be a ledger item key")
+    try:
+        ledger = await asyncio.to_thread(store.read_ledger, _data_dir(ctx))
+    except store.StoreError as exc:
+        return _err(500, "ledger_corrupt", str(exc))
+    item = (ledger.get("items") or {}).get(key)
+    prior = needs.dispatch_of(item) if isinstance(item, dict) else None
+    if prior and dispatch.slot_state(_state(request), str(prior["session_key"]))[0] in ("running", "idle"):
+        return web.json_response(
+            {"ok": False, "code": "already_dispatched", "error": "this fix already has a session",
+             "session_key": prior["session_key"], "title": prior.get("title") or ""},
+            status=409,
+        )
+    try:
+        built = handoff.build_seed(ledger, key)
+    except handoff.HandoffError as exc:
+        return _err(404 if exc.code == "unknown_item" else 400, exc.code, str(exc))
+    state = _state(request)
+    if not dispatch.can_create(state):
+        store.append_event(_data_dir(ctx), "dispatch", "fix seed handed to the chat launcher", key=key)
+        return web.json_response({"ok": True, "mode": "client", "agent": handoff.CONDUCTOR_AGENT,
+                                  "title": built["title"], "seed": built["seed"]})
+    if not dispatch.claim(key):
+        return _err(409, "dispatch_in_progress", "this fix is being dispatched already")
+    try:
+        crew = await asyncio.to_thread(store.read_crew, _data_dir(ctx))
+        try:
+            opened = await dispatch.open_session(
+                state, title=built["title"], seed=built["seed"], workspace=str(crew.get("workspace") or "default")
+            )
+        except Exception as exc:  # noqa: BLE001 - host refusal of any kind
+            logger.warning("slack-radar: dispatch failed", exc_info=True)
+            return _err(502, "dispatch_failed", str(exc)[:300])
+        record = {"session_key": opened["session_key"], "title": opened["title"],
+                  "agent": handoff.CONDUCTOR_AGENT, "at": store.now()}
+        await asyncio.to_thread(store.mutate, _data_dir(ctx), lambda led: store.apply_dispatch(led, key, record))
+    finally:
+        dispatch.release(key)
+    store.append_event(_data_dir(ctx), "dispatch", f"fix dispatched to {handoff.CONDUCTOR_AGENT}: {opened['title']}", key=key)
+    return web.json_response({"ok": True, "mode": "server", **record, "filed": opened["filed"],
+                              "members": built["members"]})
 
 
 async def _handle_digest_request(request: web.Request, ctx: Any) -> web.Response:
@@ -610,6 +682,8 @@ def register_routes(ctx: Any) -> list[Any]:
         r("GET", "/needs", _handle_needs),
         r("POST", "/items/handle", _owner_only(_handle_item_handle)),
         r("POST", "/items/handoff/dismiss", _owner_only(_handle_handoff_dismiss)),
+        r("POST", "/items/handoff/dispatch", _owner_only(_handle_handoff_dispatch)),
+        r("GET", "/fixes", _handle_fixes),
         r("GET", "/events", _handle_events),
         r("PUT", "/settings", _owner_only(_handle_put_settings)),
         r("GET", "/mcp/status", _owner_only(_handle_mcp_status)),

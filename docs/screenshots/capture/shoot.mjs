@@ -67,7 +67,7 @@ try {
     }
     if (s.chat) await page.getByRole('button', { name: 'What needs me today?' }).first().click()
     if (s.openHandled) await page.getByText(/^Handled \(/).click()
-    if (s.openHandoffs) await page.getByText(/^Fixes handed off \(/).click()
+    if (s.openHandoffs) await page.getByText(/^Fixes in flight \(/).click()
     if (s.openReplied) await page.getByText(/^Replied \(/).click()
     await page.waitForTimeout(400)
     if (s.clip) {
@@ -101,8 +101,9 @@ try {
     else console.log(`check today ${want}: ok`, JSON.stringify(lines))
     await ctx.close()
   }
-  // DOM check: a hand-off row shows Start fix session + Ignore (Done in the menu), and
-  // clicking it opens a draft-only chat carrying the prompt.
+  // DOM check: a hand-off row shows Dispatch fix + Ignore (Done in the menu); one click
+  // posts the dispatch once, opens no chat, and a toast links the new session. The
+  // dispatched row shows its session and state instead of the buttons.
   {
     const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, timezoneId: 'UTC', locale: 'en-US' })
     const page = await ctx.newPage()
@@ -111,13 +112,24 @@ try {
     const row = page.getByText('Fix: Raise the CSV export row limit (issue #412)').locator('xpath=ancestor::li[1]')
     await row.waitFor({ timeout: 30000 })
     const buttons = await row.locator(':scope > div > div:last-child > button').allTextContents()
-    await row.getByRole('button', { name: 'Start fix session' }).click()
+    await row.getByRole('button', { name: 'Dispatch fix' }).click()
+    const toast = page.getByTestId('dispatch-toast')
+    await toast.waitFor({ timeout: 5000 })
+    const toastText = await toast.textContent()
+    const posts = await page.evaluate(() => (window.__posts || []).filter((p) => p.path.endsWith('/items/handoff/dispatch')))
     const launched = await page.evaluate(() => window.__launched || [])
-    const ok = JSON.stringify(buttons) === JSON.stringify(['Start fix session', 'Ignore'])
-      && launched.length === 1 && launched[0].autoSend === false
-      && launched[0].message.includes('Do not merge; open a PR for review')
-    if (!ok) errors.push(`[handoff] buttons ${JSON.stringify(buttons)} launched ${JSON.stringify(launched)}`)
-    else console.log('check handoff: ok', JSON.stringify(buttons))
+    const progress = await page.getByTestId('fix-in-progress').allTextContents()
+    const toastLink = await toast.getByRole('link').getAttribute('href')
+    const ok = JSON.stringify(buttons) === JSON.stringify(['Dispatch fix', 'Ignore'])
+      && posts.length === 1 && launched.length === 0
+      && toastText.includes('Fix dispatched to a conductor') && toastLink === '/chat?sid=chat-99-1'
+      && progress.length === 1 && progress[0].includes('Fix: Roll back the dashboard bundle split') && progress[0].includes('working')
+    if (!ok) errors.push(`[dispatch] buttons ${JSON.stringify(buttons)} posts ${JSON.stringify(posts)} launched ${JSON.stringify(launched)} toast ${toastText} ${toastLink} progress ${JSON.stringify(progress)}`)
+    else console.log('check dispatch: ok', JSON.stringify(buttons), toastText, JSON.stringify(progress))
+    await toast.getByRole('link').click()
+    const opened = await page.evaluate(() => window.__launched || [])
+    if (!(opened.length === 1 && opened[0].slotKey === 'chat-99-1')) errors.push(`[dispatch] toast link opened ${JSON.stringify(opened)}`)
+    else console.log('check toast link: ok', JSON.stringify(opened))
     await ctx.close()
   }
   // DOM check: a reply row shows the draft in a textbox with Send to thread + Ignore;

@@ -7,7 +7,7 @@ The rules are written out for people in ``desk/CONTRACT.md`` §6; keep the two i
 Three groups, in this order:
 
 * ``decide``     — open items that want a call from the owner: a fix hand-off the Lead
-  wrote, priority p0/p1, an investigation that finished with links, or a thread the
+  wrote (or one the owner dispatched whose PR is not known yet), priority p0/p1, an investigation that finished with links, or a thread the
   poller thinks is resolved.
 * ``unanswered`` — open questions nobody in the thread has replied to for over 48 hours.
 * ``clusters``   — two or more open items in one channel that share at least two
@@ -51,12 +51,14 @@ STOPWORDS = frozenset(
 
 #: The ``decide`` reason for an item carrying a ``fix_handoff``.
 HANDOFF_REASON = "Fix ready to hand off"
-#: Hand-offs listed in the "Fixes handed off" fold.
+#: Hand-offs listed in ``handoffs`` (every hand-off, dispatched or not).
 HANDOFF_CAP = 50
 #: The ``decide`` reason for an item carrying a ``reply_draft`` (below a hand-off).
 REPLY_REASON = "Reply ready to send"
 #: Sent replies listed in the "Replied" fold.
 REPLIED_CAP = 50
+#: The ``decide`` reason for a hand-off the owner dispatched, before its PR exists.
+DISPATCHED_REASON = "Fix in progress"
 
 _PRIORITY_RANK = {"p0": 0, "p1": 1, "p2": 2, "p3": 3}
 
@@ -85,7 +87,8 @@ def _rank(item: dict[str, Any], now: float) -> tuple[int, float]:
     return (_PRIORITY_RANK.get(str(item.get("priority") or ""), 4), -age_hours(item, now))
 
 
-def _entry(item: dict[str, Any], now: float, reason: str) -> dict[str, Any]:
+def _entry(item: dict[str, Any], now: float, reason: str,
+           fix_live: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
     return {
         "key": item.get("key") or "",
         "channel": item.get("channel") or "",
@@ -97,11 +100,12 @@ def _entry(item: dict[str, Any], now: float, reason: str) -> dict[str, Any]:
         "reason": reason,
         **({"handoff_title": item["fix_handoff"].get("title") or ""} if has_handoff(item) else {}),
         **({"reply_draft": str(item["reply_draft"].get("text") or "")} if store.has_reply_draft(item) else {}),
+        **({"dispatch": fix_view(item, fix_live)} if dispatch_of(item) else {}),
     }
 
 
 def handoff_entry(item: dict[str, Any]) -> dict[str, Any]:
-    """One row of the "Fixes handed off" fold: the item plus its whole hand-off."""
+    """One row of ``handoffs``: the item plus its whole hand-off."""
     h = item["fix_handoff"]
     return {
         "key": item.get("key") or "",
@@ -141,6 +145,61 @@ def has_handoff(item: dict[str, Any]) -> bool:
     return isinstance(h, dict) and bool(h.get("prompt"))
 
 
+# ── dispatched fixes ───────────────────────────────────────────────────────
+
+#: Dispatched fixes listed in the "Fixes in flight" fold.
+FIXES_CAP = 50
+
+
+def dispatch_of(item: dict[str, Any]) -> dict[str, Any] | None:
+    """The owner's dispatch on an item's hand-off (``fix_handoff.dispatch``), or None."""
+    h = item.get("fix_handoff")
+    d = h.get("dispatch") if isinstance(h, dict) else None
+    return d if isinstance(d, dict) and d.get("session_key") else None
+
+
+def fix_pr(item: dict[str, Any]) -> str:
+    h = item.get("fix_handoff")
+    return str(h.get("pr_url") or "") if isinstance(h, dict) and dispatch_of(item) else ""
+
+
+def fix_view(item: dict[str, Any], fix_live: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+    """``{session_key, title, agent, at, state, pr_url, pr_number}`` for a dispatched item.
+
+    ``state`` comes from ``fix_live`` (the route reads the session's slot):
+    running / idle / closed, or ``unknown`` when nobody asked the gateway.
+    """
+    from .handoff import pr_number
+
+    d = dispatch_of(item) or {}
+    pr = fix_pr(item) or str(((fix_live or {}).get(item.get("key") or "") or {}).get("pr_url") or "")
+    live = ((fix_live or {}).get(item.get("key") or "") or {}).get("state") or "unknown"
+    return {
+        "session_key": str(d.get("session_key") or ""),
+        "title": str(d.get("title") or ""),
+        "agent": str(d.get("agent") or ""),
+        "at": float(d.get("at") or 0),
+        "state": str(live),
+        "pr_url": pr,
+        "pr_number": pr_number(pr),
+    }
+
+
+def fix_entry(item: dict[str, Any], fix_live: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+    """One row of the "Fixes in flight" fold."""
+    return {
+        "key": item.get("key") or "",
+        "channel": item.get("channel") or "",
+        "permalink": item.get("permalink") or "",
+        "summary": item.get("summary") or str(item.get("text") or "")[:200],
+        "status": item.get("status") or "",
+        "handled_how": item.get("handled_how") or "",
+        "handoff_title": item["fix_handoff"].get("title") or "",
+        "repo": item["fix_handoff"].get("repo") or "",
+        "dispatch": fix_view(item, fix_live),
+    }
+
+
 def _investigation_done(item: dict[str, Any], spawn_done: Callable[[str], bool] | None) -> bool:
     """An investigation ran and left links, and is no longer running.
 
@@ -164,6 +223,9 @@ def _investigation_done(item: dict[str, Any], spawn_done: Callable[[str], bool] 
 def decide_reason(item: dict[str, Any], spawn_done: Callable[[str], bool] | None = None) -> str:
     """Why an open, unhandled item needs a call, or ``""``. First match wins."""
     if has_handoff(item):
+        d = dispatch_of(item)
+        if d:
+            return f"{DISPATCHED_REASON} · {d.get('title') or ''}".rstrip(" ·")[:160]
         return HANDOFF_REASON
     if store.has_reply_draft(item):
         return REPLY_REASON
@@ -245,8 +307,13 @@ def build_needs(
     now: float | None = None,
     spawn_done: Callable[[str], bool] | None = None,
     cap: int = GROUP_CAP,
+    fix_live: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """The three groups, each ``{id, total, entries}``; entries capped at ``cap``."""
+    """The three groups, each ``{id, total, entries}``; entries capped at ``cap``.
+
+    A dispatched fix whose PR is known (``fix_handoff.pr_url``, or one ``fix_live``
+    just found) is in neither ``decide`` nor ``unanswered``: it lives in ``fixes``.
+    """
     t = time.time() if now is None else now
     pool = [
         it for it in (ledger.get("items") or {}).values()
@@ -255,6 +322,8 @@ def build_needs(
     decide: list[tuple[dict[str, Any], str]] = []
     unanswered: list[dict[str, Any]] = []
     for it in pool:
+        if fix_pr(it) or (dispatch_of(it) and ((fix_live or {}).get(it.get("key") or "") or {}).get("pr_url")):
+            continue
         why = decide_reason(it, spawn_done)
         if why:
             decide.append((it, why))
@@ -269,7 +338,7 @@ def build_needs(
         return f"No reply for {int(age_hours(it, t) // 24)} days"
 
     groups = [
-        ("decide", [_entry(it, t, why) for it, why in decide]),
+        ("decide", [_entry(it, t, why, fix_live) for it, why in decide]),
         ("unanswered", [_entry(it, t, hours(it)) for it in unanswered]),
         ("clusters", clusters),
     ]
@@ -278,11 +347,17 @@ def build_needs(
         (it for it in (ledger.get("items") or {}).values() if isinstance(it, dict) and has_handoff(it)),
         key=lambda it: -float(it["fix_handoff"].get("at") or 0),
     )
+    fixes = sorted(
+        (it for it in (ledger.get("items") or {}).values() if isinstance(it, dict) and dispatch_of(it)),
+        key=lambda it: -float((dispatch_of(it) or {}).get("at") or 0),
+    )
     replied, replied_total = replied_rows(ledger)
     return {
         "replied": replied,
         "replied_total": replied_total,
         "groups": [{"id": gid, "total": len(rows), "entries": rows[:cap]} for gid, rows in groups],
+        "fixes": [fix_entry(it, fix_live) for it in fixes[:FIXES_CAP]],
+        "fixes_total": len(fixes),
         "handled_total": handled,
         "handoffs": [handoff_entry(it) for it in handoffs[:HANDOFF_CAP]],
         "handoffs_total": len(handoffs),
