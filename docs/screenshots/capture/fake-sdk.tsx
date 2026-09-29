@@ -2,9 +2,10 @@
  * Stub of `@kirocrew/app-sdk` for README screenshots. Every response is FAKE demo
  * data defined in this file: no request leaves the page, and nothing is read from
  * a gateway, a ledger or Slack. Scenario comes from the query string:
- *   ?source=ok | needs_login
+ *   ?source=ok | needs_login, plus &today=empty and &digest=empty
  */
 const TODAY_EMPTY = new URLSearchParams(location.search).get('today') === 'empty'
+const DIGEST_EMPTY = new URLSearchParams(location.search).get('digest') === 'empty'
 const SCENARIO = new URLSearchParams(location.search).get('source') === 'needs_login' ? 'needs_login' : 'ok'
 
 const T0 = 1758700800 // 2025-09-24T08:00:00Z, fixed so frames are reproducible
@@ -246,7 +247,7 @@ const STATE = {
   source_error: SCENARIO === 'needs_login' ? 'Slack MCP login expired: invalid_auth' : '',
   last_poll_at: T0 + 5700,
   last_poll_error: '',
-  digest: {
+  digest: DIGEST_EMPTY ? { last_posted_date: '', last_error: '', pending: null, last_text: '' } : {
     last_posted_date: '2025-09-23', last_error: '', pending: null,
     last_text:
       '*Slack Radar digest — 2025-09-23*\nTwo p1 bugs need an owner; dark-mode request is gaining support.\n' +

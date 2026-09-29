@@ -742,7 +742,7 @@ export default function SlackRadar() {
             busy={busy}
             onPoll={() => act('Poll', () => api.post(`${BASE}/poll`, {}))}
             onStart={() => act('Start crew', () => api.post(`${BASE}/crew/start`, {}))}
-            onDigest={() => act('Request digest', () => api.post(`${BASE}/digest/request`, {}))}
+            onDigest={() => act('Digest now', () => api.post(`${BASE}/digest/request`, {}))}
             events={events}
             onChanged={load}
           />
@@ -819,13 +819,14 @@ function SignInBanner({ mcp, sourceError, busy, onCheck }: { mcp: McpStatus | nu
   )
 }
 
-function ConnectionLine({ mcp, state, withPoll }: { mcp: McpStatus | null; state: State; withPoll?: boolean }) {
+function ConnectionLine({ mcp, state, withPoll, action }: { mcp: McpStatus | null; state: State; withPoll?: boolean; action?: ReactNode }) {
   const status = connectionStatus(mcp, state.source_state)
   const ok = status === 'connected'
   const dot = ok ? 'var(--ok)' : status === 'checking' ? 'var(--muted-strong)' : 'var(--warn)'
   return (
-    <div className="mb-4">
-      <p role="status" className="text-sm text-muted flex flex-wrap items-center gap-2" style={{ margin: 0 }}>
+    <div className={action ? 'mb-3' : 'mb-4'} data-testid={action ? 'connection-line' : undefined}>
+      <div className="flex flex-wrap items-center gap-2">
+      <p role="status" className="text-sm text-muted flex flex-wrap items-center gap-2" style={{ margin: 0, flex: 1, minWidth: 0 }}>
         <span aria-hidden style={{ width: 8, height: 8, borderRadius: '50%', background: dot, display: 'inline-block' }} />
         <span>
           Slack connection: <span style={{ color: ok ? 'var(--text)' : 'var(--warn)' }}>{CONNECTION_LABEL[status] || status}</span>
@@ -837,6 +838,8 @@ function ConnectionLine({ mcp, state, withPoll }: { mcp: McpStatus | null; state
           </span>
         )}
       </p>
+      {action}
+      </div>
       {!ok && status !== 'needs_login' && <TechDetails mcp={mcp} sourceError={state.source_error} />}
     </div>
   )
@@ -844,9 +847,11 @@ function ConnectionLine({ mcp, state, withPoll }: { mcp: McpStatus | null; state
 
 // ── Board ───────────────────────────────────────────────────────────────────
 
-// The Board answers "what do I do next": the Now strip, the Lead's line and digest,
-// and the Needs-you groups. Every ledger item, its filters and Investigate live on
-// the Ledger tab.
+// The Board answers "what do I do next", top to bottom: the Now strip (rendered by
+// the page above it), one thin Slack connection line with Poll now, the Today card
+// (the Lead's line and the latest digest), the Needs-you groups, and the Lead chat
+// bar pinned to the bottom of the panel. Every ledger item, its filters and
+// Investigate live on the Ledger tab.
 function Board(props: {
   state: State
   needs: Needs | null
@@ -867,18 +872,40 @@ function Board(props: {
   const askWhy = (e: NeedEntry) => {
     setPending(whyQuestion(e))
     setExpanded(true)
-    window.requestAnimationFrame(() => chatRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' }))
+    window.requestAnimationFrame(() => chatRef.current?.scrollIntoView({ block: 'end', behavior: 'smooth' }))
   }
   return (
-    <div style={{ minWidth: 0 }}>
-      <div className="flex flex-wrap items-start gap-3">
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <ConnectionLine mcp={props.mcp} state={state} withPoll />
-        </div>
-        <Btn onClick={props.onPoll} disabled={!!props.busy || !props.configured}>Poll now</Btn>
-      </div>
+    <div data-testid="board" style={{ minWidth: 0 }}>
+      <ConnectionLine
+        mcp={props.mcp}
+        state={state}
+        withPoll
+        action={
+          <Btn style={small} onClick={props.onPoll} disabled={!!props.busy || !props.configured}>Poll now</Btn>
+        }
+      />
 
-      <div ref={chatRef}>
+      {!props.configured && (
+        <Card className="mb-4">
+          <CardTitle>Finish setup</CardTitle>
+          <p className="text-sm text-muted">
+            Add at least one channel ID in Settings. Slack Radar reads Slack as you, so there is no bot to invite.
+          </p>
+        </Card>
+      )}
+
+      <TodayCard state={state} busy={props.busy} onDigest={props.onDigest} />
+
+      <NeedsCard needs={props.needs} handled={props.handled} onChanged={props.onChanged} onWhy={askWhy} />
+
+      {/* Last child of the Board: sticks to the bottom of the scrolling panel, so an
+          opened chat grows upward from there. */}
+      <div
+        ref={chatRef}
+        data-testid="chat-bar"
+        data-expanded={expanded ? 'true' : 'false'}
+        style={{ position: 'sticky', bottom: 0, zIndex: 5, marginTop: 8, borderRadius: 12, boxShadow: '0 -6px 18px rgba(0,0,0,.18)' }}
+      >
         <AskLead
           state={state}
           events={props.events}
@@ -892,25 +919,6 @@ function Board(props: {
           onChanged={props.onChanged}
         />
       </div>
-
-      {!props.configured && (
-        <Card className="mb-4">
-          <CardTitle>Finish setup</CardTitle>
-          <p className="text-sm text-muted">
-            Add at least one channel ID in Settings. Slack Radar reads Slack as you, so there is no bot to invite.
-          </p>
-        </Card>
-      )}
-
-      <NeedsCard
-        needs={props.needs}
-        today={state.crew.today}
-        handled={props.handled}
-        onChanged={props.onChanged}
-        onWhy={askWhy}
-      />
-
-      <DigestCard state={state} busy={props.busy} onDigest={props.onDigest} />
     </div>
   )
 }
@@ -1382,13 +1390,11 @@ function BatchPanel({
 
 function NeedsCard({
   needs,
-  today,
   handled,
   onChanged,
   onWhy,
 }: {
   needs: Needs | null
-  today?: Today | null
   handled: Item[]
   onChanged: () => void
   onWhy: (e: NeedEntry) => void
@@ -1490,12 +1496,6 @@ function NeedsCard({
             if (await fixer.dispatchBatch(keys)) setBatchOpen(false)
           }}
         />
-      )}
-      {today?.text && (
-        <p className="text-sm" style={{ margin: '0 0 8px' }} data-testid="crew-today">
-          {today.text}
-          {today.at > 0 && <span className="text-xs text-muted"> · {ago(today.at)}</span>}
-        </p>
       )}
       {sent && (
         <p role="status" className="text-sm" style={{ margin: '0 0 8px', color: 'var(--success, var(--text))' }}>
@@ -1866,29 +1866,56 @@ function LedgerTab(props: {
   )
 }
 
-// ── Board: today's digest ───────────────────────────────────────────────────
+// ── Board: Today (the Lead's line and the latest digest) ────────────────────
 
-function DigestCard({ state, busy, onDigest }: { state: State; busy: string; onDigest: () => void }) {
+const TOP_ITEMS = 5
+
+/** The digest's item lines (bullets), or its first lines when it has no bullets. */
+function digestTop(text: string): string[] {
+  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean)
+  const bullets = lines.filter((l) => /^[•\-–]\s/.test(l))
+  return (bullets.length ? bullets : lines).slice(0, TOP_ITEMS)
+}
+
+function TodayCard({ state, busy, onDigest }: { state: State; busy: string; onDigest: () => void }) {
   const d = state.digest
-  const today = new Date().toISOString().slice(0, 10)
-  const fresh = d.last_posted_date === today
+  const line = state.crew.today
+  const top = digestTop(d.last_text || '')
+  const where = state.settings.digest_destination === 'self_dm' ? 'DMed to you' : 'dashboard notification'
   return (
-    <Card className="mb-4">
+    <Card className="mb-4" data-testid="today-card">
       <div className="flex flex-wrap items-center gap-2">
-        <CardTitle>{fresh ? "Today's digest" : 'Latest digest'}</CardTitle>
-        {d.pending ? <Badge variant="aim">being delivered</Badge> : null}
-        <span className="text-xs text-muted">
-          {d.last_posted_date ? `${d.last_posted_date} · ${state.settings.digest_destination === 'self_dm' ? 'DMed to you' : 'dashboard notification'}` : 'none yet'}
-        </span>
+        <CardTitle>Today</CardTitle>
+        {d.pending ? <Badge variant="aim">digest being delivered</Badge> : null}
+        {d.last_posted_date && (
+          <span className="text-xs text-muted" data-testid="digest-time">
+            digest {d.last_posted_date} · {where}
+          </span>
+        )}
         <div className="flex-1" />
-        <Btn onClick={onDigest} disabled={!!busy || !state.crew.live}>Request digest</Btn>
+        <Btn style={small} onClick={onDigest} disabled={!!busy || !state.crew.live}>Digest now</Btn>
       </div>
+      {line?.text && (
+        <p style={{ margin: '8px 0 0', fontSize: 15, fontWeight: 600, color: 'var(--text-strong)' }} data-testid="crew-today">
+          {line.text}
+          {line.at > 0 && <span className="text-xs text-muted" style={{ fontWeight: 400 }}> · {ago(line.at)}</span>}
+        </p>
+      )}
       {d.last_text ? (
-        <pre className="whitespace-pre-wrap text-sm mt-2" style={{ fontFamily: 'inherit', margin: '8px 0 0' }}>
-          {d.last_text}
-        </pre>
+        <>
+          <ul className="text-sm flex flex-col gap-1" data-testid="digest-top" style={{ margin: '8px 0 0', padding: 0, listStyle: 'none' }}>
+            {top.map((l, i) => (
+              <li key={i}>{l}</li>
+            ))}
+          </ul>
+          <Details summary="Full digest">
+            <pre className="whitespace-pre-wrap text-sm" style={{ fontFamily: 'inherit', margin: 0 }}>
+              {d.last_text}
+            </pre>
+          </Details>
+        </>
       ) : (
-        <p className="text-sm text-muted mt-2">The Radar Lead writes one after the daily cron or when you press Request digest.</p>
+        <p className="text-sm text-muted" style={{ margin: '8px 0 0' }} data-testid="digest-empty">No digest yet</p>
       )}
       {d.last_error && <p className="text-xs mt-1" style={{ color: 'var(--danger)' }}>{d.last_error}</p>}
     </Card>
@@ -2034,7 +2061,7 @@ function AskLead(props: {
 
   if (!expanded) {
     return (
-      <Card className="mb-4" style={{ padding: '10px 14px' }}>
+      <Card style={{ padding: '10px 14px' }}>
         <form
           className="flex flex-wrap items-center gap-2"
           onSubmit={(e) => {
@@ -2065,8 +2092,7 @@ function AskLead(props: {
   const crewEvents = props.events.filter((e) => e.kind === 'crew' || e.kind === 'digest').slice(0, 5)
   return (
     <Card
-      className="mb-4"
-      style={{ padding: 0, display: 'flex', flexDirection: 'column', height: 'min(620px, calc(100vh - 180px))', overflow: 'hidden' }}
+      style={{ padding: 0, display: 'flex', flexDirection: 'column', height: 'min(620px, calc(100vh - 240px))', overflow: 'hidden' }}
     >
       <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--border)' }}>
         <div className="flex items-center gap-2">

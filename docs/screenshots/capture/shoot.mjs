@@ -218,6 +218,92 @@ try {
     else console.log('check reply: ok', JSON.stringify(buttons), JSON.stringify(sends))
     await ctx.close()
   }
+  // DOM check: the Board reads Now strip, Today card, Needs you, chat bar, top to
+  // bottom. The chat bar is the Board's last child and sticks to the bottom of the
+  // panel, collapsed and opened; Collapse folds it back to one line. The Today card
+  // holds the Lead's line, the digest's top items, its date and Digest now.
+  {
+    const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, timezoneId: 'UTC', locale: 'en-US' })
+    const page = await ctx.newPage()
+    page.on('pageerror', (e) => errors.push(`[order] ${e.message}`))
+    await page.goto('http://127.0.0.1:5287/index.html?source=ok')
+    await page.getByText('Needs you', { exact: true }).first().waitFor({ timeout: 30000 })
+    const order = () => page.evaluate(() => {
+      const board = document.querySelector('[data-testid="board"]')
+      const needs = [...document.querySelectorAll('div')].find((d) => d.className.includes('rounded')
+        && [...d.querySelectorAll('*')].some((e) => e.textContent === 'Needs you' && e.children.length === 0))
+      const els = [
+        document.querySelector('[data-testid="now-strip"]'),
+        document.querySelector('[data-testid="connection-line"]'),
+        document.querySelector('[data-testid="today-card"]'),
+        needs,
+        document.querySelector('[data-testid="chat-bar"]'),
+      ]
+      const inOrder = els.every(Boolean) && els.every((e, i) => i === 0
+        || !!(els[i - 1].compareDocumentPosition(e) & Node.DOCUMENT_POSITION_FOLLOWING))
+      const bar = els[4]
+      return {
+        inOrder,
+        last: !!board && board.lastElementChild === bar,
+        sticky: !!bar && getComputedStyle(bar).position === 'sticky' && getComputedStyle(bar).bottom === '0px',
+        expanded: bar?.dataset.expanded,
+      }
+    })
+    const closed = await order()
+    const card = page.getByTestId('today-card')
+    const title = (await card.getByText('Today', { exact: true }).count()) === 1 ? 'Today' : ''
+    const heading = await card.getByTestId('crew-today').textContent()
+    const top = await card.getByTestId('digest-top').locator('li').allTextContents()
+    const time = await card.getByTestId('digest-time').textContent()
+    const digestBtn = await card.getByRole('button', { name: 'Digest now' }).count()
+    const cardOk = title === 'Today' && heading.startsWith('Two p1 bugs need an owner') && top.length === 2
+      && top[0].startsWith('• [p1/bug-report] CSV export') && time.includes('2025-09-23') && digestBtn === 1
+      && (await page.getByRole('button', { name: 'Request digest' }).count()) === 0
+    const bar = page.getByTestId('chat-bar')
+    const barBox = await bar.boundingBox()
+    // Pinned: just above the bottom edge of the panel that scrolls, not at the end of the content.
+    const gap = await bar.evaluate((el) => {
+      let sc = el.parentElement
+      while (sc && !/(auto|scroll)/.test(getComputedStyle(sc).overflowY)) sc = sc.parentElement
+      const r = el.getBoundingClientRect()
+      // A sticky box keeps clear of the panel's own bottom padding, then its `bottom` inset.
+      const want = parseFloat(getComputedStyle(sc || el).paddingBottom) + parseFloat(getComputedStyle(el).bottom)
+      return sc ? { gap: Math.round(sc.getBoundingClientRect().bottom - r.bottom), want, more: sc.scrollHeight > sc.clientHeight } : null
+    })
+    const pinned = !!gap && gap.more && Math.abs(gap.gap - gap.want) <= 1
+    const leadDot = await bar.getByRole('textbox', { name: 'Ask the lead' }).count()
+    await page.getByRole('button', { name: 'What needs me today?' }).first().click()
+    await bar.getByRole('button', { name: 'Collapse' }).waitFor({ timeout: 5000 })
+    const opened = await order()
+    const openBox = await bar.boundingBox()
+    const grewUp = !!openBox && !!barBox && openBox.y < barBox.y && Math.abs(openBox.y + openBox.height - (barBox.y + barBox.height)) <= 2
+    await bar.getByRole('button', { name: 'Collapse' }).click()
+    await bar.getByRole('textbox', { name: 'Ask the lead' }).waitFor({ timeout: 5000 })
+    const folded = await order()
+    const ok = closed.inOrder && closed.last && closed.sticky && closed.expanded === 'false' && cardOk && pinned && leadDot === 1
+      && opened.inOrder && opened.last && opened.sticky && opened.expanded === 'true' && grewUp
+      && folded.expanded === 'false'
+    if (!ok) errors.push(`[order] closed ${JSON.stringify(closed)} card ${cardOk} ${title} | ${heading} | ${JSON.stringify(top)} | ${time} btn ${digestBtn} pinned ${pinned} ${JSON.stringify(gap)} opened ${JSON.stringify(opened)} ${JSON.stringify(openBox)} grewUp ${grewUp} folded ${JSON.stringify(folded)}`)
+    else console.log('check order: ok', JSON.stringify(closed), JSON.stringify(top), time)
+    await ctx.close()
+  }
+  // DOM check: with no digest the Today card is one line, "No digest yet", plus the button.
+  {
+    const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, timezoneId: 'UTC', locale: 'en-US' })
+    const page = await ctx.newPage()
+    page.on('pageerror', (e) => errors.push(`[digest empty] ${e.message}`))
+    await page.goto('http://127.0.0.1:5287/index.html?source=ok&today=empty&digest=empty')
+    const card = page.getByTestId('today-card')
+    await card.waitFor({ timeout: 30000 })
+    const empty = await card.getByTestId('digest-empty').allTextContents()
+    const ok = JSON.stringify(empty) === JSON.stringify(['No digest yet'])
+      && (await card.getByRole('button', { name: 'Digest now' }).count()) === 1
+      && (await card.getByTestId('digest-top').count()) === 0 && (await card.getByTestId('digest-time').count()) === 0
+      && (await card.getByTestId('crew-today').count()) === 0
+    if (!ok) errors.push(`[digest empty] ${JSON.stringify(empty)}`)
+    else console.log('check digest empty: ok')
+    await ctx.close()
+  }
   // DOM check: the Board carries no ledger (no list, filter, Investigate or ledger card
   // title; "Ledger" is only the tab). Needs-you rows are priority, then newest first;
   // each group shows 5 rows and "Show N more" reveals the rest.
