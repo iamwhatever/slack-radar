@@ -163,8 +163,29 @@ def fix_pr(item: dict[str, Any]) -> str:
     return str(h.get("pr_url") or "") if isinstance(h, dict) and dispatch_of(item) else ""
 
 
+def fix_pr_urls(item: dict[str, Any], fix_live: dict[str, dict[str, Any]] | None = None) -> list[str]:
+    """Batch PRs not matched to one fix (``fix_handoff.pr_urls`` plus any just found)."""
+    h = item.get("fix_handoff")
+    if not isinstance(h, dict) or not dispatch_of(item):
+        return []
+    live = ((fix_live or {}).get(item.get("key") or "") or {}).get("pr_urls") or []
+    out: list[str] = []
+    for u in [*(h.get("pr_urls") or []), *live]:
+        if isinstance(u, str) and u and u not in out:
+            out.append(u)
+    return out
+
+
+def has_fix_pr(item: dict[str, Any], fix_live: dict[str, dict[str, Any]] | None = None) -> bool:
+    """A dispatched fix whose PR is known: its own, or a batch PR not matched to one fix."""
+    if not dispatch_of(item):
+        return False
+    live = ((fix_live or {}).get(item.get("key") or "") or {}).get("pr_url")
+    return bool(fix_pr(item) or live or fix_pr_urls(item, fix_live))
+
+
 def fix_view(item: dict[str, Any], fix_live: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
-    """``{session_key, title, agent, at, state, pr_url, pr_number}`` for a dispatched item.
+    """``{session_key, title, agent, at, state, pr_url, pr_number, batch, batch_keys, pr_urls}``.
 
     ``state`` comes from ``fix_live`` (the route reads the session's slot):
     running / idle / closed, or ``unknown`` when nobody asked the gateway.
@@ -182,7 +203,31 @@ def fix_view(item: dict[str, Any], fix_live: dict[str, dict[str, Any]] | None = 
         "state": str(live),
         "pr_url": pr,
         "pr_number": pr_number(pr),
+        "batch": bool(d.get("batch")),
+        "batch_keys": [str(k) for k in d.get("batch_keys") or []] if d.get("batch") else [],
+        "pr_urls": fix_pr_urls(item, fix_live),
     }
+
+
+def fix_batches(fixes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The "Fixes in flight" headers: one per batch session, from ``fix_entry`` rows.
+
+    ``prs_found`` counts distinct PRs across the members; ``total`` is the member count.
+    """
+    groups: dict[str, dict[str, Any]] = {}
+    for f in fixes:
+        d = f["dispatch"]
+        if not d.get("batch"):
+            continue
+        g = groups.setdefault(d["session_key"], {
+            "session_key": d["session_key"], "title": d["title"], "state": d["state"], "at": d["at"],
+            "repo": f.get("repo") or "", "keys": [], "prs": [],
+        })
+        g["keys"].append(f["key"])
+        for u in [d.get("pr_url") or "", *(d.get("pr_urls") or [])]:
+            if u and u not in g["prs"]:
+                g["prs"].append(u)
+    return [{**g, "total": len(g["keys"]), "prs_found": len(g["prs"])} for g in groups.values()]
 
 
 def fix_entry(item: dict[str, Any], fix_live: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
@@ -322,7 +367,7 @@ def build_needs(
     decide: list[tuple[dict[str, Any], str]] = []
     unanswered: list[dict[str, Any]] = []
     for it in pool:
-        if fix_pr(it) or (dispatch_of(it) and ((fix_live or {}).get(it.get("key") or "") or {}).get("pr_url")):
+        if has_fix_pr(it, fix_live):
             continue
         why = decide_reason(it, spawn_done)
         if why:
@@ -349,14 +394,17 @@ def build_needs(
     )
     fixes = sorted(
         (it for it in (ledger.get("items") or {}).values() if isinstance(it, dict) and dispatch_of(it)),
-        key=lambda it: -float((dispatch_of(it) or {}).get("at") or 0),
+        # Batch members share one ``at``; the session key keeps them adjacent.
+        key=lambda it: (-float((dispatch_of(it) or {}).get("at") or 0), str((dispatch_of(it) or {}).get("session_key"))),
     )
     replied, replied_total = replied_rows(ledger)
+    fix_rows = [fix_entry(it, fix_live) for it in fixes[:FIXES_CAP]]
     return {
         "replied": replied,
         "replied_total": replied_total,
         "groups": [{"id": gid, "total": len(rows), "entries": rows[:cap]} for gid, rows in groups],
-        "fixes": [fix_entry(it, fix_live) for it in fixes[:FIXES_CAP]],
+        "fixes": fix_rows,
+        "fix_batches": fix_batches(fix_rows),
         "fixes_total": len(fixes),
         "handled_total": handled,
         "handoffs": [handoff_entry(it) for it in handoffs[:HANDOFF_CAP]],

@@ -62,6 +62,22 @@ type FixDispatch = {
   state: 'running' | 'idle' | 'closed' | 'unknown'
   pr_url: string
   pr_number: number
+  // A batch dispatch: one conductor session for several hand-offs.
+  batch?: boolean
+  batch_keys?: string[]
+  pr_urls?: string[]
+}
+// One "Fixes in flight" header per batch session (needs.py `fix_batches`).
+type FixBatch = {
+  session_key: string
+  title: string
+  state: FixDispatch['state']
+  at: number
+  repo: string
+  keys: string[]
+  prs: string[]
+  total: number
+  prs_found: number
 }
 type FixRow = {
   key: string
@@ -81,6 +97,7 @@ type Needs = {
   handoffs_total?: number
   fixes?: FixRow[]
   fixes_total?: number
+  fix_batches?: FixBatch[]
   replied?: RepliedRow[]
   replied_total?: number
 }
@@ -1209,14 +1226,16 @@ function errorBody(err: unknown): { code?: string; error?: string; session_key?:
 // SDK launcher sends it in a new conductor chat; with no launcher, a copy dialog.
 function useDispatchFix(onChanged: () => void): {
   dispatch: (key: string) => void
+  dispatchBatch: (keys: string[]) => Promise<boolean>
   busyKey: string
   ui: ReactNode
 } {
   const api = useAppApi()
   const launcher = useLauncher()
   const [busyKey, setBusyKey] = useState('')
-  const [toast, setToast] = useState<{ session_key: string; title: string; again?: boolean } | null>(null)
+  const [toast, setToast] = useState<{ session_key: string; title: string; again?: boolean; batch?: boolean } | null>(null)
   const [failed, setFailed] = useState<{ key: string; why: string } | null>(null)
+  const [batchFailed, setBatchFailed] = useState<{ keys: string[]; why: string } | null>(null)
   const [shown, setShown] = useState<{ title: string; seed: string } | null>(null)
   const [copied, setCopied] = useState(false)
   const dispatch = async (key: string) => {
@@ -1240,6 +1259,33 @@ function useDispatchFix(onChanged: () => void): {
       setBusyKey('')
     }
   }
+  // Batch: the reviewed list is the owner's consent for all of it. ONE conductor
+  // session gets every checked hand-off. True when it went out.
+  const dispatchBatch = async (keys: string[]): Promise<boolean> => {
+    if (busyKey || keys.length === 0) return false
+    setBusyKey('batch')
+    setBatchFailed(null)
+    try {
+      const r = await api.post<DispatchReply>(`${BASE}/items/handoff/dispatch-batch`, { keys })
+      if (r.mode === 'server') setToast({ session_key: r.session_key, title: r.title, batch: true })
+      else if (launcher) launcher.openChat({ agent: r.agent, message: r.seed, autoSend: true })
+      else {
+        setCopied(false)
+        setShown({ title: r.title, seed: r.seed })
+      }
+      onChanged()
+      return true
+    } catch (err) {
+      const b = errorBody(err) as { error?: string; dispatched?: { key: string }[] }
+      const why = b.dispatched?.length
+        ? `${b.dispatched.length} of them already have a session`
+        : b.error || 'the gateway refused it'
+      setBatchFailed({ keys, why })
+      return false
+    } finally {
+      setBusyKey('')
+    }
+  }
   const copy = async () => {
     if (!shown) return
     try {
@@ -1254,6 +1300,12 @@ function useDispatchFix(onChanged: () => void): {
       {failed && (
         <ErrorNotice message={`Could not dispatch that fix: ${failed.why}. Nothing was sent.`} onRetry={() => dispatch(failed.key)} />
       )}
+      {batchFailed && (
+        <ErrorNotice
+          message={`Could not dispatch those fixes: ${batchFailed.why}. Nothing was sent.`}
+          onRetry={() => dispatchBatch(batchFailed.keys)}
+        />
+      )}
       {toast && (
         <div
           role="status"
@@ -1262,7 +1314,7 @@ function useDispatchFix(onChanged: () => void): {
           style={{ position: 'fixed', right: 16, bottom: 16, zIndex: 40, background: 'var(--card)', border: '1px solid var(--border-strong)', borderRadius: 8, padding: '8px 12px', maxWidth: 480 }}
         >
           <span style={{ flex: 1, minWidth: 0 }}>
-            {toast.again ? 'Already dispatched: ' : 'Fix dispatched to a conductor: '}
+            {toast.again ? 'Already dispatched: ' : toast.batch ? 'Fixes dispatched to one conductor: ' : 'Fix dispatched to a conductor: '}
             <SessionLink d={toast} />
           </span>
           <Btn style={small} onClick={() => setToast(null)}>Close</Btn>
@@ -1298,7 +1350,66 @@ function useDispatchFix(onChanged: () => void): {
       )}
     </>
   )
-  return { dispatch, busyKey, ui }
+  return { dispatch, dispatchBatch, busyKey, ui }
+}
+
+// Batch review panel (inline, not a modal): every undispatched hand-off, all checked.
+// Unchecking drops one. The primary button sends the checked ones to ONE conductor.
+function BatchPanel({
+  rows,
+  busy,
+  onSend,
+  onCancel,
+}: {
+  rows: { key: string; title: string; repo: string; prompt: string }[]
+  busy: boolean
+  onSend: (keys: string[]) => void
+  onCancel: () => void
+}) {
+  const [picked, setPicked] = useState<Set<string>>(() => new Set(rows.map((r) => r.key)))
+  const chosen = rows.filter((r) => picked.has(r.key))
+  const repos = new Set(chosen.map((r) => r.repo.toLowerCase()))
+  const mixed = repos.size > 1
+  const toggle = (key: string) =>
+    setPicked((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  return (
+    <section
+      aria-label="Dispatch fixes together"
+      data-testid="batch-panel"
+      style={{ margin: '8px 0', padding: 10, border: '1px solid var(--border-strong)', borderRadius: 8 }}
+    >
+      <p className="text-xs text-muted" style={{ margin: '0 0 6px' }}>
+        One conductor gets every checked fix and splits the work. Uncheck any you want to leave out.
+      </p>
+      <ul className="flex flex-col" style={{ margin: 0, padding: 0, listStyle: 'none' }}>
+        {rows.map((r, i) => (
+          <li key={r.key} style={{ padding: '6px 0', borderTop: i === 0 ? 0 : '1px solid var(--border)' }}>
+            <label className="text-sm flex gap-2" style={{ alignItems: 'flex-start', cursor: 'pointer' }}>
+              <input type="checkbox" checked={picked.has(r.key)} onChange={() => toggle(r.key)} style={{ marginTop: 3 }} />
+              <span style={{ flex: 1, minWidth: 0 }}>
+                {r.title} <span className="text-xs text-muted font-mono">{r.repo}</span>
+                <span className="text-xs text-muted" style={{ display: 'block' }}>
+                  {r.prompt.length > 120 ? `${r.prompt.slice(0, 120)}…` : r.prompt}
+                </span>
+              </span>
+            </label>
+          </li>
+        ))}
+      </ul>
+      <div className="flex items-center gap-2" style={{ marginTop: 8 }}>
+        <Btn primary style={small} disabled={busy || chosen.length === 0 || mixed} onClick={() => onSend(chosen.map((r) => r.key))}>
+          {busy ? 'Dispatching…' : `Dispatch ${chosen.length} to one conductor`}
+        </Btn>
+        <Btn style={small} onClick={onCancel} disabled={busy}>Cancel</Btn>
+        {mixed && <span className="text-xs text-muted" role="status">one repo per batch</span>}
+      </div>
+    </section>
+  )
 }
 
 function NeedsCard({
@@ -1317,6 +1428,17 @@ function NeedsCard({
   const api = useAppApi()
   const fixer = useDispatchFix(onChanged)
   const fixes = needs?.fixes || []
+  const batches = needs?.fix_batches || []
+  const batchOf = new Map(batches.map((b) => [b.session_key, b]))
+  // Hand-offs the owner can send together: undispatched rows in "decide".
+  const prompts = new Map((needs?.handoffs || []).map((h) => [h.key, h.handoff]))
+  const batchable = ((needs?.groups || []).find((g) => g.id === 'decide')?.entries || [])
+    .filter((e) => e.handoff_title && !e.dispatch && prompts.has(e.key))
+    .map((e) => {
+      const h = prompts.get(e.key)!
+      return { key: e.key, title: e.handoff_title || h.title, repo: h.repo || '', prompt: h.prompt || '' }
+    })
+  const [batchOpen, setBatchOpen] = useState(false)
   const [sendFailed, setSendFailed] = useState<{ key: string; text: string; edited: boolean; why: string } | null>(null)
   const [sent, setSent] = useState('')
   useEffect(() => {
@@ -1382,7 +1504,25 @@ function NeedsCard({
   const verb = failed?.how === 'reopen' ? 'reopen' : failed?.how === 'ignored' ? 'ignore' : 'mark as done'
   return (
     <Card className="mb-4">
-      <CardTitle>Needs you</CardTitle>
+      <div className="flex items-center gap-2">
+        <CardTitle>Needs you</CardTitle>
+        <div className="flex-1" />
+        {batchable.length >= 2 && !batchOpen && (
+          <Btn style={small} onClick={() => setBatchOpen(true)} disabled={!!fixer.busyKey}>
+            Dispatch all fixes ({batchable.length})
+          </Btn>
+        )}
+      </div>
+      {batchOpen && batchable.length > 0 && (
+        <BatchPanel
+          rows={batchable}
+          busy={fixer.busyKey === 'batch'}
+          onCancel={() => setBatchOpen(false)}
+          onSend={async (keys) => {
+            if (await fixer.dispatchBatch(keys)) setBatchOpen(false)
+          }}
+        />
+      )}
       {today?.text && (
         <p className="text-sm" style={{ margin: '0 0 8px' }} data-testid="crew-today">
           {today.text}
@@ -1452,32 +1592,53 @@ function NeedsCard({
             Fixes in flight ({needs?.fixes_total ?? fixes.length})
           </summary>
           <ul className="flex flex-col" style={{ marginTop: 4 }}>
-            {fixes.map((f, i) => (
-              <li
-                key={f.key}
-                className="text-sm flex items-center gap-2"
-                style={{ padding: '6px 0', borderTop: i === 0 ? 0 : '1px solid var(--border)' }}
-              >
-                <span style={{ flex: 1, minWidth: 0 }}>
-                  <SessionLink d={f.dispatch} />
-                  <span className="text-xs text-muted">
-                    {' · '}
-                    {FIX_STATE[f.dispatch.state] || f.dispatch.state || 'sent'}
-                    {' · '}
-                    <span className="font-mono">{f.repo}</span> · {ago(f.dispatch.at)}
-                  </span>
-                  {f.dispatch.pr_url && (
-                    <>
-                      {' · '}
-                      <a className="underline" href={f.dispatch.pr_url} target="_blank" rel="noreferrer noopener">
-                        PR #{f.dispatch.pr_number}
-                      </a>
-                    </>
+            {fixes.map((f, i) => {
+              const b = f.dispatch.batch ? batchOf.get(f.dispatch.session_key) : undefined
+              const head = b && b.keys[0] === f.key
+              const line = { padding: '6px 0', borderTop: i === 0 ? 0 : '1px solid var(--border)' }
+              const pr = f.dispatch.pr_url && (
+                <>
+                  {' · '}
+                  <a className="underline" href={f.dispatch.pr_url} target="_blank" rel="noreferrer noopener">
+                    PR #{f.dispatch.pr_number}
+                  </a>
+                </>
+              )
+              return (
+                <li key={f.key} className="text-sm" style={b ? { ...line, ...(head ? {} : { borderTop: 0, paddingTop: 0 }) } : line}>
+                  {head && b && (
+                    <div data-testid="fix-batch-header" style={{ marginBottom: 4 }}>
+                      <SessionLink d={b} />
+                      <span className="text-xs text-muted">
+                        {' · '}
+                        {FIX_STATE[b.state] || b.state || 'sent'}
+                        {' · '}
+                        <span className="font-mono">{b.repo}</span> · {b.prs_found} PRs found / {b.total} · {ago(b.at)}
+                      </span>
+                    </div>
                   )}
-                </span>
-                <Btn style={small} onClick={() => dismiss(f.key)}>Dismiss</Btn>
-              </li>
-            ))}
+                  <div className="flex items-center gap-2" style={b ? { paddingLeft: 16 } : undefined}>
+                    <span style={{ flex: 1, minWidth: 0 }}>
+                      {b ? (
+                        f.handoff_title
+                      ) : (
+                        <>
+                          <SessionLink d={f.dispatch} />
+                          <span className="text-xs text-muted">
+                            {' · '}
+                            {FIX_STATE[f.dispatch.state] || f.dispatch.state || 'sent'}
+                            {' · '}
+                            <span className="font-mono">{f.repo}</span> · {ago(f.dispatch.at)}
+                          </span>
+                        </>
+                      )}
+                      {pr}
+                    </span>
+                    <Btn style={small} onClick={() => dismiss(f.key)}>Dismiss</Btn>
+                  </div>
+                </li>
+              )
+            })}
           </ul>
         </details>
       )}

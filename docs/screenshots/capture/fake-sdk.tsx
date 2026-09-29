@@ -82,6 +82,18 @@ const HANDOFF = {
   at: T0 + 6000,
 }
 
+// A second undispatched hand-off, so "Dispatch all fixes (2)" shows in the header.
+const HANDOFF2 = {
+  title: 'Speed up tag-filtered search',
+  prompt: `Repo example-org/example-app. Slack Radar item ${ITEMS[4].key}.\n` +
+    'Coverage verdict: NONE, no issue or PR covers slow tag filters.\n' +
+    'Change: add an index on tags(item_id, tag) and use it in the filter query. Verify: filter 100k items under 1s.\n' +
+    'Do not merge; open a PR for review.',
+  repo: 'example-org/example-app',
+  links: [] as string[],
+  at: T0 + 5800,
+}
+
 const REPLY_ITEM = item(4, 'C0DEMO2', 'hana', 'Does the CSV export keep my column filters?', {
   category: 'question', priority: 'p3', summary: 'Does CSV export keep column filters?', reply_count: 0,
 })
@@ -95,9 +107,20 @@ const IN_PROGRESS = dispatched(ITEMS[3], 'Roll back the dashboard bundle split',
 const WITH_PR = dispatched(ITEMS[1], 'Add dark mode to the reports view', {
   at: T0 + 3000, state: 'idle', pr_url: 'https://github.com/example-org/example-app/pull/418', pr_number: 418,
 })
-const fixRow = (it: (typeof ITEMS)[number], d: typeof IN_PROGRESS) => ({
+const fixRow = (it: (typeof ITEMS)[number], d: typeof IN_PROGRESS, title = d.title.slice(5)) => ({
   key: it.key, channel: it.channel, permalink: it.permalink, summary: it.summary, status: it.status,
-  handled_how: '', handoff_title: d.title.slice(5), repo: 'example-org/example-app', dispatch: d,
+  handled_how: '', handoff_title: title, repo: 'example-org/example-app', dispatch: d,
+})
+// A batch sent earlier: one conductor, two fixes, one PR found so far.
+const BATCH_ITEMS = [
+  item(2, 'C0DEMO1', 'ivan', 'Date picker shows the wrong week start', { summary: 'Week starts on Sunday for EU users' }),
+  item(1, 'C0DEMO1', 'judy', 'Tooltip covers the save button', { summary: 'Tooltip hides the save button' }),
+]
+const BATCH_TITLE = 'Fix batch: 2 problems (example-org/example-app)'
+const batchD = (pr: number) => ({
+  session_key: 'chat-77-1', title: BATCH_TITLE, agent: 'kirocrew-conductor', at: T0 + 2000, state: 'running',
+  pr_url: pr ? `https://github.com/example-org/example-app/pull/${pr}` : '', pr_number: pr,
+  batch: true, batch_keys: BATCH_ITEMS.map((it) => it.key), pr_urls: [] as string[],
 })
 
 const NEEDS = {
@@ -109,16 +132,29 @@ const NEEDS = {
     text: 'Settings → API keys → Rotate. The old key keeps working for 24 hours.',
     at: T0 + 3000, permalink: `https://example.slack.com/archives/C0DEMO1/p${T0 + 3000}000200`,
   }],
-  fixes_total: 2,
-  fixes: [fixRow(ITEMS[3], IN_PROGRESS), fixRow(ITEMS[1], WITH_PR)],
-  handoffs_total: 1,
+  fixes_total: 4,
+  fixes: [
+    fixRow(ITEMS[3], IN_PROGRESS), fixRow(ITEMS[1], WITH_PR),
+    fixRow(BATCH_ITEMS[0], batchD(421), 'Start the week on Monday for EU locales'),
+    fixRow(BATCH_ITEMS[1], batchD(0), 'Move the save tooltip off the button'),
+  ],
+  fix_batches: [{
+    session_key: 'chat-77-1', title: BATCH_TITLE, state: 'running', at: T0 + 2000, repo: 'example-org/example-app',
+    keys: BATCH_ITEMS.map((it) => it.key), prs: ['https://github.com/example-org/example-app/pull/421'],
+    total: 2, prs_found: 1,
+  }],
+  handoffs_total: 2,
   handoffs: [{
     key: ITEMS[0].key, channel: ITEMS[0].channel, permalink: ITEMS[0].permalink,
     summary: ITEMS[0].summary, status: ITEMS[0].status, handled_how: '', handoff: HANDOFF,
+  }, {
+    key: ITEMS[4].key, channel: ITEMS[4].channel, permalink: ITEMS[4].permalink,
+    summary: ITEMS[4].text, status: ITEMS[4].status, handled_how: '', handoff: HANDOFF2,
   }],
   groups: [
-    { id: 'decide', total: 4, entries: [
+    { id: 'decide', total: 5, entries: [
       need(ITEMS[0], 'Fix ready to hand off', { handoff_title: HANDOFF.title }),
+      need(ITEMS[4], 'Fix ready to hand off', { handoff_title: HANDOFF2.title }),
       need(REPLY_ITEM, 'Reply ready to send', { reply_draft: REPLY_DRAFT }),
       need(ITEMS[3], `Fix in progress · ${IN_PROGRESS.title}`, { handoff_title: IN_PROGRESS.title.slice(5), dispatch: IN_PROGRESS }),
       need(ITEMS[2], 'Looks resolved: reply says “thanks”'),
@@ -238,6 +274,11 @@ const api = {
   post: async (path: string, body?: unknown) => {
     const w = window as unknown as { __posts?: unknown[] }
     w.__posts = [...(w.__posts || []), { path, body }]
+    if (path.endsWith('/items/handoff/dispatch-batch')) {
+      const keys = (body as { keys?: string[] })?.keys || []
+      return { ok: true, mode: 'server', session_key: 'chat-88-1', title: `Fix batch: ${keys.length} problems (example-org/example-app)`,
+        agent: 'kirocrew-conductor', at: T0 + 7000, batch: true, batch_keys: keys }
+    }
     if (path.endsWith('/items/handoff/dispatch')) {
       return { ok: true, mode: 'server', session_key: 'chat-99-1', title: `Fix: ${HANDOFF.title}`, agent: 'kirocrew-conductor', at: T0 + 7000 }
     }

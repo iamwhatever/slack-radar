@@ -737,6 +737,10 @@ def apply_handoff_dismiss(ledger: dict[str, Any], key: str) -> dict[str, Any] | 
 
 #: What the owner's Dispatch fix stores on ``fix_handoff.dispatch``.
 DISPATCH_FIELDS = ("session_key", "title", "agent", "at")
+#: Added on every member of a batch dispatch (one conductor for many hand-offs).
+BATCH_FIELDS = ("batch", "batch_keys")
+#: PRs one hand-off may carry in ``pr_urls`` (a batch's PRs it could not be matched to).
+MAX_PR_URLS = 20
 
 
 def apply_dispatch(ledger: dict[str, Any], key: str, dispatch: dict[str, Any]) -> dict[str, Any] | None:
@@ -744,8 +748,13 @@ def apply_dispatch(ledger: dict[str, Any], key: str, dispatch: dict[str, Any]) -
     item = (ledger.get("items") or {}).get(key)
     if item is None or not isinstance(item.get("fix_handoff"), dict):
         return None
-    item["fix_handoff"]["dispatch"] = {k: dispatch.get(k) for k in DISPATCH_FIELDS}
+    record = {k: dispatch.get(k) for k in DISPATCH_FIELDS}
+    if dispatch.get("batch"):
+        record["batch"] = True
+        record["batch_keys"] = [str(k) for k in dispatch.get("batch_keys") or []]
+    item["fix_handoff"]["dispatch"] = record
     item["fix_handoff"]["pr_url"] = ""
+    item["fix_handoff"]["pr_urls"] = []
     return item
 
 
@@ -757,6 +766,21 @@ def apply_fix_pr(ledger: dict[str, Any], key: str, url: str) -> bool:
         return False
     h["pr_url"] = url
     return True
+
+
+def apply_fix_pr_urls(ledger: dict[str, Any], key: str, urls: list[str]) -> list[str]:
+    """Add batch PRs that could not be matched to one fix. Returns the ones that were new."""
+    item = (ledger.get("items") or {}).get(key)
+    h = item.get("fix_handoff") if isinstance(item, dict) else None
+    if not isinstance(h, dict) or not h.get("dispatch"):
+        return []
+    have = [u for u in h.get("pr_urls") or [] if isinstance(u, str)]
+    new: list[str] = []
+    for u in urls:
+        if isinstance(u, str) and _URL_RE.match(u) and u not in have and u not in new and u != h.get("pr_url"):
+            new.append(u)
+    h["pr_urls"] = (have + new)[:MAX_PR_URLS]
+    return [u for u in new if u in h["pr_urls"]]
 
 
 def swap_seen_runs(data_dir: Path, current: dict[str, dict[str, str]]) -> dict[str, dict[str, str]]:
@@ -866,6 +890,7 @@ def apply_crew_record(ledger: dict[str, Any], payload: dict[str, Any]) -> dict[s
                 if prev.get("dispatch"):
                     # A rewrite keeps the owner's dispatch and the PR it produced.
                     handoff["dispatch"], handoff["pr_url"] = prev["dispatch"], str(prev.get("pr_url") or "")
+                    handoff["pr_urls"] = [u for u in prev.get("pr_urls") or [] if isinstance(u, str)]
                 item["fix_handoff"] = handoff
         if problems:
             refused.append({"key": key, "why": "; ".join(problems)})
