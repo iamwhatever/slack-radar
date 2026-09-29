@@ -164,6 +164,8 @@ The page has four tabs. The header shows the tabs, a **Crew** switch (start or p
 | Activity | The work log: polls that moved something, login lost or restored, crew notes, digests, settings changes, crew session moves |
 | Settings | **Basics** first: Slack connection check, watched channels, digest destination (plus your Slack login for a DM), poll interval. **Advanced** (folded): Slack MCP command, workspace URL, backfill, and the crew agent, model and the *Unattended mode (auto-approve investigator commands)* switch |
 
+On the Board, a one-line **Now** strip under the header shows each member and what it is doing (a pulsing dot while it works, e.g. *Investigator 1 running: re-checking 9 items*); it refreshes every 5 seconds while anyone works, the Team tab shows the same status, the open chat shows *Investigator running · <task> · 3m* until the result arrives, and a click on the Investigator or Watcher opens their Activity lines.
+
 A digest arrives every weekday at 16:00 UTC from the `daily-digest` cron, which
 is on by default. To get one now, press **Request digest** on the Board. To stop
 the daily one, pause the cron in the Schedule view.
@@ -442,6 +444,8 @@ kirocrew app enable slack-radar
 | Team（团队） | 小组成员：雷达组长（*Resident*，常驻）、调查员（*Joins on demand*，按需加入）、线程观察员（*Joins on demand*，按需加入）和轮询器（代码，不用模型），各带实时状态。agent id 收在 **Details** 折叠里 |
 | Activity（动态） | 工作日志：有变化的轮询、登录失效与恢复、小组备注、摘要、设置变更、小组会话迁移 |
 | Settings（设置） | 先是 **Basics**：Slack 连接检查、监听的频道、摘要去向（选私信时还有 Slack 登录名）、轮询间隔。**Advanced**（默认折叠）：Slack MCP 命令、工作区地址、回溯时长，以及小组的 agent、模型和 *Unattended mode (auto-approve investigator commands)* 开关 |
+
+看板页头下有一行 **Now**，显示每个成员此刻在做什么（工作时圆点会闪，例如 *Investigator 1 running: re-checking 9 items*）；有人在工作时每 5 秒刷新一次，Team 标签页显示同样的状态，展开的聊天在结果回来之前显示 *Investigator running · <任务> · 3m*，点调查员或线程观察员会打开他们的 Activity 记录。
 
 `daily-digest` 定时任务默认开启，每个工作日 UTC 16:00 送来一份摘要。想马上要一份，点看板上的
 **Request digest**；不想要每日摘要，就在 Schedule 页面暂停这个任务。

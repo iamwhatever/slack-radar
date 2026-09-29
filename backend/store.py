@@ -843,7 +843,11 @@ def apply_crew_record(ledger: dict[str, Any], payload: dict[str, Any]) -> dict[s
         if "note" in row:
             item["note"] = clip(row["note"], MAX_NOTE)
         if "investigation" in row:
-            item["investigation"] = clip(row["investigation"], 200)
+            text = clip(row["investigation"], 200)
+            if text != item.get("investigation"):
+                # a new spawn line starts now; /now reads this as the run's start
+                item["investigation_at"] = now()
+            item["investigation"] = text
         if "links" in row:
             links = [str(u) for u in (row["links"] or []) if isinstance(u, str) and _URL_RE.match(u)]
             item["links"] = links[:MAX_LINKS]

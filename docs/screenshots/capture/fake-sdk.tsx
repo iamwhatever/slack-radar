@@ -134,6 +134,19 @@ const NEEDS = {
   ],
 }
 
+// Relative to the clock so "3m" reads the same on every run.
+const NOW_T = Math.round(Date.now() / 1000)
+const NOW = {
+  ok: true,
+  members: [
+    { id: 'lead', state: 'working', doing: 'triaging 1 new items', since: NOW_T - 40, count: 1, source: 'gateway' },
+    { id: 'investigator', state: 'working', doing: 'Re-check 9 items against example-org/example-app issues',
+      since: NOW_T - 180, count: 1, source: 'gateway' },
+    { id: 'watcher', state: 'idle', doing: 'idle', since: null, count: 0, source: 'gateway' },
+    { id: 'poller', state: 'idle', doing: 'last poll 42s ago · next in 4m', since: NOW_T - 42, count: 2, source: 'ledger' },
+  ],
+}
+
 const STATE = {
   ok: true,
   vault_available: true,
@@ -157,6 +170,7 @@ const STATE = {
       : { text: 'Two p1 bugs need an owner; the CSV export reports look like one problem.', at: T0 + 5400 },
   },
   investigations: { items: 1, running: 1 },
+  now: { members: NOW.members },
   crew_memory: {
     phase: 'triaging',
     next: 'triage the new search-latency report; re-check the API-key thread once it moves',
@@ -197,6 +211,7 @@ function respond(path: string): unknown {
   const [p, qs] = path.split('?')
   const q = new URLSearchParams(qs || '')
   if (p.endsWith('/state')) return STATE
+  if (p.endsWith('/now')) return NOW
   if (p.endsWith('/needs')) return NEEDS
   if (p.endsWith('/items') && q.get('handled') === '1') return { ok: true, items: HANDLED, total: HANDLED.length }
   if (p.endsWith('/items')) {
@@ -215,7 +230,11 @@ function respond(path: string): unknown {
 const api = {
   raw: async () => new Response('{}'),
   request: async (path: string) => respond(path),
-  get: async (path: string) => respond(path),
+  get: async (path: string) => {
+    const w = window as unknown as { __gets?: string[] }
+    w.__gets = [...(w.__gets || []), path]
+    return respond(path)
+  },
   post: async (path: string, body?: unknown) => {
     const w = window as unknown as { __posts?: unknown[] }
     w.__posts = [...(w.__posts || []), { path, body }]

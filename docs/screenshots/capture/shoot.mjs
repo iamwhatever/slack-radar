@@ -51,6 +51,7 @@ const shots = [
   { name: 'settings', source: 'ok', tab: 'Settings', wait: 'Basics', open: 'Advanced' },
   { name: 'team', source: 'ok', tab: 'Team', wait: 'Only the Radar Lead has a session' },
   { name: 'needs-login', source: 'needs_login', tab: null },
+  { name: 'now-strip', source: 'ok', tab: null, clip: 'now-strip' },
 ]
 const errors = []
 try {
@@ -71,8 +72,9 @@ try {
     if (s.openReplied) await page.getByText(/^Replied \(/).click()
     await page.waitForTimeout(400)
     if (s.clip) {
-      // One card only: the Card that holds this title.
-      const card = page.getByText(s.clip, { exact: true }).locator('xpath=ancestor::div[contains(@class,"rounded")][1]')
+      // One card only: the Card that holds this title (or the element with this test id).
+      const card = s.clip === 'now-strip' ? page.getByTestId('now-strip')
+        : page.getByText(s.clip, { exact: true }).locator('xpath=ancestor::div[contains(@class,"rounded")][1]')
       const file = path.join(outDir, `${s.name}.png`)
       await card.screenshot({ path: file })
       console.log('wrote', file)
@@ -154,6 +156,45 @@ try {
       && !posts.some((p) => p.path.endsWith('/items/reply/draft')) && left === 0
     if (!ok) errors.push(`[reply] buttons ${JSON.stringify(buttons)} posts ${JSON.stringify(posts)} left ${left}`)
     else console.log('check reply: ok', JSON.stringify(buttons), JSON.stringify(sends))
+    await ctx.close()
+  }
+  // DOM check: the Now strip names a running Investigator with a pulsing dot, the Team
+  // tab shows the same row through the same component, and the open chat carries the
+  // running line; a click on the Investigator opens the Activity tab filtered.
+  {
+    const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, timezoneId: 'UTC', locale: 'en-US' })
+    const page = await ctx.newPage()
+    page.on('pageerror', (e) => errors.push(`[now] ${e.message}`))
+    await page.goto('http://127.0.0.1:5287/index.html?source=ok')
+    const strip = page.getByTestId('now-strip')
+    await strip.waitFor({ timeout: 30000 })
+    const inv = strip.locator('[data-member="investigator"]')
+    const invText = await inv.textContent()
+    const invPulse = await inv.locator('.sr-pulse').count()
+    const watPulse = await strip.locator('[data-member="watcher"] .sr-pulse').count()
+    const leadText = await strip.locator('[data-member="lead"]').textContent()
+    const stripOk = invText.includes('Investigator') && invText.includes('1 running') && invPulse === 1
+      && watPulse === 0 && leadText.includes('working: triaging')
+    await page.getByRole('button', { name: 'What needs me today?' }).first().click()
+    const running = page.getByTestId('chat-running')
+    await running.waitFor({ timeout: 5000 })
+    const runText = await running.textContent()
+    const runOk = /^Investigator running · Re-check 9 items .* · 3m$/.test(runText.trim())
+    await page.getByRole('tab', { name: 'Team', exact: true }).click()
+    const team = page.getByTestId('team-status-investigator')
+    await team.waitFor({ timeout: 5000 })
+    const teamText = await team.textContent()
+    const teamOk = teamText.includes('1 running') && (await team.locator('.sr-pulse').count()) === 1
+      && (await page.getByTestId('now-strip').count()) === 0
+    await page.getByRole('tab', { name: 'Board', exact: true }).click()
+    await page.getByTestId('now-strip').locator('[data-member="investigator"]').click()
+    await page.getByText('Showing the crew and its members only.').waitFor({ timeout: 5000 })
+    const activityOk = (await page.getByRole('tab', { name: 'Activity', exact: true }).getAttribute('aria-selected')) === 'true'
+    await page.waitForTimeout(5600) // one fast tick while someone works
+    const fastPolls = await page.evaluate(() => (window.__gets || []).filter((g) => g.endsWith('/now')).length)
+    if (!(stripOk && runOk && teamOk && activityOk && fastPolls >= 1)) {
+      errors.push(`[now] strip ${stripOk} ${invText} | ${leadText} pulse ${invPulse}/${watPulse}; chat ${runOk} ${runText}; team ${teamOk} ${teamText}; activity ${activityOk}; /now polls ${fastPolls}`)
+    } else console.log('check now: ok', JSON.stringify([invText, runText.trim(), teamText, fastPolls]))
     await ctx.close()
   }
 } finally {
