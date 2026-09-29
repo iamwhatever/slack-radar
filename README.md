@@ -28,8 +28,9 @@ KiroCrew's built-in Issue Radar app.
    press **Investigate**.
 5. **Thread re-check.** Each cycle the poller re-reads a bounded window of open
    threads and flags *possibly resolved* ones (a ✅ reaction, a "fixed",
-   "merged" or "thanks" reply, a deleted parent). Code never closes an item; the
-   lead judges each flag.
+   "merged" or "thanks" reply, a deleted parent). Code never closes an item.
+   After a poll that leaves new flags, one Thread Watcher run judges them all
+   for the lead and records resolved or not.
 6. **Digest.** When a digest is requested, the lead picks the top items and
    writes a headline. The gateway renders the text from the ledger and delivers
    it as a DM to yourself or as a dashboard notification, and keeps the text as
@@ -96,6 +97,7 @@ sequenceDiagram
   W->>M: batch_get_thread_replies (bounded window)
   W->>L: thread_changed / possibly_resolved flags
   W->>L: deliver pending digest (self_dm or notification)
+  W->>C: new flags: one Thread Watcher run for the lead (spawn SDK)
   W->>C: wake if anything moved or a digest is due
 ```
 
@@ -161,11 +163,11 @@ The page has five tabs. The header shows the tabs, a **Crew** switch (start or p
 |---|---|
 | Board | Slack connection, last poll and **Poll now**. Then **Ask the lead…**: one line with three quick questions (*What needs me today?*, *Draft today's digest*, *Which threads look resolved?*); your first question opens it into the full Radar Lead chat, which stays open (also after a reload) until you press **Collapse**. Then **Needs you**, built by fixed rules from the ledger, no model call: *Needs a decision* (a fix ready to hand off, open p0/p1, finished investigations with GitHub links, threads that look resolved), *Questions nobody answered* (no reply for over 2 days) and *Reported more than once* (similar messages in one channel). Each group is sorted by priority (p0 first), then newest first, and shows 5 rows; **Show N more** opens the rest. A row shows the priority, the summary, why it is there and how long ago it was posted, and ONE button that names the next step: **Dispatch fix** (a fix is ready), **Reply** (a draft is ready, or the question is unanswered: it opens the thread in Slack), **Done** (it looks resolved, or its fix is in progress) or **Decide** (it opens the row). The **▾** toggle opens the row: channel, Slack link, the fix title or reply draft, and the other actions (*Done*, *Ignore*, *Why? Ask the lead*). Done and Ignore only take a row off this list; its status is unchanged. **Fixes in flight (N)** lists every dispatched fix with its session, its state, its PR once there is one, and **Dismiss**. **Handled (N)** lists what you took off, each with **Reopen**. Below: the last digest with **Request digest** |
 | Ledger | Every ledger item, newest first, with how long ago it was posted and at most two tags per row. Filters: **Status** (asks the server), **Priority**, **Category** and **Needs me** (a reply draft, a fix hand-off or a thread that looks resolved). Above it the counts; below it per-channel poll health. Tick items and press **Investigate** (optionally naming an `owner/name` repo) to spawn the Investigator on them |
-| Team | Who is on the crew: Radar Lead (*Resident*), Investigator (*Joins on demand*), Thread Watcher (*Joins on demand*) and the Poller (code, no model), each with a live status. Agent ids are in a **Details** fold |
+| Team | Who is on the crew: Radar Lead (*Resident*), Investigator (*Joins on demand*), Thread Watcher (*Joins after a poll*) and the Poller (code, no model), each with a live status and its last run (*idle since 15:54 · last run 15:49–15:54*, *never ran*). Agent ids are in a **Details** fold |
 | Activity | The work log: polls that moved something, login lost or restored, crew notes, digests, settings changes, crew session moves |
-| Settings | **Basics** first: Slack connection check, watched channels, digest destination (plus your Slack login for a DM), poll interval. **Advanced** (folded): Slack MCP command, workspace URL, backfill, and the crew agent, model and the *Unattended mode (auto-approve investigator commands)* switch |
+| Settings | **Basics** first: Slack connection check, watched channels, digest destination (plus your Slack login for a DM), poll interval (with the note *runs by itself every N s; a manual Poll just runs one cycle now*). **Advanced** (folded): Slack MCP command, workspace URL, backfill, and the crew agent, model and the *Unattended mode (auto-approve investigator commands)* switch |
 
-On the Board, a one-line **Now** strip under the header shows each member and what it is doing (a pulsing dot while it works, e.g. *Investigator 1 running: re-checking 9 items*); it refreshes every 5 seconds while anyone works, the Team tab shows the same status, the open chat shows *Investigator running · <task> · 3m* until the result arrives, and a click on the Investigator or Watcher opens their Activity lines.
+On the Board, a one-line **Now** strip under the header shows each member and what it is doing (a pulsing dot while it works, e.g. *Investigator 1 running: re-checking 9 items*), or when it last ran: *Poller last 16:54 · next in 3m*, *Radar Lead last wake 16:55*, *Investigator last run 15:49–15:54*, *Thread Watcher last run --* before its first run. It refreshes every 5 seconds while anyone works, the Team tab shows the same status, the open chat shows *Investigator running · <task> · 3m* until the result arrives, and a click on the Investigator or Watcher opens their Activity lines.
 
 A digest arrives every weekday at 16:00 UTC from the `daily-digest` cron, which
 is on by default. To get one now, press **Request digest** on the Board. To stop
@@ -191,16 +193,16 @@ When a question has a clear answer in the ledger or its links, or a bug report d
 
 ## The team
 
-| Member | Role | What they do |
-|---|---|---|
-| Radar Lead | Lead · resident | The crew session itself (agent `slack-radar-crew`, slot `crew-slack-radar`). Triages each new item (category, priority, summary), decides clusters, judges possibly-resolved threads, writes the digest headline, and is the one you talk to |
-| Investigator | Research · leaf | Spawned per cluster (agent `slack-radar-investigator`). Runs read-only `gh search` / `gh issue view` / `gh pr view` and records matching issue and PR links on the items. Never writes to GitHub or Slack |
-| Thread Watcher | Review · leaf | Spawned by the lead on demand (agent `slack-radar-watcher`). Judges a batch of possibly-resolved threads and records resolved or not in the ledger. Ledger only, no shell |
-| Poller | System · code, no model | Runs inside the gateway. Cursor reads, thread re-checks, login-expiry detection, and digest delivery. Wakes the lead only when something moved |
+| Member | Role | What they do | When it runs |
+|---|---|---|---|
+| Radar Lead | Lead · resident | The crew session itself (agent `slack-radar-crew`, slot `crew-slack-radar`). Triages each new item (category, priority, summary), decides clusters, writes the digest headline, and is the one you talk to. Leaves possibly-resolved threads to the Thread Watcher | Woken by the Poller when a poll moved something, a digest is due, or leftover work waits; and when you message it |
+| Investigator | Research · leaf | Spawned per cluster (agent `slack-radar-investigator`). Runs read-only `gh search` / `gh issue view` / `gh pr view` and records matching issue and PR links on the items. Never writes to GitHub or Slack | When the lead spawns it for a cluster, or you press **Investigate** |
+| Thread Watcher | Review · leaf | Dispatched for the lead (agent `slack-radar-watcher`). Judges every new possibly-resolved thread in one batch and records resolved or not in the ledger. Ledger only, no shell, never spawns | After a poll that flags possibly-resolved threads: one run per poll, never two at once, only while the crew is on |
+| Poller | System · code, no model | Runs inside the gateway. Cursor reads, thread re-checks, login-expiry detection, and digest delivery. Wakes the lead only when something moved | By itself every `poll_interval_secs` (300 s); **Poll now** runs one extra cycle |
 
 ### Desk
 
-The crew's rules and interfaces live in `desk/`. [desk/CHARTER.md](desk/CHARTER.md) is the charter: the roster, who dispatches whom (only the Radar Lead spawns), what may never be sent to Slack, public vs local data, unattended scope and stop conditions. [desk/CONTRACT.md](desk/CONTRACT.md) is the machine contract: fixed agent names, the ledger format, the MCP tools and the HTTP routes. [desk/members.json](desk/members.json) is the roster as data, and `GET /api/apps/slack-radar/org` returns it with each member's live status. `GET /api/apps/slack-radar/now` says what each member is doing right now (the Lead's phase, each running Investigator or Watcher task from the gateway's run list, the Poller's last and next poll), and the Activity log gets a line when an Investigator or Watcher starts or finishes.
+The crew's rules and interfaces live in `desk/`. [desk/CHARTER.md](desk/CHARTER.md) is the charter: the roster, who dispatches whom (only the Radar Lead spawns), what may never be sent to Slack, public vs local data, unattended scope and stop conditions. [desk/CONTRACT.md](desk/CONTRACT.md) is the machine contract: fixed agent names, the ledger format, the MCP tools and the HTTP routes. [desk/members.json](desk/members.json) is the roster as data, and `GET /api/apps/slack-radar/org` returns it with each member's live status. `GET /api/apps/slack-radar/now` says what each member is doing right now (the Lead's phase, each running Investigator or Watcher task from the gateway's run list, the Poller's last and next poll) and when each one last ran, and the Activity log gets a line when an Investigator or Watcher starts or finishes.
 
 ## Configuration
 
@@ -227,9 +229,12 @@ never modified), `model` (empty = the agent's default), and `unattended` (the
 ## What runs in the background
 
 - **The poll loop.** Started by the app's `on_startup` hook as a gateway task and
-  stopped on shutdown. It runs every `poll_interval_secs` once at least one
-  channel is set, and costs no model turns. It wakes the crew only when a poll
-  moved something or a digest is due, so an idle workspace costs nothing.
+  stopped on shutdown. It runs by itself every `poll_interval_secs` once at least
+  one channel is set, and costs no model turns; **Poll now** runs one extra cycle
+  and leaves the schedule alone. It wakes the crew only when a poll moved
+  something or a digest is due, so an idle workspace costs nothing. After a
+  poll that flags possibly-resolved threads it starts one Thread Watcher run for
+  them, through the app spawn SDK.
 - **The `daily-digest` cron.** On by default (`0 16 * * 1-5`, UTC). Each run
   calls `slack_radar_request_digest` once and stops; the Radar Lead composes the
   digest in its own session and the poller delivers it (default destination:
@@ -252,7 +257,7 @@ Disabling the app stops the loop and revokes the crew's auto-approve grant.
   `spawn_list`, `fs_read`, `grep`, `glob` and `thinking`, and all of them are
   pre-approved, so the lead never prompts and never gains a tool, in either mode.
 - **The Investigator has a shell, and unattended mode lets it run without asking.**
-  When the Radar Lead spawns an Investigator or a Thread Watcher with `spawn_run`,
+  When the Radar Lead spawns an Investigator with `spawn_run`,
   the crew's scoped grant reaches the child (Kiro Crew core since
   kirodotdev/KiroCrew#14497). While unattended mode is on, the spawn and every
   Investigator shell command are approved without a prompt, each one SEL-audited.
@@ -262,6 +267,10 @@ Disabling the app stops the loop and revokes the crew's auto-approve grant.
   app spawn SDK, which the host runs with every command auto-approved for the whole
   run. So the button is refused (`unattended_required`) while unattended mode is
   off.
+- **The Thread Watcher runs without asking, in either mode.** The gateway starts it
+  through the app spawn SDK after a poll flags possibly-resolved threads. Its only
+  tool is the ledger, which is in its own `allowedTools`, so auto-approval covers
+  nothing but recording verdicts.
 - **Unattended mode is off by default.** When on and the crew is live, the
   crew's session holds a scoped, 15-minute, SEL-audited grant, never the
   interactive trust flag. Every poll renews it while the toggle is on, so the
@@ -385,8 +394,8 @@ Slack Radar 是一个“有记性”的 Slack 分诊小组。它通过你自己�
 4. **调查员关联 issue 和 PR。** 对于一簇报告，组长会派出只读的调查员，用 `gh search`
    查找并把匹配的 issue、PR 链接记到条目上。你也可以在 Ledger（台账）标签页勾选条目后点 **Investigate**。
 5. **线程复查。** 每一轮，轮询器会在有限的窗口内重读仍打开的线程，把“可能已解决”的标出来
-   （✅ 表情、“fixed”“merged”“thanks”之类的回复、原消息被删除）。代码从不自行关闭条目，
-   每个标记都由组长判断。
+   （✅ 表情、“fixed”“merged”“thanks”之类的回复、原消息被删除）。代码从不自行关闭条目。
+   一次轮询留下新标记后，由一次线程观察员运行替组长统一判断，并记下是否已解决。
 6. **摘要。** 请求摘要时，组长挑出最重要的条目并写一句标题；网关从台账渲染出正文，
    以私信发给你自己，或作为仪表盘通知送达，并把正文留作看板上的“最近一次摘要”。
    `daily-digest` 定时任务每个工作日 UTC 16:00 请求一份。
@@ -449,11 +458,11 @@ kirocrew app enable slack-radar
 |---|---|
 | Board（看板） | Slack 连接、最近一次轮询和 **Poll now**。接着是 **Ask the lead…**：一行输入框加三个快捷问题（*What needs me today?*、*Draft today's digest*、*Which threads look resolved?*）；问出第一个问题后，它展开成完整的雷达组长聊天，一直开着（刷新后也是），直到你点 **Collapse**。然后是 **Needs you（需要你处理）**，按固定规则从台账算出，不调用模型：*Needs a decision*（可以交接的修复、未关闭的 p0/p1、带 GitHub 链接且已查完的调查、看起来已解决的线程）、*Questions nobody answered*（超过 2 天没人回的问题）和 *Reported more than once*（同一频道里相似的消息）。每组先按优先级排（p0 在前），同一优先级里新的在前，只显示 5 行；**Show N more** 展开其余的。每行显示优先级、摘要、为什么在这里、发了多久，以及唯一一个写明下一步的按钮：**Dispatch fix**（修复已就绪）、**Reply**（回复草稿已就绪；或问题没人回，这时它打开 Slack 里的线程）、**Done**（看起来已解决，或修复正在进行）或 **Decide**（展开这一行）。**▾** 展开这一行：频道、Slack 链接、修复标题或回复草稿，以及其他操作（*Done*、*Ignore*、*Why? Ask the lead*）。Done 和 Ignore 只是把它移出这个列表，状态不变。**Fixes in flight (N)** 列出所有已派发的修复，带会话、状态、有了之后的 PR，以及 **Dismiss**。**Handled (N)** 列出你移走的条目，每条可 **Reopen**。再往下：最近一次摘要和 **Request digest** |
 | Ledger（台账） | 台账里的所有条目，新的在前，显示发了多久，每行最多两个标签。筛选：**Status**（由服务器筛）、**Priority**、**Category** 和 **Needs me**（有回复草稿、修复交接，或线程看起来已解决）。上面是计数，下面是各频道轮询健康度。勾选条目后点 **Investigate**（可选填一个 `owner/name` 仓库）即可派调查员去查 |
-| Team（团队） | 小组成员：雷达组长（*Resident*，常驻）、调查员（*Joins on demand*，按需加入）、线程观察员（*Joins on demand*，按需加入）和轮询器（代码，不用模型），各带实时状态。agent id 收在 **Details** 折叠里 |
+| Team（团队） | 小组成员：雷达组长（*Resident*，常驻）、调查员（*Joins on demand*，按需加入）、线程观察员（*Joins after a poll*，轮询后加入）和轮询器（代码，不用模型），各带实时状态和上次运行时间（*idle since 15:54 · last run 15:49–15:54*、*never ran*）。agent id 收在 **Details** 折叠里 |
 | Activity（动态） | 工作日志：有变化的轮询、登录失效与恢复、小组备注、摘要、设置变更、小组会话迁移 |
-| Settings（设置） | 先是 **Basics**：Slack 连接检查、监听的频道、摘要去向（选私信时还有 Slack 登录名）、轮询间隔。**Advanced**（默认折叠）：Slack MCP 命令、工作区地址、回溯时长，以及小组的 agent、模型和 *Unattended mode (auto-approve investigator commands)* 开关 |
+| Settings（设置） | 先是 **Basics**：Slack 连接检查、监听的频道、摘要去向（选私信时还有 Slack 登录名）、轮询间隔（旁边注明 *runs by itself every N s; a manual Poll just runs one cycle now*：它自己定时跑，手动 Poll 只是立刻多跑一轮）。**Advanced**（默认折叠）：Slack MCP 命令、工作区地址、回溯时长，以及小组的 agent、模型和 *Unattended mode (auto-approve investigator commands)* 开关 |
 
-看板页头下有一行 **Now**，显示每个成员此刻在做什么（工作时圆点会闪，例如 *Investigator 1 running: re-checking 9 items*）；有人在工作时每 5 秒刷新一次，Team 标签页显示同样的状态，展开的聊天在结果回来之前显示 *Investigator running · <任务> · 3m*，点调查员或线程观察员会打开他们的 Activity 记录。
+看板页头下有一行 **Now**，显示每个成员此刻在做什么（工作时圆点会闪，例如 *Investigator 1 running: re-checking 9 items*），或者上次什么时候运行：*Poller last 16:54 · next in 3m*、*Radar Lead last wake 16:55*、*Investigator last run 15:49–15:54*，第一次运行之前是 *Thread Watcher last run --*。有人在工作时每 5 秒刷新一次，Team 标签页显示同样的状态，展开的聊天在结果回来之前显示 *Investigator running · <任务> · 3m*，点调查员或线程观察员会打开他们的 Activity 记录。
 
 `daily-digest` 定时任务默认开启，每个工作日 UTC 16:00 送来一份摘要。想马上要一份，点看板上的
 **Request digest**；不想要每日摘要，就在 Schedule 页面暂停这个任务。
@@ -476,16 +485,16 @@ kirocrew app enable slack-radar
 
 ## 团队
 
-| 成员 | 角色 | 职责 |
-|---|---|---|
-| 雷达组长 | 组长 · 常驻 | 就是小组会话本身（agent `slack-radar-crew`，槽位 `crew-slack-radar`）。给每条新条目分诊（类别、优先级、摘要），决定如何聚簇，判断“可能已解决”的线程，写摘要标题，也是你对话的对象 |
-| 调查员 | 调研 · 临时 | 每簇派一个（agent `slack-radar-investigator`）。只读地运行 `gh search` / `gh issue view` / `gh pr view`，把匹配的 issue、PR 链接记到条目上。从不写 GitHub 或 Slack |
-| 线程观察员 | 复核 · 临时 | 由组长按需派出（agent `slack-radar-watcher`）。成批判断“可能已解决”的线程，把是否已解决记到台账上。只有台账，没有 shell |
-| 轮询器 | 系统 · 代码，不用模型 | 运行在网关内。负责游标读取、线程复查、登录失效检测和摘要投递；只有真有变化时才唤醒组长 |
+| 成员 | 角色 | 职责 | 什么时候运行 |
+|---|---|---|---|
+| 雷达组长 | 组长 · 常驻 | 就是小组会话本身（agent `slack-radar-crew`，槽位 `crew-slack-radar`）。给每条新条目分诊（类别、优先级、摘要），决定如何聚簇，写摘要标题，也是你对话的对象。“可能已解决”的线程交给线程观察员 | 轮询有变化、摘要到期或有遗留工作时由轮询器唤醒；你给它发消息时 |
+| 调查员 | 调研 · 临时 | 每簇派一个（agent `slack-radar-investigator`）。只读地运行 `gh search` / `gh issue view` / `gh pr view`，把匹配的 issue、PR 链接记到条目上。从不写 GitHub 或 Slack | 组长为一簇派它，或你点 **Investigate** 时 |
+| 线程观察员 | 复核 · 临时 | 替组长派出（agent `slack-radar-watcher`）。一批判断所有新的“可能已解决”线程，把是否已解决记到台账上。只有台账，没有 shell，从不派生 | 轮询标出“可能已解决”的线程之后：每次轮询一次，同时最多一个，只在小组运行时 |
+| 轮询器 | 系统 · 代码，不用模型 | 运行在网关内。负责游标读取、线程复查、登录失效检测和摘要投递；只有真有变化时才唤醒组长 | 每隔 `poll_interval_secs`（300 秒）自己跑一次；**Poll now** 立刻多跑一轮 |
 
 ### Desk（工作台）
 
-小组的规则和接口放在 `desk/` 里。[desk/CHARTER.md](desk/CHARTER.md) 是章程：成员、谁派谁（只有雷达组长会派生）、绝不能发到 Slack 的东西、公开与本地数据、无人值守的范围和停止条件。[desk/CONTRACT.md](desk/CONTRACT.md) 是机器契约：固定的 agent 名字、台账格式、MCP 工具和 HTTP 接口。[desk/members.json](desk/members.json) 是成员名单的数据形式，`GET /api/apps/slack-radar/org` 返回它，并附上每个成员的实时状态。`GET /api/apps/slack-radar/now` 说明每个成员此刻在做什么（组长的阶段、网关运行列表里每个调查员或线程观察员的任务、轮询器上次和下次轮询的时间），调查员或线程观察员开始或结束时，Activity 日志也会记一行。
+小组的规则和接口放在 `desk/` 里。[desk/CHARTER.md](desk/CHARTER.md) 是章程：成员、谁派谁（只有雷达组长会派生）、绝不能发到 Slack 的东西、公开与本地数据、无人值守的范围和停止条件。[desk/CONTRACT.md](desk/CONTRACT.md) 是机器契约：固定的 agent 名字、台账格式、MCP 工具和 HTTP 接口。[desk/members.json](desk/members.json) 是成员名单的数据形式，`GET /api/apps/slack-radar/org` 返回它，并附上每个成员的实时状态。`GET /api/apps/slack-radar/now` 说明每个成员此刻在做什么（组长的阶段、网关运行列表里每个调查员或线程观察员的任务、轮询器上次和下次轮询的时间）以及每个成员上次运行的时间，调查员或线程观察员开始或结束时，Activity 日志也会记一行。
 
 ## 配置
 
@@ -510,8 +519,9 @@ kirocrew app enable slack-radar
 ## 后台会跑什么
 
 - **轮询循环。** 由应用的 `on_startup` 钩子作为网关任务启动，关闭时停止。设置了至少一个频道后，
-  每隔 `poll_interval_secs` 跑一次，不消耗模型调用。只有轮询发现变化或到了该出摘要时才唤醒小组，
-  所以工作区安静时不花任何成本。
+  每隔 `poll_interval_secs` 自己跑一次，不消耗模型调用；**Poll now** 只是立刻多跑一轮，不改变定时。
+  只有轮询发现变化或到了该出摘要时才唤醒小组，所以工作区安静时不花任何成本。轮询标出“可能已解决”的线程后，
+  它通过应用的派生 SDK 启动一次线程观察员运行来判断它们。
 - **`daily-digest` 定时任务。** 随应用附带，默认开启（`0 16 * * 1-5`，UTC）。每次只调用一次
   `slack_radar_request_digest` 就结束；摘要由雷达组长在自己的会话里撰写，再由轮询器投递（默认去向：仪表盘通知）。
 
@@ -527,13 +537,15 @@ kirocrew app enable slack-radar
 - **组长没有 shell。** 雷达组长的 agent 没有 `execute_bash` 和 `fs_write`。它只有台账工具、
   `spawn_run` / `spawn_status` / `spawn_list`、`fs_read`、`grep`、`glob` 和 `thinking`，
   而且都已预先批准，所以无论哪种模式，组长都不会弹确认，也不会多出别的工具。
-- **调查员有 shell，无人值守模式下它运行时不再询问你。** 雷达组长用 `spawn_run` 派出调查员或线程观察员时，
+- **调查员有 shell，无人值守模式下它运行时不再询问你。** 雷达组长用 `spawn_run` 派出调查员时，
   小组的限定范围授权会传到子 agent（Kiro Crew 核心自 kirodotdev/KiroCrew#14497 起）。无人值守模式打开时，
   这次派出和调查员的每条 shell 命令都会自动批准，每条都记入 SEL 审计。模式关闭时，网关会先请你批准派出，
   再逐条批准命令，无人应答的确认两小时后自动拒绝。
 - **Ledger 标签页的 Investigate 按钮需要无人值守模式。** 它通过应用的 spawn SDK 派出调查员，
   网关对这类派出在整个运行期间自动批准每条命令。所以无人值守模式关闭时，这个按钮会被拒绝
   （`unattended_required`）。
+- **线程观察员在两种模式下都不询问。** 轮询标出“可能已解决”的线程后，网关通过应用的 spawn SDK
+  启动它。它唯一的工具是台账，已在它自己的 `allowedTools` 里，所以自动批准只覆盖记录结论。
 - **无人值守模式默认关闭。** 开启且小组在运行时，小组会话持有一个限定范围、15 分钟有效、记入 SEL 审计的授权，
   绝不是交互式的信任开关。只要开关开着，每次轮询都会续期，所以小组是持续无人值守运行，而不是只有一段时间。
   每次审批都会重新检查授权，授权过期后下一次请求会重新询问你。在聊天的信任菜单里选 **Normal** 只会结束授权到

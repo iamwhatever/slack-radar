@@ -5,8 +5,8 @@
     "agent": "slack-radar-crew",
     "display": {"en": "Radar Lead", "zh": "雷达组长"},
     "role": {
-      "en": "Conductor. Triages every watched channel, decides clusters, judges possibly-resolved threads, writes the digest headline, spawns investigators, and answers the owner.",
-      "zh": "指挥者。给所有被关注频道的消息分诊，决定聚簇，判断“可能已解决”的线程，写摘要标题，派出调查员，并回答所有者。"
+      "en": "Conductor. Triages every watched channel, decides clusters, reviews the Thread Watcher's verdicts on possibly-resolved threads, writes the digest headline, spawns investigators, and answers the owner. Woken by the poller when something moved.",
+      "zh": "指挥者。给所有被关注频道的消息分诊，决定聚簇，复核线程观察员对“可能已解决”线程的结论，写摘要标题，派出调查员，并回答所有者。有变化时由轮询器唤醒。"
     },
     "residency": "resident",
     "tools": "ledger+spawn"
@@ -29,8 +29,8 @@
     "agent": "slack-radar-watcher",
     "display": {"en": "Thread Watcher", "zh": "线程观察员"},
     "role": {
-      "en": "Read-only leaf, spawned by the lead on demand. Judges only whether a possibly-resolved thread is resolved. No shell, never spawns.",
-      "zh": "只读的叶子成员，由组长按需派出。只判断一个“可能已解决”的线程是否真的已解决。没有 shell，从不派生。"
+      "en": "Read-only leaf, dispatched for the lead after a poll flags possibly-resolved threads: one run per poll judges the whole batch. Judges only whether each thread is resolved. No shell, never spawns.",
+      "zh": "只读的叶子成员，轮询标出“可能已解决”的线程后替组长派出：每次轮询一次，判断整批。只判断每个线程是否真的已解决。没有 shell，从不派生。"
     },
     "residency": "on-demand",
     "tools": "ledger"
@@ -41,8 +41,8 @@
     "agent": null,
     "display": {"en": "Poller", "zh": "轮询器"},
     "role": {
-      "en": "Gateway code, no model. Reads new messages and thread replies with the five Slack read tools, flags likely resolutions, detects an expired login, delivers the digest, and wakes the lead when something moved.",
-      "zh": "网关里的代码，不用模型。用五个 Slack 只读工具读取新消息和线程回复，标记可能的解决，发现登录过期，投递摘要，有变化时唤醒组长。"
+      "en": "Gateway code, no model. Runs by itself every poll interval: reads new messages and thread replies with the five Slack read tools, flags likely resolutions, detects an expired login, delivers the digest, and wakes the lead when something moved.",
+      "zh": "网关里的代码，不用模型。按轮询间隔自己运行：用五个 Slack 只读工具读取新消息和线程回复，标记可能的解决，发现登录过期，投递摘要，有变化时唤醒组长。"
     },
     "residency": "resident",
     "tools": "slack-read"

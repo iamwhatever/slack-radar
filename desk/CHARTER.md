@@ -10,18 +10,20 @@ The rules the crew works by. The exact names, fields and routes are in [CONTRACT
 
 | Member | Kind | Residency | Tools | Job |
 |---|---|---|---|---|
-| Radar Lead (`slack-radar-crew`) | agent · conductor | resident: one session for all channels | ledger, spawn, read files | triages, decides clusters, judges possibly-resolved threads, writes the digest headline, answers the owner |
+| Radar Lead (`slack-radar-crew`) | agent · conductor | resident: one session for all channels | ledger, spawn, read files | triages, decides clusters, reviews the Thread Watcher's verdicts, writes the digest headline, answers the owner |
 | Investigator (`slack-radar-investigator`) | agent · read-only leaf | joins on demand, one per cluster | ledger, shell for read-only `gh` | finds matching GitHub issues and PRs and records the links |
-| Thread Watcher (`slack-radar-watcher`) | agent · read-only leaf | joins on demand, one per batch | ledger only, no shell | judges only "resolved or not" for a batch of possibly-resolved threads the Lead hands it |
+| Thread Watcher (`slack-radar-watcher`) | agent · read-only leaf | joins after a poll, one run per poll | ledger only, no shell | judges only "resolved or not" for every new possibly-resolved thread, on the Lead's behalf |
 | Poller | code, no model | resident in the gateway | the five Slack read tools, plus the digest DM (never `post_message`) | reads messages and thread replies, flags likely resolutions, detects an expired login, delivers the digest, wakes the Lead |
 
 ### 2. Who dispatches whom
 
 - The Poller wakes the Lead when a poll moved something or a digest is due. It never spawns anyone.
-- Only the Lead spawns. It uses `spawn_run` for the Investigator and the Thread Watcher, at most two investigations in flight.
+- The Lead spawns the Investigator with `spawn_run`, at most two investigations in flight.
+- The Thread Watcher is dispatched for the Lead, per poll. When a poll leaves possibly-resolved flags no Watcher has seen, the gateway starts ONE Watcher run through the app spawn SDK with all of them (at most 20; the rest wait for the next poll) and stamps `possibly_resolved.watcher_at` on each. Never two in flight, never while the crew is paused. The Lead does not judge those flags itself: it reviews the Watcher's verdicts, and judges a flag only when the Watcher left it or the gateway has no spawn SDK. The Watcher's only tool is the ledger, so this run can do nothing but record verdicts.
 - The owner can also start an Investigator from the Ledger tab's **Investigate** button. That is an owner action, not a crew action.
 - The Board shows only what needs the owner: the Now strip, the Lead's line and the digest, and the Needs-you groups (priority first, then newest; 5 rows per group; each row has ONE button naming the next step: Dispatch fix, Reply, Done or Decide). Every ledger item, its filters and **Investigate** are on the Ledger tab. Neither page adds a way to post or dispatch: **Send to thread** and **Dispatch fix** stay the owner's clicks.
 - Leaves never spawn. The Investigator and the Thread Watcher have no spawn tool; they record into the ledger and stop.
+- Every member's last run is shown on the Board's Now strip and the Team tab: the Poller's last and next cycle, the Lead's last wake, each leaf's last run (or `--` before its first).
 - A fix is never dispatched by the crew. When an investigation ends with a code-shaped fix, the Lead writes ONE `fix_handoff` on the item: a self-contained task for a coding session (repo, item keys, links, coverage verdict, what to change, how to verify, "Do not merge; open a PR for review"). The Board shows **Dispatch fix**. One click by the owner is the consent: the app opens ONE `kirocrew-conductor` session, sends it the hand-off plus the Slack context (quoted as untrusted data), and tracks it on the Board until it reports a PR. No confirmation dialog: the click is the decision.
 - Several hand-offs can go as one batch. With two or more waiting, **Dispatch all fixes (N)** opens a list of them, all checked, on the Board itself. The owner reviews it and unchecks any to leave out; one click on **Dispatch N to one conductor** is the consent for the whole list. The app opens ONE `kirocrew-conductor` session with one seed holding a section per hand-off (each with its own quoted Slack context), and that conductor splits the work into its own items. One repo per batch, at most 10 fixes. Replies are never sent in a batch.
 - The app never dispatches on its own, and the Lead never dispatches. Only the owner's click on **Dispatch fix** reaches the dispatch route; agent calls are refused by the owner gate. The conductor session is the owner's, not the crew's: an ordinary dashboard session (no app tag, no trust grant), listed under `Slack Radar/fixes`, which the owner reads, steers and closes like any chat. The conductor decomposes and dispatches its own workers.
@@ -52,10 +54,11 @@ See [docs/unattended-mode.md](../docs/unattended-mode.md) for the full approval 
 - Off by default. The owner turns it on with `PUT /crew {"unattended": true}`.
 - When on and the crew is live, the Lead's session holds a scoped grant (`crew:slack-radar:autoapprove`, 900 s, SEL-audited). Every poll renews it while the toggle is on, so the crew runs unattended continuously, not for a window. It never sets the interactive trust flag.
 - The Lead's tools are all pre-approved already, so the grant adds nothing to the Lead's own turns.
-- The grant reaches the children the Lead spawns (Kiro Crew core since kirodotdev/KiroCrew#14497). While unattended mode is on, an Investigator or Thread Watcher spawn and every Investigator shell command are auto-approved, each SEL-audited. While it is off, the owner approves the spawn and each command, and an unanswered prompt is denied after two hours.
+- The grant reaches the children the Lead spawns (Kiro Crew core since kirodotdev/KiroCrew#14497). While unattended mode is on, an Investigator spawn and every Investigator shell command are auto-approved, each SEL-audited. While it is off, the owner approves the spawn and each command, and an unanswered prompt is denied after two hours.
 - Picking **Normal** in the chat's trust menu ends the grant until the next poll arms it again. The app's own toggle is the off switch that lasts.
 - Risk: Slack text anyone in a watched channel can write reaches an agent with a shell. Turn unattended mode on only when every watched channel is trusted.
 - The Ledger tab's **Investigate** button runs the Investigator fully auto-approved, so it is refused unless unattended mode is on.
+- The Thread Watcher runs through the app spawn SDK in either mode. Its only tool is the ledger, so auto-approval covers nothing but recording verdicts.
 
 ### 6. Stop conditions
 
@@ -75,18 +78,20 @@ See [docs/unattended-mode.md](../docs/unattended-mode.md) for the full approval 
 
 | 成员 | 类型 | 驻留方式 | 工具 | 职责 |
 |---|---|---|---|---|
-| 雷达组长（`slack-radar-crew`） | agent · 指挥者 | 常驻：所有频道共用一个会话 | 台账、派生、读文件 | 分诊，决定聚簇，判断“可能已解决”的线程，写摘要标题，回答所有者 |
+| 雷达组长（`slack-radar-crew`） | agent · 指挥者 | 常驻：所有频道共用一个会话 | 台账、派生、读文件 | 分诊，决定聚簇，复核线程观察员的结论，写摘要标题，回答所有者 |
 | 调查员（`slack-radar-investigator`） | agent · 只读叶子成员 | 按需加入，每簇一个 | 台账、只读 `gh` 用的 shell | 找到匹配的 GitHub issue 和 PR，把链接记下来 |
-| 线程观察员（`slack-radar-watcher`） | agent · 只读叶子成员 | 按需加入，每批一个 | 只有台账，没有 shell | 只判断组长交给它的一批“可能已解决”的线程是否真的已解决 |
+| 线程观察员（`slack-radar-watcher`） | agent · 只读叶子成员 | 轮询后加入，每次轮询一次 | 只有台账，没有 shell | 替组长只判断每个新的“可能已解决”线程是否真的已解决 |
 | 轮询器 | 代码，不用模型 | 常驻在网关里 | 五个 Slack 只读工具，外加摘要私信（从不调用 `post_message`） | 读取消息和线程回复，标记可能的解决，发现登录过期，投递摘要，唤醒组长 |
 
 ### 2. 谁派谁
 
 - 轮询有变化或摘要到期时，轮询器唤醒组长。它从不派生任何成员。
-- 只有组长会派生。它用 `spawn_run` 派出调查员和线程观察员，同时最多两个调查在进行。
+- 组长用 `spawn_run` 派出调查员，同时最多两个调查在进行。
+- 线程观察员按每次轮询替组长派出。一次轮询留下还没有观察员看过的“可能已解决”标记时，网关通过应用的派生 SDK 启动一次观察员运行，带上全部标记（最多 20 个，其余等下一次轮询），并在每个标记上写 `possibly_resolved.watcher_at`。同时最多一个，小组暂停时不派。组长不再自己判断这些标记：它复核观察员的结论，只有观察员留下的标记或网关没有派生 SDK 时才自己判断。观察员唯一的工具是台账，所以这次运行除了记录结论什么也做不了。
 - 所有者也可以用 Ledger（台账）标签页的 **Investigate** 按钮启动调查员。这是所有者的操作，不是小组的操作。
 - 看板只显示需要所有者处理的东西：Now 条、组长的一句话和摘要，以及 Needs-you 各组（先按优先级，再新的在前；每组 5 行；每行只有一个写明下一步的按钮：Dispatch fix、Reply、Done 或 Decide）。台账的全部条目、筛选和 **Investigate** 都在 Ledger 标签页。两个页面都没有新增发消息或派发的途径：**Send to thread** 和 **Dispatch fix** 仍然只能由所有者点击。
 - 叶子成员从不派生。调查员和线程观察员没有派生工具；它们写入台账后就结束。
+- 每个成员上次的运行都显示在看板的 Now 行和 Team 标签页上：轮询器的上一轮和下一轮、组长上次被唤醒的时间、每个叶子成员上次的运行（第一次之前是 `--`）。
 - 小组从不自己派发修复。调查得出一个代码层面的修复时，组长在条目上写一个 `fix_handoff`：给编码会话的自包含任务（仓库、条目 key、链接、覆盖结论、改什么、怎么验证、"Do not merge; open a PR for review"）。看板显示 **Dispatch fix**。所有者点一次就是同意：应用开一个 `kirocrew-conductor` 会话，把交接和 Slack 上下文（作为不可信数据引用）发给它，并在看板上跟踪，直到它报告一个 PR。没有确认对话框：点击本身就是决定。
 - 多个交接可以作为一批一起派发。有两个或以上待派发时，**Dispatch all fixes (N)** 会在看板上直接展开一个清单，全部勾选。所有者检查清单，取消不想要的；点一次 **Dispatch N to one conductor** 就是对整张清单的同意。应用只开一个 `kirocrew-conductor` 会话，发一份种子，每个交接一节（各自带引用的 Slack 上下文），由这个 conductor 自己拆成工作项。每批只能一个仓库，最多 10 个修复。回复从不批量发送。
 - 应用从不自己派发，组长也从不派发。只有所有者点 **Dispatch fix** 才会到达派发路由；智能体的调用会被所有者闸门拒绝。conductor 会话属于所有者，不属于小组：它是一个普通的看板会话（没有应用标签、没有信任授权），放在 `Slack Radar/fixes` 下，所有者可以像任何聊天一样阅读、引导和关闭它。conductor 自己拆分任务并派发自己的 worker。
@@ -117,10 +122,11 @@ See [docs/unattended-mode.md](../docs/unattended-mode.md) for the full approval 
 - 默认关闭。所有者用 `PUT /crew {"unattended": true}` 打开。
 - 打开且小组在运行时，组长的会话持有一个限定范围的授权（`crew:slack-radar:autoapprove`，900 秒，有 SEL 审计）。只要开关开着，每次轮询都会续期，所以小组是持续无人值守运行，而不是只有一段时间。它从不设置交互式信任标志。
 - 组长的工具本来都已预先批准，所以这个授权对组长自己的回合没有任何增加。
-- 这个授权会传到组长派出的子 agent（Kiro Crew 核心自 kirodotdev/KiroCrew#14497 起）。无人值守模式打开时，派出调查员或线程观察员，以及调查员的每条 shell 命令，都会自动批准，每条都有 SEL 审计。模式关闭时，派生和每条命令都要所有者批准，无人响应的提示两小时后被拒绝。
+- 这个授权会传到组长派出的子 agent（Kiro Crew 核心自 kirodotdev/KiroCrew#14497 起）。无人值守模式打开时，派出调查员以及调查员的每条 shell 命令，都会自动批准，每条都有 SEL 审计。模式关闭时，派生和每条命令都要所有者批准，无人响应的提示两小时后被拒绝。
 - 在聊天的信任菜单里选 **Normal**，授权只结束到下一次轮询为止。应用自己的开关才是长期有效的关闭方式。
 - 风险：监听频道里任何人都能写的 Slack 文字会到达一个有 shell 的 agent。只有当所有监听频道都可信时才打开无人值守模式。
 - Ledger 标签页的 **Investigate** 按钮会让调查员全程自动批准运行，所以只有无人值守模式打开时才允许。
+- 线程观察员在两种模式下都通过应用的派生 SDK 运行。它唯一的工具是台账，所以自动批准只覆盖记录结论。
 
 ### 6. 停止条件
 

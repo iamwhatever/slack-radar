@@ -192,11 +192,15 @@ const NOW_T = Math.round(Date.now() / 1000)
 const NOW = {
   ok: true,
   members: [
-    { id: 'lead', state: 'working', doing: 'triaging 1 new items', since: NOW_T - 40, count: 1, source: 'gateway' },
+    { id: 'lead', state: 'idle', doing: 'idle', since: NOW_T - 40, count: 0, source: 'gateway',
+      last: { started_at: NOW_T - 40, finished_at: null }, ran: 'idle' },
     { id: 'investigator', state: 'working', doing: 'Re-check 9 items against example-org/example-app issues',
-      since: NOW_T - 180, count: 1, source: 'gateway' },
-    { id: 'watcher', state: 'idle', doing: 'idle', since: null, count: 0, source: 'gateway' },
-    { id: 'poller', state: 'idle', doing: 'last poll 42s ago · next in 4m', since: NOW_T - 42, count: 2, source: 'ledger' },
+      since: NOW_T - 180, count: 1, source: 'gateway',
+      last: { started_at: NOW_T - 180, finished_at: null }, ran: 'running' },
+    { id: 'watcher', state: 'idle', doing: 'idle', since: null, count: 0, source: 'gateway',
+      last: { started_at: NOW_T - 1500, finished_at: NOW_T - 1260 }, ran: 'idle' },
+    { id: 'poller', state: 'idle', doing: 'last poll 42s ago · next in 4m', since: NOW_T - 42, count: 2, source: 'ledger',
+      last: { started_at: NOW_T - 42, finished_at: null }, next_at: NOW_T + 258, ran: 'idle' },
   ],
 }
 

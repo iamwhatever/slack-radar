@@ -128,6 +128,12 @@ type NowRow = {
   since: number | null
   count: number
   source: string
+  /** When the member last ran (the Lead: last wake; the Poller: last cycle). */
+  last?: { started_at: number | null; finished_at: number | null }
+  /** `running` while it works, `idle` after a run, `never` before the first. */
+  ran?: 'running' | 'idle' | 'never'
+  /** Poller only: when its loop runs the next cycle. */
+  next_at?: number | null
 }
 
 type State = {
@@ -238,7 +244,7 @@ const ROSTER: Member[] = [
     layer: 'Lead',
     kind: 'Resident',
     agent: 'slack-radar-crew',
-    duty: 'Triages every watched channel, sets category and priority, decides when a cluster needs investigating, judges possibly-resolved threads, writes the digest headline, and answers you here.',
+    duty: 'Triages every watched channel, sets category and priority, decides when a cluster needs investigating, hands possibly-resolved threads to the Thread Watcher, writes the digest headline, and answers you here. Woken by the Poller when something moved.',
   },
   {
     id: 'investigator',
@@ -254,9 +260,9 @@ const ROSTER: Member[] = [
     title: 'Thread Watcher',
     initials: 'TW',
     layer: 'Review',
-    kind: 'Joins on demand',
+    kind: 'Joins after a poll',
     agent: 'slack-radar-watcher',
-    duty: 'Judges a batch of possibly-resolved threads when the lead asks, and records resolved or not in the ledger. No shell.',
+    duty: 'Dispatched for the lead after a poll flags possibly-resolved threads: one run judges the whole batch and records resolved or not in the ledger. No shell.',
   },
   {
     id: 'poller',
@@ -265,7 +271,7 @@ const ROSTER: Member[] = [
     layer: 'System',
     kind: 'Code, no model',
     agent: '',
-    duty: 'Reads new messages and thread replies from Slack, flags likely resolutions, and delivers the digest. Spends no credits.',
+    duty: 'Runs by itself on the poll interval: reads new messages and thread replies from Slack, flags likely resolutions, and delivers the digest. Spends no credits.',
     planned: false,
   },
 ]
@@ -292,6 +298,45 @@ function memberStatus(m: Member, s: State): StatusLabel {
   return { label: 'idle', tone: 'muted' }
 }
 
+/** `16:54` for an epoch-seconds time today, `Sep 28 16:54` for an older one, `--` for none. */
+function hm(t: number | null | undefined): string {
+  if (!t) return '--'
+  const d = new Date(t * 1000)
+  const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })
+  return d.toDateString() === new Date().toDateString()
+    ? time
+    : `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${time}`
+}
+
+/** `3m`, `now` until an epoch-seconds time. */
+function until(t: number | null | undefined): string {
+  if (!t) return ''
+  const secs = Math.round(t - Date.now() / 1000)
+  return secs <= 0 ? 'now' : elapsed(Date.now() / 1000 - secs)
+}
+
+/** When a member last ran, from its `now` row: `last 16:54 · next in 3m`, `last wake 16:55`,
+ *  `last run 15:49–15:54`, `last run --`. Empty for an older gateway without `last`. */
+function lastLine(m: Member, row: NowRow | undefined): string {
+  if (!row?.last) return ''
+  const { started_at: start, finished_at: end } = row.last
+  if (m.id === 'poller') {
+    if (!start) return 'has not polled yet'
+    const next = until(row.next_at)
+    return `last ${hm(start)}${next ? ` · next ${next === 'now' ? 'due now' : `in ${next}`}` : ''}`
+  }
+  if (m.id === 'lead') return start ? `last wake ${hm(start)}` : 'not woken yet'
+  if (!start) return 'last run --'
+  return end ? `last run ${hm(start)}–${hm(end)}` : `last run ${hm(start)}`
+}
+
+/** A leaf's resting state for the Team tab: `idle since 15:54` or `never ran`. */
+function restingLine(row: NowRow | undefined): string {
+  if (!row?.ran || row.ran === 'running') return ''
+  if (row.ran === 'never') return 'never ran'
+  return `idle since ${hm(row.last?.finished_at || row.last?.started_at)}`
+}
+
 /** `42s`, `5m`, `3h` since an epoch-seconds time. */
 function elapsed(since: number | null | undefined): string {
   if (!since) return ''
@@ -307,8 +352,12 @@ const clip = (text: string, n = 60) => (text.length > n ? `${text.slice(0, n - 1
 function doingLine(m: Member, s: State): string {
   const row = nowRow(s, m.id)
   if (!row) return memberStatus(m, s).label
-  if (m.id === 'poller') return row.doing
-  if (row.state !== 'working') return row.state === 'paused' ? `paused: ${row.doing}` : memberStatus(m, s).label
+  const last = lastLine(m, row)
+  if (m.id === 'poller') return last && row.state === 'paused' ? `${row.doing.split(' · ')[0]} · ${last}` : last || row.doing
+  if (row.state !== 'working') {
+    if (row.state === 'paused') return `paused: ${row.doing}`
+    return last || memberStatus(m, s).label
+  }
   if (m.id === 'lead') return `working: ${row.doing}`
   return `${row.count} running: ${row.doing}`
 }
@@ -330,11 +379,12 @@ function Dot({ tone, pulse }: { tone: StatusLabel['tone']; pulse: boolean }) {
 
 /** A member's live status: a dot (pulsing while working), the name, and what it is doing.
  *  The Board's Now strip and the Team tab both render this. */
-function MemberStatus({ m, state, withName = true, onOpen }: { m: Member; state: State; withName?: boolean; onOpen?: () => void }) {
+function MemberStatus({ m, state, withName = true, withResting = false, onOpen }: { m: Member; state: State; withName?: boolean; withResting?: boolean; onOpen?: () => void }) {
   const st = memberStatus(m, state)
   const row = nowRow(state, m.id)
   const working = row ? row.state === 'working' : st.tone === 'aim'
-  const full = doingLine(m, state)
+  const resting = withResting && (m.id === 'investigator' || m.id === 'watcher') ? restingLine(row) : ''
+  const full = resting ? `${resting} · ${doingLine(m, state)}` : doingLine(m, state)
   const name = m.id === 'lead' ? state.crew.name || m.title : m.title
   const body = (
     <>
@@ -2119,7 +2169,7 @@ function TeamTab({ state }: { state: State }) {
                 )}
               </div>
               <div data-testid={`team-status-${m.id}`} style={{ maxWidth: 360, minWidth: 0, display: 'flex' }}>
-                <MemberStatus m={m} state={state} withName={false} />
+                <MemberStatus m={m} state={state} withName={false} withResting />
               </div>
             </li>
           )
@@ -2244,6 +2294,9 @@ function SettingsTab({
           <label className="text-sm">
             Poll interval (seconds, 60–3600)
             <Input type="number" min={60} max={3600} value={pollSecs} onChange={(e) => setPollSecs(e.target.value)} />
+            <span data-testid="poll-cadence" className="block text-xs text-muted" style={{ marginTop: 2 }}>
+              Runs by itself every {state.settings.poll_interval_secs} s; a manual Poll just runs one cycle now.
+            </span>
           </label>
         </div>
         <Btn primary className="mt-3" disabled={!!busy} onClick={saveSettings}>

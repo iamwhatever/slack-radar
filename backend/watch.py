@@ -15,7 +15,13 @@ Per cycle:
    "possibly resolved" candidates. A flag is a question for the crew, never a verdict.
 3. The pending digest, if the crew submitted one: a self-DM (``self_dm``) or a dashboard
    notification, per the owner's setting. Nothing is ever posted to a channel.
-4. Wake the crew when something moved (``crew_runtime.after_poll``).
+4. Hand every new possibly-resolved flag to ONE Thread Watcher run
+   (``crew_runtime.dispatch_watcher``), then wake the crew when something moved
+   (``crew_runtime.after_poll``).
+
+The loop runs by itself every ``poll_interval_secs``; a manual Poll runs one extra cycle
+now and leaves the loop's own schedule alone. :func:`cycle_times` says when the last
+cycle ran and when the loop runs the next one, for ``GET /now``.
 
 **Login expiry is a state, never "no new messages".** The MCP authenticates with the
 user's browser/Midway session. An auth error anywhere stops the cycle before any cursor
@@ -479,6 +485,15 @@ def deliver_pending_digest(
 _task: asyncio.Task | None = None
 _poll_lock = asyncio.Lock()
 _ctx: Any = None
+#: When the last cycle started (any reason) and when the loop starts its next one.
+_last_cycle_at = 0.0
+_next_cycle_at = 0.0
+
+
+def cycle_times() -> dict[str, float | None]:
+    """``{"last_at", "next_at"}`` in epoch seconds; ``next_at`` is None while no loop runs."""
+    running = _task is not None and not _task.done()
+    return {"last_at": _last_cycle_at or None, "next_at": (_next_cycle_at or None) if running else None}
 
 
 def _notify_dashboard(title: str, body: str) -> None:
@@ -492,7 +507,9 @@ async def poll_once(data_dir: Path, *, reason: str = "timer",
     """One cycle end to end: poll, deliver digest, reconcile + wake the crew."""
     from . import crew_runtime, settings as settings_mod, slack_mcp
 
+    global _last_cycle_at
     async with _poll_lock:
+        _last_cycle_at = time.time()
         try:
             settings = await asyncio.to_thread(settings_mod.read_settings)
         except settings_mod.SettingsUnavailable as exc:
@@ -513,6 +530,7 @@ async def poll_once(data_dir: Path, *, reason: str = "timer",
                 f"{summary.get('new', 0)} new, {summary.get('thread_changed', 0)} thread updates, "
                 f"{summary.get('possibly_resolved', 0)} possibly resolved",
             )
+        summary["watcher"] = await crew_runtime.dispatch_watcher(data_dir)
         summary["woke"] = await crew_runtime.after_poll(data_dir, summary, reason=reason)
         return summary
 
@@ -520,6 +538,7 @@ async def poll_once(data_dir: Path, *, reason: str = "timer",
 async def _loop(data_dir: Path) -> None:
     from . import settings as settings_mod
 
+    global _next_cycle_at
     while True:
         interval = MIN_LOOP_SECS
         try:
@@ -530,6 +549,7 @@ async def _loop(data_dir: Path) -> None:
             raise
         except Exception:  # noqa: BLE001 - the loop must outlive one bad cycle
             logger.exception("slack-radar: poll cycle failed")
+        _next_cycle_at = time.time() + interval
         await asyncio.sleep(interval)
 
 

@@ -235,11 +235,14 @@ def _leaf_row(mid: str, agent: str, runs: list[dict[str, Any]] | None, fallback:
     return {"id": mid, "state": state, "doing": doing, "since": since, "count": count, "source": source}
 
 
-def _poller_row(ledger: dict[str, Any], interval: int, t: float) -> dict[str, Any]:
-    last = float(ledger.get("last_poll_at") or 0)
+def _poller_row(ledger: dict[str, Any], interval: int, t: float,
+                poll_times: dict[str, Any] | None = None) -> dict[str, Any]:
+    times = poll_times or {}
+    last = max(_pos(ledger.get("last_poll_at")), _pos(times.get("last_at")))
+    next_at = _pos(times.get("next_at")) or (last + interval if last else 0.0)
     source_state = ledger.get("source_state") or "ok"
     if last:
-        doing = f"last poll {ago(t - last)} ago · next in {ago(last + interval - t)}"
+        doing = f"last poll {ago(t - last)} ago · next in {ago(next_at - t)}"
     else:
         doing = "has not polled yet"
     state = "idle"
@@ -248,7 +251,24 @@ def _poller_row(ledger: dict[str, Any], interval: int, t: float) -> dict[str, An
     elif source_state != "ok":
         state, doing = "paused", f"Slack MCP unavailable · {doing}"
     return {"id": "poller", "state": state, "doing": doing, "since": last or None,
-            "count": len(ledger.get("channels") or {}), "source": "ledger"}
+            "count": len(ledger.get("channels") or {}), "source": "ledger",
+            "last": {"started_at": last or None, "finished_at": None},
+            "next_at": next_at or None, "ran": "idle" if last else "never"}
+
+
+def _pos(value: Any) -> float:
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0 else 0.0
+
+
+def _with_last(row: dict[str, Any], last: dict[str, Any] | None) -> dict[str, Any]:
+    """Add ``last`` (``{started_at, finished_at}``) and ``ran`` (running / idle / never)."""
+    rec = last or {}
+    started, finished = _pos(rec.get("started_at")), _pos(rec.get("finished_at"))
+    if finished and started and finished < started:
+        finished = 0.0
+    row["last"] = {"started_at": started or None, "finished_at": finished or None}
+    row["ran"] = "running" if row["state"] == "working" else ("idle" if started else "never")
+    return row
 
 
 def now_view(
@@ -262,8 +282,16 @@ def now_view(
     poll_interval: int = DEFAULT_POLL_INTERVAL,
     members: list[dict[str, Any]] | None = None,
     at: float | None = None,
+    last_runs: dict[str, dict[str, Any]] | None = None,
+    poll_times: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """What each member is doing right now: ``{"members": [row, ...]}`` in roster order.
+
+    Every row also carries ``last`` (``{started_at, finished_at}``, epoch seconds or
+    null) and ``ran`` (``running``, ``idle`` or ``never``). For the agents ``last``
+    comes from ``last_runs`` (``store.read_member_last``: the Lead's last wake, each
+    leaf's last run); for the poller from its last cycle, and the poller's row adds
+    ``next_at`` from ``poll_times`` (``watch.cycle_times``), else last + interval.
 
     ``runs`` is the gateway's list of the crew session's unfinished child runs
     (``id``, ``agent``, ``task``, ``startedAt``); ``None`` means the gateway gave no
@@ -281,10 +309,16 @@ def now_view(
     c = store.counts(ledger)
     planned = {m["id"]: m.get("residency") == "planned" for m in (members or [])}
     interval = max(MIN_POLL_INTERVAL, int(poll_interval or DEFAULT_POLL_INTERVAL))
+    last = last_runs or {}
+    watcher_ids = frozenset({str((last.get("watcher") or {}).get("spawn_id") or "")} - {""}) \
+        if not _pos((last.get("watcher") or {}).get("finished_at")) else frozenset()
+    watcher_since = _pos((last.get("watcher") or {}).get("started_at")) or None
     return {"members": [
-        _lead_row(crew, ledger, c),
-        _leaf_row("investigator", INVESTIGATOR_AGENT, runs, int(investigations.get("running") or 0),
-                  planned.get("investigator", False), open_spawn_ids, open_spawn_since),
-        _leaf_row("watcher", WATCHER_AGENT, runs, 0, planned.get("watcher", False)),
-        _poller_row(ledger, interval, t),
+        _with_last(_lead_row(crew, ledger, c), last.get("lead")),
+        _with_last(_leaf_row("investigator", INVESTIGATOR_AGENT, runs, int(investigations.get("running") or 0),
+                             planned.get("investigator", False), open_spawn_ids, open_spawn_since),
+                   last.get("investigator")),
+        _with_last(_leaf_row("watcher", WATCHER_AGENT, runs, len(watcher_ids), planned.get("watcher", False),
+                             watcher_ids, watcher_since), last.get("watcher")),
+        _poller_row(ledger, interval, t, poll_times),
     ]}

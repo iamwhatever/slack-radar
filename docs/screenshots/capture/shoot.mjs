@@ -300,8 +300,14 @@ try {
     const invPulse = await inv.locator('.sr-pulse').count()
     const watPulse = await strip.locator('[data-member="watcher"] .sr-pulse').count()
     const leadText = await strip.locator('[data-member="lead"]').textContent()
+    const watText = await strip.locator('[data-member="watcher"]').textContent()
+    const polText = await strip.locator('[data-member="poller"]').textContent()
+    const HM = '\\d{2}:\\d{2}'
     const stripOk = invText.includes('Investigator') && invText.includes('1 running') && invPulse === 1
-      && watPulse === 0 && leadText.includes('working: triaging')
+      && watPulse === 0 && new RegExp(`^Radar Leadlast wake ${HM}$`).test(leadText.trim())
+      && new RegExp(`^Thread Watcherlast run ${HM}–${HM}$`).test(watText.trim())
+      && new RegExp(`^Pollerlast ${HM} · next in 4m$`).test(polText.trim())
+      && (await strip.locator('[data-member]').count()) === 4
     await page.getByRole('button', { name: 'What needs me today?' }).first().click()
     const running = page.getByTestId('chat-running')
     await running.waitFor({ timeout: 5000 })
@@ -311,8 +317,14 @@ try {
     const team = page.getByTestId('team-status-investigator')
     await team.waitFor({ timeout: 5000 })
     const teamText = await team.textContent()
+    const teamWat = (await page.getByTestId('team-status-watcher').textContent()).trim()
     const teamOk = teamText.includes('1 running') && (await team.locator('.sr-pulse').count()) === 1
       && (await page.getByTestId('now-strip').count()) === 0
+      && new RegExp(`^idle since ${HM} · last run ${HM}–${HM}$`).test(teamWat)
+    await page.getByRole('tab', { name: 'Settings', exact: true }).click()
+    const cadence = (await page.getByTestId('poll-cadence').textContent()).trim()
+    if (cadence !== 'Runs by itself every 300 s; a manual Poll just runs one cycle now.') errors.push(`[now] cadence ${cadence}`)
+    else console.log('check cadence: ok')
     await page.getByRole('tab', { name: 'Board', exact: true }).click()
     await page.getByTestId('now-strip').locator('[data-member="investigator"]').click()
     await page.getByText('Showing the crew and its members only.').waitFor({ timeout: 5000 })
@@ -320,8 +332,8 @@ try {
     await page.waitForTimeout(5600) // one fast tick while someone works
     const fastPolls = await page.evaluate(() => (window.__gets || []).filter((g) => g.endsWith('/now')).length)
     if (!(stripOk && runOk && teamOk && activityOk && fastPolls >= 1)) {
-      errors.push(`[now] strip ${stripOk} ${invText} | ${leadText} pulse ${invPulse}/${watPulse}; chat ${runOk} ${runText}; team ${teamOk} ${teamText}; activity ${activityOk}; /now polls ${fastPolls}`)
-    } else console.log('check now: ok', JSON.stringify([invText, runText.trim(), teamText, fastPolls]))
+      errors.push(`[now] strip ${stripOk} ${invText} | ${leadText} | ${watText} | ${polText} pulse ${invPulse}/${watPulse}; chat ${runOk} ${runText}; team ${teamOk} ${teamText} / ${teamWat}; activity ${activityOk}; /now polls ${fastPolls}`)
+    } else console.log('check now: ok', JSON.stringify([invText, leadText, watText, polText, runText.trim(), teamText, teamWat, fastPolls]))
     await ctx.close()
   }
 } finally {

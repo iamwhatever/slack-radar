@@ -1,6 +1,6 @@
 {
   "name": "slack-radar",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "displayName": "Slack Radar",
   "description": "A Slack triage crew that remembers, reading with your own Slack identity through your Slack MCP — no bot, no invite. Watches the channels you choose, classifies every new message as a bug report, feature request, question, already-answered or noise with a priority, links clusters to existing GitHub issues and PRs, notices when a thread looks resolved, and sends you a daily digest — keeping everything in a local ledger so nothing is triaged twice.",
   "author": "iamwhatever",
@@ -22,7 +22,8 @@
     "Clusters of reports are investigated by a read-only subagent that links matching GitHub issues and PRs",
     "A fix the crew found becomes one click: Dispatch fix hands it, with the Slack messages behind it, to a kirocrew-conductor session, and the Board tracks it until the PR",
     "Reply in one click: the Lead drafts an answer, you edit it if you like and press Send to thread, and it goes out under your name; the crew itself cannot post",
-    "A slim Board: what needs you, newest first within each priority, one button per row that says what to do; every ledger item and its filters live on the Ledger tab"
+    "A slim Board: what needs you, newest first within each priority, one button per row that says what to do; every ledger item and its filters live on the Ledger tab",
+    "Every member shows when it last ran (Poller last 16:54 · next in 3m, Radar Lead last wake, Investigator and Thread Watcher last run), and one Thread Watcher run judges every possibly-resolved thread after each poll"
   ],
   "defaultEnabled": false,
   "platform": {
