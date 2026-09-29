@@ -49,7 +49,8 @@ const shots = [
   { name: 'needs-you', source: 'ok', tab: null, clip: 'Needs you', openHandled: true, openHandoffs: true, openReplied: true },
   { name: 'reply-detail', source: 'ok', tab: null, openDetail: true, fixed: true },
   { name: 'ledger', source: 'ok', tab: 'Ledger', wait: 'newest first' },
-  { name: 'batch-dispatch', source: 'ok', tab: null, clip: 'Needs you', openBatch: true },
+  { name: 'batch-dispatch', source: 'ok', tab: null, clip: 'Needs you', dispatchAll: true },
+  { name: 'dispatched-row', source: 'ok', tab: null, clip: 'Needs you', dispatchRow: true },
   { name: 'chat-expanded', source: 'ok', tab: null, chat: true },
   { name: 'settings', source: 'ok', tab: 'Settings', wait: 'Basics', open: 'Advanced' },
   { name: 'team', source: 'ok', tab: 'Team', wait: 'Only the Radar Lead has a session' },
@@ -76,7 +77,16 @@ try {
       if (s.open) await page.getByText(s.open, { exact: true }).click()
     }
     if (s.chat) await page.getByRole('button', { name: 'What needs me today?' }).first().click()
-    if (s.openBatch) await page.getByRole('button', { name: /^Dispatch all fixes \(/ }).click()
+    if (s.dispatchAll) {
+      await page.getByRole('button', { name: /^Dispatch all fixes \(/ }).click()
+      await page.getByTestId('fix-dispatched').nth(2).waitFor({ timeout: 5000 })
+    }
+    if (s.dispatchRow) {
+      const row = decideRow(page, 'CSV export fails for files over ~50k rows')
+      await row.getByRole('button', { name: 'Dispatch fix' }).click()
+      await row.getByTestId('fix-dispatched').waitFor({ timeout: 5000 })
+      await row.getByTestId('fix-toggle').click()
+    }
     if (s.openDetail) await decideRow(page, REPLY_FIRST).getByRole('button', { name: 'Open', exact: true }).click()
     if (s.openHandled) await page.getByText(/^Handled \(/).click()
     if (s.openHandoffs) await page.getByText(/^Fixes in flight \(/).click()
@@ -121,9 +131,11 @@ try {
     else console.log(`check today ${want}: ok`, JSON.stringify(lines))
     await ctx.close()
   }
-  // DOM check: a hand-off row shows Dispatch fix + Ignore (Done in the menu); one click
-  // posts the dispatch once, opens no chat, and a toast links the new session. The
-  // dispatched row shows its session and state instead of the buttons.
+  // DOM check: a hand-off row has ONE button, Dispatch fix, and a ▾ that shows the fix
+  // title and task read-only. One click posts the dispatch exactly once, opens no dialog,
+  // no toast and no chat, and the SAME row then reads "Dispatched · <session> · working"
+  // with an Open session link that opens the session in place. The detail view still
+  // shows the fix and Dispatch fix. A row dispatched earlier shows the same line.
   {
     const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, timezoneId: 'UTC', locale: 'en-US' })
     const page = await ctx.newPage()
@@ -137,70 +149,127 @@ try {
     await dialog.waitFor({ timeout: 5000 })
     const fixLine = await dialog.textContent()
     const secondary = await dialog.getByTestId('detail-actions').locator('button').allTextContents()
-    const toggled = JSON.stringify(secondary) === JSON.stringify(['Dispatch fix', 'Done', 'Ignore', 'Why? Ask the lead'])
+    const detailOk = JSON.stringify(secondary) === JSON.stringify(['Dispatch fix', 'Done', 'Ignore', 'Why? Ask the lead'])
       && fixLine.includes('Fix: Raise the CSV export row limit (issue #412)') && fixLine.includes('Open in Slack')
-      && fixLine.includes('Export to CSV fails on large files')
     await page.keyboard.press('Escape')
     const escClosed = (await page.getByRole('dialog').count()) === 0
+    const toggle = row.getByTestId('fix-toggle')
+    const collapsed = (await toggle.getAttribute('aria-expanded')) === 'false' && (await row.getByTestId('fix-preview').count()) === 0
+    await toggle.click()
+    const preview = (await row.getByTestId('fix-preview').textContent()) || ''
+    const previewOk = collapsed && preview.includes('Raise the CSV export row limit (issue #412)')
+      && preview.includes('stream the export instead of building it in memory') && preview.includes('Exclude from batch')
+      && (await row.getByTestId('fix-preview').locator('textarea').count()) === 0
+    await toggle.click()
     await row.getByRole('button', { name: 'Dispatch fix' }).click()
-    const toast = page.getByTestId('dispatch-toast')
-    await toast.waitFor({ timeout: 5000 })
-    const toastText = await toast.textContent()
-    const posts = await page.evaluate(() => (window.__posts || []).filter((p) => p.path.endsWith('/items/handoff/dispatch')))
+    const line = row.getByTestId('fix-dispatched')
+    await line.waitFor({ timeout: 5000 })
+    const lineText = (await line.textContent()) || ''
+    const posts = await page.evaluate(() => (window.__posts || []).filter((p) => p.path.includes('/items/handoff/dispatch')))
     const launched = await page.evaluate(() => window.__launched || [])
-    const progress = await page.getByTestId('fix-in-progress').allTextContents()
-    const toastLink = await toast.getByRole('link').getAttribute('href')
-    const ok = JSON.stringify(buttons) === JSON.stringify(['Dispatch fix']) && toggled && escClosed
-      && posts.length === 1 && launched.length === 0
-      && toastText.includes('Fix dispatched to a conductor') && toastLink === '/chat?sid=chat-99-1'
-      && progress.length === 1 && progress[0].includes('Fix: Roll back the dashboard bundle split') && progress[0].includes('working')
-    if (!ok) errors.push(`[dispatch] esc ${escClosed} buttons ${JSON.stringify(buttons)} secondary ${JSON.stringify(secondary)} ${fixLine} posts ${JSON.stringify(posts)} launched ${JSON.stringify(launched)} toast ${toastText} ${toastLink} progress ${JSON.stringify(progress)}`)
-    else console.log('check dispatch: ok', JSON.stringify(buttons), toastText, JSON.stringify(progress))
-    await toast.getByRole('link').click()
+    const dialogs = await page.getByRole('dialog').count()
+    const toasts = await page.getByTestId('dispatch-toast').count()
+    const after = await rowButtons(row)
+    const link = line.getByRole('link', { name: 'Open session' })
+    const href = await link.getAttribute('href')
+    const earlier = await decideRow(page, 'Dashboard renders blank after the latest update').getByTestId('fix-dispatched').textContent()
+    const headerGone = (await page.getByRole('button', { name: /^Dispatch all fixes \(/ }).count()) === 0
+    const ok = JSON.stringify(buttons) === JSON.stringify(['Dispatch fix']) && detailOk && escClosed && previewOk
+      && posts.length === 1 && posts[0].path.endsWith('/items/handoff/dispatch') && posts[0].body.key
+      && launched.length === 0 && dialogs === 0 && toasts === 0
+      && lineText.startsWith('Dispatched · Fix: Raise the CSV export row limit (issue #412) · working')
+      && href === '/chat?sid=chat-99-1' && JSON.stringify(after) === JSON.stringify(['Done'])
+      && earlier.includes('Dispatched · Fix: Roll back the dashboard bundle split · working · Open session')
+      && headerGone
+    if (!ok) errors.push(`[dispatch] buttons ${JSON.stringify(buttons)} detail ${detailOk} esc ${escClosed} preview ${previewOk} ${preview} posts ${JSON.stringify(posts)} launched ${JSON.stringify(launched)} dialogs ${dialogs} toasts ${toasts} line ${lineText} href ${href} after ${JSON.stringify(after)} earlier ${earlier} headerGone ${headerGone}`)
+    else console.log('check dispatch: ok', JSON.stringify(buttons), lineText, JSON.stringify(after))
+    await link.click()
     const opened = await page.evaluate(() => window.__launched || [])
-    if (!(opened.length === 1 && opened[0].slotKey === 'chat-99-1')) errors.push(`[dispatch] toast link opened ${JSON.stringify(opened)}`)
-    else console.log('check toast link: ok', JSON.stringify(opened))
+    if (!(opened.length === 1 && opened[0].slotKey === 'chat-99-1')) errors.push(`[dispatch] Open session opened ${JSON.stringify(opened)}`)
+    else console.log('check open session: ok', JSON.stringify(opened))
     await ctx.close()
   }
-  // DOM check: two undispatched hand-offs put "Dispatch all fixes (2)" in the header.
-  // It opens an inline panel listing both, checked; unchecking one relabels the primary
-  // button; the primary posts ONE batch with the checked keys and a toast links it.
-  // The fold groups the earlier batch under one header with its PR count.
+  // DOM check: a failed dispatch shows the error in the row itself; Try again posts again
+  // and the row then reads Dispatched.
+  {
+    const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, timezoneId: 'UTC', locale: 'en-US' })
+    const page = await ctx.newPage()
+    page.on('pageerror', (e) => errors.push(`[dispatch fail] ${e.message}`))
+    await page.goto('http://127.0.0.1:5287/index.html?source=ok&dispatch=fail_once')
+    const row = decideRow(page, 'CSV export fails for files over ~50k rows')
+    await row.waitFor({ timeout: 30000 })
+    await row.getByRole('button', { name: 'Dispatch fix' }).click()
+    const alert = row.getByRole('alert')
+    await alert.waitFor({ timeout: 5000 })
+    const alertText = (await alert.textContent()) || ''
+    await alert.getByRole('button', { name: 'Try again' }).click()
+    await row.getByTestId('fix-dispatched').waitFor({ timeout: 5000 })
+    const posts = await page.evaluate(() => (window.__posts || []).filter((p) => p.path.endsWith('/items/handoff/dispatch')))
+    const ok = alertText.includes('Could not dispatch that fix: the session store is busy. Nothing was sent.')
+      && posts.length === 2 && (await row.getByRole('alert').count()) === 0
+    if (!ok) errors.push(`[dispatch fail] ${alertText} posts ${posts.length}`)
+    else console.log('check dispatch failure: ok', alertText)
+    await ctx.close()
+  }
+  // DOM check: the "Needs a decision" header reads "Dispatch all fixes (2)"; ONE click posts
+  // ONE batch with both keys, no panel and no dialog, and both rows then read
+  // "Dispatched · batch of 2" with Open session. Excluding a row from its ▾ drops it: the
+  // header reads (1) and posts only the other key. The fold groups the earlier batch.
   {
     const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, timezoneId: 'UTC', locale: 'en-US' })
     const page = await ctx.newPage()
     page.on('pageerror', (e) => errors.push(`[batch] ${e.message}`))
     await page.goto('http://127.0.0.1:5287/index.html?source=ok')
-    const open = page.getByRole('button', { name: /^Dispatch all fixes \(/ })
-    await open.waitFor({ timeout: 30000 })
-    const label = (await open.textContent()).trim()
-    await open.click()
-    const panel = page.getByTestId('batch-panel')
-    await panel.waitFor({ timeout: 5000 })
-    const listed = await panel.locator('li').count()
-    const checked = await panel.locator('input[type=checkbox]:checked').count()
-    const primary = panel.getByRole('button', { name: /to one conductor$/ })
-    const text2 = (await primary.textContent()).trim()
-    await panel.locator('input[type=checkbox]').nth(1).uncheck()
-    const text1 = (await primary.textContent()).trim()
-    await panel.locator('input[type=checkbox]').nth(1).check()
-    await primary.click()
-    const toast = page.getByTestId('dispatch-toast')
-    await toast.waitFor({ timeout: 5000 })
-    const toastText = await toast.textContent()
+    const decide = page.getByRole('region', { name: 'Needs a decision' })
+    const all = decide.getByRole('button', { name: /^Dispatch all fixes \(/ })
+    await all.waitFor({ timeout: 30000 })
+    const label = (await all.textContent()).trim()
+    await all.click()
+    const lines = decide.getByTestId('fix-dispatched')
+    await lines.nth(2).waitFor({ timeout: 5000 })
     const posts = await page.evaluate(() => (window.__posts || []).filter((p) => p.path.includes('/items/handoff/dispatch')))
+    const csv = (await decideRow(page, 'CSV export fails for files over ~50k rows').getByTestId('fix-dispatched').textContent()) || ''
+    await decide.getByRole('button', { name: 'Show 2 more' }).click()
+    const search = (await decideRow(page, 'Search results take 10s+').getByTestId('fix-dispatched').textContent()) || ''
+    const hrefs = await decide.getByTestId('fix-dispatched').getByRole('link', { name: 'Open session' }).evaluateAll((els) => els.map((e) => e.getAttribute('href')))
+    const dialogs = await page.getByRole('dialog').count()
     const replyButtons = await rowButtons(decideRow(page, REPLY_FIRST))
     await page.getByText(/^Fixes in flight \(/).click()
     const header = await page.getByTestId('fix-batch-header').allTextContents()
-    const ok = label === 'Dispatch all fixes (2)' && listed === 2 && checked === 2
-      && text2 === 'Dispatch 2 to one conductor' && text1 === 'Dispatch 1 to one conductor'
+    const ok = label === 'Dispatch all fixes (2)'
       && posts.length === 1 && posts[0].path.endsWith('/dispatch-batch') && posts[0].body.keys.length === 2
-      && toastText.includes('Fixes dispatched to one conductor') && toastText.includes('Fix batch: 2 problems')
-      && (await page.getByTestId('batch-panel').count()) === 0
+      && csv.startsWith('Dispatched · batch of 2 · working · Open session') && search.startsWith('Dispatched · batch of 2 · working')
+      && hrefs.filter((h) => h === '/chat?sid=chat-88-1').length === 2
+      && dialogs === 0 && (await page.getByTestId('batch-panel').count()) === 0
+      && (await decide.getByRole('button', { name: /^Dispatch all fixes \(/ }).count()) === 0
       && JSON.stringify(replyButtons) === JSON.stringify(['Open'])
       && header.length === 1 && header[0].includes('Fix batch: 2 problems') && header[0].includes('1 PRs found / 2')
-    if (!ok) errors.push(`[batch] label ${label} listed ${listed} checked ${checked} ${text2} / ${text1} posts ${JSON.stringify(posts)} toast ${toastText} reply ${JSON.stringify(replyButtons)} header ${JSON.stringify(header)}`)
-    else console.log('check batch: ok', label, listed, text2, text1, JSON.stringify(header))
+    if (!ok) errors.push(`[batch] label ${label} posts ${JSON.stringify(posts)} csv ${csv} search ${search} hrefs ${JSON.stringify(hrefs)} dialogs ${dialogs} reply ${JSON.stringify(replyButtons)} header ${JSON.stringify(header)}`)
+    else console.log('check batch: ok', label, csv, JSON.stringify(header))
+    await ctx.close()
+  }
+  {
+    const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, timezoneId: 'UTC', locale: 'en-US' })
+    const page = await ctx.newPage()
+    page.on('pageerror', (e) => errors.push(`[batch exclude] ${e.message}`))
+    await page.goto('http://127.0.0.1:5287/index.html?source=ok')
+    const decide = page.getByRole('region', { name: 'Needs a decision' })
+    const row = decideRow(page, 'CSV export fails for files over ~50k rows')
+    await row.waitFor({ timeout: 30000 })
+    await row.getByTestId('fix-toggle').click()
+    await row.getByLabel('Exclude from batch').check()
+    const all = decide.getByRole('button', { name: /^Dispatch all fixes \(/ })
+    const label = (await all.textContent()).trim()
+    await all.click()
+    await decide.getByRole('button', { name: 'Show 2 more' }).click()
+    await decideRow(page, 'Search results take 10s+').getByTestId('fix-dispatched').waitFor({ timeout: 5000 })
+    const posts = await page.evaluate(() => (window.__posts || []).filter((p) => p.path.includes('/items/handoff/dispatch')))
+    const left = await rowButtons(row)
+    const ok = label === 'Dispatch all fixes (1)' && posts.length === 1 && posts[0].path.endsWith('/dispatch-batch')
+      && JSON.stringify(posts[0].body.keys) === JSON.stringify(['C0DEMO1:1758703800.000100'])
+      && JSON.stringify(left) === JSON.stringify(['Dispatch fix']) && (await row.getByTestId('fix-dispatched').count()) === 0
+    if (!ok) errors.push(`[batch exclude] label ${label} posts ${JSON.stringify(posts)} left ${JSON.stringify(left)}`)
+    else console.log('check batch exclude: ok', label, JSON.stringify(posts[0].body.keys))
     await ctx.close()
   }
   // DOM check: a reply row shows "Reply ready", the ORIGINAL message's first line and one
