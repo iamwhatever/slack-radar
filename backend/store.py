@@ -738,7 +738,7 @@ def apply_handoff_dismiss(ledger: dict[str, Any], key: str) -> dict[str, Any] | 
 # ── fix dispatch (owner click -> a kirocrew-conductor session) ─────────────
 
 #: What the owner's Dispatch fix stores on ``fix_handoff.dispatch``.
-DISPATCH_FIELDS = ("session_key", "title", "agent", "at")
+DISPATCH_FIELDS = ("session_key", "title", "agent", "at", "trusted")
 #: Added on every member of a batch dispatch (one conductor for many hand-offs).
 BATCH_FIELDS = ("batch", "batch_keys")
 #: PRs one hand-off may carry in ``pr_urls`` (a batch's PRs it could not be matched to).
@@ -751,6 +751,7 @@ def apply_dispatch(ledger: dict[str, Any], key: str, dispatch: dict[str, Any]) -
     if item is None or not isinstance(item.get("fix_handoff"), dict):
         return None
     record = {k: dispatch.get(k) for k in DISPATCH_FIELDS}
+    record["trusted"] = dispatch.get("trusted") is True
     if dispatch.get("batch"):
         record["batch"] = True
         record["batch_keys"] = [str(k) for k in dispatch.get("batch_keys") or []]

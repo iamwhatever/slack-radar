@@ -3,10 +3,12 @@
 Gateway-side glue for ``POST /items/handoff/dispatch`` and the tracking reads. The
 seed itself is built by the pure ``handoff.build_seed``; this module only touches the
 host: it creates ONE ordinary dashboard session (the owner's, not the crew's: no app
-tag, user origin, no trust posture), titles it, files it under
-``Slack Radar/fixes``, and sends the seed as its first message. Afterwards it reads
-that session's slot to say running / idle / closed and to spot the PR URL the
-conductor reports.
+tag, user origin), titles it, files it under ``Slack Radar/fixes``, and sends the
+seed as its first message. Under unattended mode the session is put on the crew's
+scoped grant before that first message (``slot._trust_scope``, never the owner's
+``slot._trust``); otherwise it has no trust posture and asks for each tool.
+Afterwards it reads that session's slot to say running / idle / closed and to spot
+the PR URL the conductor reports.
 
 The host surfaces used here (``get_or_create_slot``, ``enqueue_or_run_prompt``, the
 folder store) are the ones ``crew_runtime`` already drives for the crew session;
@@ -116,13 +118,21 @@ async def _file(state: Any, slot: Any) -> bool:
         return False
 
 
-async def open_session(state: Any, *, title: str, seed: str, workspace: str = "default") -> dict[str, Any]:
-    """Create the conductor session and send ``seed`` once. Returns ``{session_key, title, filed}``."""
+async def open_session(state: Any, *, title: str, seed: str, workspace: str = "default",
+                       trusted: bool = False) -> dict[str, Any]:
+    """Create the conductor session and send ``seed`` once. Returns ``{session_key, title, filed}``.
+
+    ``trusted`` puts the new slot on the crew's scoped grant before the seed runs, so
+    the conductor's first tool call is already covered.
+    """
     if not can_create(state):
         raise DispatchUnavailable("the dashboard gave this app no session create")
     slot = state.get_or_create_slot(
         None, agent=handoff.CONDUCTOR_AGENT, workspace=workspace or "default", origin=_user_origin()
     )
+    if trusted:
+        slot._trust_scope = crew_runtime.TRUST_SCOPE
+        crew_runtime.note_scoped(str(slot.key))
     await _set_title(state, slot, title)
     filed = await _file(state, slot)
     slot.enqueue_or_run_prompt(seed, crew_runtime._owner_run_chat, state)
@@ -176,7 +186,7 @@ def _batch_scan(ledger: dict[str, Any], batches: dict[str, list[str]], slots: di
 
 
 async def observe(state: Any, data_dir: Path, ledger: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """Live facts per dispatched item: ``{key: {state, pr_url, pr_urls}}``.
+    """Live facts per dispatched item: ``{key: {state, pr_url, pr_urls[, trusted]}}``.
 
     Reads each dispatched session's slot on the event loop (slots are loop-owned). A
     single dispatch's PR URL found in its assistant messages is stored on
@@ -209,6 +219,8 @@ async def observe(state: Any, data_dir: Path, ledger: dict[str, Any]) -> dict[st
             if pr:
                 found[key] = pr
         out[key] = {"state": live, "pr_url": pr, "pr_urls": [u for u in h.get("pr_urls") or [] if isinstance(u, str)]}
+        if slot is not None:
+            out[key]["trusted"] = str(getattr(slot, "_trust_scope", "") or "") == crew_runtime.TRUST_SCOPE
     many: dict[str, list[str]] = {}
     if batches:
         one, many = _batch_scan(ledger, batches, slots)

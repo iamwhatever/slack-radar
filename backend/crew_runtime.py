@@ -26,7 +26,10 @@ needs:
 6. **The auto-approve grant** (:func:`sync_trust`). Opt-in per crew
    (``unattended``), a ``SafetyOverride`` SCOPED grant with a short TTL re-derived
    every poll cycle, never the interactive ``slot._trust`` flag. Off by default,
-   because the crew reads Slack messages — text any channel member controls.
+   because the crew reads Slack messages — text any channel member controls. The
+   conductor sessions the owner dispatches, and the workers the gateway mints for
+   them, ride the same scope (:func:`sync_dispatch_trust`), so pausing the crew or
+   turning unattended off takes it from all of them within one poll.
 
 Private gateway surfaces used here (``_run_chat``, ``state.get_or_create_slot``,
 ``state.run_background_turn``, ``safety_override``) are the same ones the builtin
@@ -485,6 +488,23 @@ def _safety_override() -> Any:
     return safety_override()
 
 
+def trust_wanted(crew: dict[str, Any]) -> bool:
+    """The one predicate every holder of the grant follows: ``unattended AND live``."""
+    return bool(crew.get("unattended")) and is_live(crew)
+
+
+def _hold_grant(so: Any) -> bool:
+    """Activate or renew the scoped grant. False when the audit write behind it failed."""
+    granted = False
+    if so.is_scope_active(TRUST_SCOPE):
+        granted = bool(so.renew_scoped(TRUST_SCOPE, source=GRANT_SOURCE, ttl=TRUST_TTL_SECS).renewed)
+    if not granted:
+        granted = bool(so.activate_scoped(TRUST_SCOPE, source=GRANT_SOURCE, ttl=TRUST_TTL_SECS).active)
+    if not granted:
+        logger.error("slack-radar: auto-approve grant refused (audit write failed); interactive approval")
+    return granted
+
+
 def sync_trust(slot: Any, crew: dict[str, Any]) -> bool:
     """Hold the grant in step with the record — an ASSIGNMENT, both directions.
 
@@ -494,23 +514,148 @@ def sync_trust(slot: Any, crew: dict[str, Any]) -> bool:
     crew falls back to interactive approval.
     """
     so = _safety_override()
-    want = bool(crew.get("unattended")) and is_live(crew)
     if so is None:
         slot._trust_scope = ""
         return False
-    if not want:
+    if not trust_wanted(crew):
         so.deactivate_scope(TRUST_SCOPE)
         slot._trust_scope = ""
         return False
-    granted = False
-    if so.is_scope_active(TRUST_SCOPE):
-        granted = bool(so.renew_scoped(TRUST_SCOPE, source=GRANT_SOURCE, ttl=TRUST_TTL_SECS).renewed)
-    if not granted:
-        granted = bool(so.activate_scoped(TRUST_SCOPE, source=GRANT_SOURCE, ttl=TRUST_TTL_SECS).active)
+    granted = _hold_grant(so)
     slot._trust_scope = TRUST_SCOPE if granted else ""
-    if not granted:
-        logger.error("slack-radar: auto-approve grant refused (audit write failed); interactive approval")
     return granted
+
+
+# ── dispatched conductor sessions on the grant ─────────────────────────────
+
+#: Slot keys outside the crew's own that this process put on the scoped grant: the
+#: conductor sessions the owner dispatched and the workers they opened.
+_scoped_keys: set[str] = set()
+#: How many generations below a dispatched conductor the sync follows.
+MAX_DESCENT = 3
+
+
+def dispatch_grant(crew: dict[str, Any]) -> tuple[bool, str]:
+    """``(trusted, why)`` for a session the owner is dispatching now.
+
+    The Dispatch fix click is the consent, so under unattended mode the new
+    conductor session rides the crew's scoped grant. Nothing touches the grant when
+    unattended is off. Blocking (the grant write is an audit write): call it off the
+    event loop.
+    """
+    if not crew.get("unattended"):
+        return False, "unattended mode is off"
+    if not is_live(crew):
+        return False, "the crew is paused"
+    so = _safety_override()
+    if so is None:
+        return False, "this gateway has no scoped grant"
+    if not _hold_grant(so):
+        return False, "the auto-approve grant was refused"
+    return True, ""
+
+
+def note_scoped(key: str) -> None:
+    _scoped_keys.add(str(key))
+
+
+def dispatched_keys(ledger: dict[str, Any]) -> set[str]:
+    """Session keys recorded on ``fix_handoff.dispatch`` across the ledger."""
+    out: set[str] = set()
+    for it in (ledger.get("items") or {}).values():
+        h = it.get("fix_handoff") if isinstance(it, dict) else None
+        d = h.get("dispatch") if isinstance(h, dict) else None
+        if isinstance(d, dict) and d.get("session_key"):
+            out.add(str(d["session_key"]))
+    return out
+
+
+def _live_slots(state: Any) -> dict[str, Any]:
+    slots = getattr(state, "_slots", None)
+    if not isinstance(slots, dict):
+        return {}
+    return {str(k): v for k, v in list(slots.items()) if v is not None}
+
+
+def dispatch_targets(state: Any, ledger: dict[str, Any]) -> dict[str, Any]:
+    """Open dispatched sessions and the workers they opened: ``{key: slot}``.
+
+    A dispatched key counts while its slot is open (running or idle); a closed one
+    is skipped. A worker counts when the gateway itself minted it for one of those
+    sessions in this process (``_lineage_minted`` with ``_created_by`` naming the
+    parent's slot key). ``_created_by`` read back from a transcript after a restart
+    is not enough: that file is agent-editable, so such a worker asks again.
+    """
+    if state is None or not hasattr(state, "get_slot"):
+        return {}
+    out: dict[str, Any] = {}
+    for key in sorted(dispatched_keys(ledger)):
+        try:
+            slot = state.get_slot(key)
+        except Exception:  # noqa: BLE001
+            slot = None
+        if slot is not None:
+            out[key] = slot
+    live = _live_slots(state)
+    frontier = set(out)
+    for _ in range(MAX_DESCENT):
+        found = {
+            k: s for k, s in live.items()
+            if k not in out and getattr(s, "_lineage_minted", False) is True
+            and str(getattr(s, "_created_by", "") or "") in frontier
+            and not store.is_crew_slot_key(k)
+        }
+        if not found:
+            break
+        out.update(found)
+        frontier = set(found)
+    return out
+
+
+def apply_dispatch_trust(state: Any, targets: dict[str, Any], granted: bool) -> list[str]:
+    """Assign the scope on every target (on or off) and clear it on any other slot
+    that carries it, the crew's own slot aside.
+
+    Runs on the event loop: slots are loop-owned. Returns the keys now on the grant.
+    """
+    global _scoped_keys
+    for slot in targets.values():
+        if granted:
+            slot._trust_scope = TRUST_SCOPE
+        elif str(getattr(slot, "_trust_scope", "") or "") == TRUST_SCOPE:
+            slot._trust_scope = ""
+    keep = set(targets) if granted else set()
+    left = set(_scoped_keys)
+    for key, slot in _live_slots(state).items():
+        if str(getattr(slot, "_trust_scope", "") or "") == TRUST_SCOPE:
+            left.add(key)
+    for key in left - keep:
+        if store.is_crew_slot_key(key):
+            continue  # the crew's own slot follows ``sync_trust``
+        slot = state.get_slot(key) if state is not None and hasattr(state, "get_slot") else None
+        if slot is not None:
+            slot._trust_scope = ""
+    _scoped_keys = keep
+    return sorted(keep)
+
+
+async def sync_dispatch_trust(state: Any, ledger: dict[str, Any], crew: dict[str, Any],
+                              granted: bool | None = None) -> list[str]:
+    """Hold dispatched sessions on the grant while ``trust_wanted``; clear them otherwise.
+
+    ``granted`` is the answer the crew slot's own ``sync_trust`` got this cycle, so
+    the grant is renewed once per poll; None means nothing renewed it yet, and it is
+    renewed here only when a dispatched session needs it.
+    """
+    targets = dispatch_targets(state, ledger)
+    if not trust_wanted(crew):
+        granted = False
+    elif granted is None:
+        granted = False
+        if targets:
+            so = _safety_override()
+            granted = so is not None and await asyncio.to_thread(_hold_grant, so)
+    return apply_dispatch_trust(state, targets, bool(granted))
 
 
 def revoke(state: Any, crew: dict[str, Any] | None = None) -> None:
@@ -535,6 +680,18 @@ def revoke(state: Any, crew: dict[str, Any] | None = None) -> None:
             slot._trust_scope = ""
             if getattr(slot, "_trust", False):
                 slot._trust = False
+    # Dispatched sessions and their workers: only the scope is cleared. Their
+    # ``_trust`` is the owner's own click and stays theirs.
+    global _scoped_keys
+    others = set(_scoped_keys)
+    for key, slot in _live_slots(state).items():
+        if str(getattr(slot, "_trust_scope", "") or "") == TRUST_SCOPE:
+            others.add(key)
+    for key in others - keys:
+        slot = state.get_slot(key)
+        if slot is not None:
+            slot._trust_scope = ""
+    _scoped_keys = set()
 
 
 # ── session launch / attach ────────────────────────────────────────────────
@@ -840,9 +997,11 @@ async def after_poll(data_dir: Path, summary: dict[str, Any], *, reason: str = "
     restarted, crew = await check_tool_version(state, data_dir, crew)
     if restarted:
         slot = None
+    granted: bool | None = None
     if slot is not None:
-        await asyncio.to_thread(sync_trust, slot, crew)
+        granted = await asyncio.to_thread(sync_trust, slot, crew)
     ledger = await asyncio.to_thread(store.read_ledger, data_dir)
+    await sync_dispatch_trust(state, ledger, crew, granted)
     c = store.counts(ledger)
     digest = ledger.get("digest") or {}
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")

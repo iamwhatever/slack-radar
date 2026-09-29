@@ -130,7 +130,7 @@ const dispatched = (it: (typeof ITEMS)[number], title: string, extra: Record<str
   session_key: `chat-${it.ts_float}-1`, title: `Fix: ${title}`, agent: 'kirocrew-conductor',
   at: T0 + 6600, state: 'running', pr_url: '', pr_number: 0, ...extra,
 })
-const IN_PROGRESS = dispatched(ITEMS[3], 'Roll back the dashboard bundle split', {})
+const IN_PROGRESS = dispatched(ITEMS[3], 'Roll back the dashboard bundle split', { trusted: true })
 const WITH_PR = dispatched(ITEMS[1], 'Add dark mode to the reports view', {
   at: T0 + 3000, state: 'idle', pr_url: 'https://github.com/example-org/example-app/pull/418', pr_number: 418,
 })
@@ -310,7 +310,7 @@ const api = {
     if (path.endsWith('/items/handoff/dispatch-batch')) {
       const keys = (body as { keys?: string[] })?.keys || []
       return { ok: true, mode: 'server', session_key: 'chat-88-1', title: `Fix batch: ${keys.length} problems (example-org/example-app)`,
-        agent: 'kirocrew-conductor', at: T0 + 7000, batch: true, batch_keys: keys }
+        agent: 'kirocrew-conductor', at: T0 + 7000, trusted: false, why: 'unattended mode is off', batch: true, batch_keys: keys }
     }
     if (path.endsWith('/items/reply/send')) {
       return { ok: true, item: { key: (body as { key?: string })?.key, replied: { ts: `${T0 + 7200}.000400`, at: T0 + 7200, text: REPLY_DRAFT, permalink: REPLY_SENT_LINK } } }
@@ -320,7 +320,9 @@ const api = {
         ;(w as { __failedOnce?: boolean }).__failedOnce = true
         throw Object.assign(new Error('502'), { body: JSON.stringify({ ok: false, code: 'dispatch_failed', error: 'the session store is busy' }) })
       }
-      return { ok: true, mode: 'server', session_key: 'chat-99-1', title: `Fix: ${HANDOFF.title}`, agent: 'kirocrew-conductor', at: T0 + 7000 }
+      // The demo crew has unattended mode off, so the session is not on the grant.
+      return { ok: true, mode: 'server', session_key: 'chat-99-1', title: `Fix: ${HANDOFF.title}`, agent: 'kirocrew-conductor', at: T0 + 7000,
+        trusted: false, why: 'unattended mode is off' }
     }
     return respond(path)
   },

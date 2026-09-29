@@ -173,6 +173,9 @@ try {
     const link = line.getByRole('link', { name: 'Open session' })
     const href = await link.getAttribute('href')
     const earlier = await decideRow(page, 'Dashboard renders blank after the latest update').getByTestId('fix-dispatched').textContent()
+    // Unattended off: the new session asks for each tool and the row says so; a trusted one says nothing.
+    const untrusted = (await row.getByTestId('fix-untrusted').textContent()) || ''
+    const earlierUntrusted = await decideRow(page, 'Dashboard renders blank after the latest update').getByTestId('fix-untrusted').count()
     const headerGone = (await page.getByRole('button', { name: /^Dispatch all fixes \(/ }).count()) === 0
     const ok = JSON.stringify(buttons) === JSON.stringify(['Dispatch fix']) && detailOk && escClosed && previewOk
       && posts.length === 1 && posts[0].path.endsWith('/items/handoff/dispatch') && posts[0].body.key
@@ -180,8 +183,8 @@ try {
       && lineText.startsWith('Dispatched · Fix: Raise the CSV export row limit (issue #412) · working')
       && href === '/chat?sid=chat-99-1' && JSON.stringify(after) === JSON.stringify(['Done'])
       && earlier.includes('Dispatched · Fix: Roll back the dashboard bundle split · working · Open session')
-      && headerGone
-    if (!ok) errors.push(`[dispatch] buttons ${JSON.stringify(buttons)} detail ${detailOk} esc ${escClosed} preview ${previewOk} ${preview} posts ${JSON.stringify(posts)} launched ${JSON.stringify(launched)} dialogs ${dialogs} toasts ${toasts} line ${lineText} href ${href} after ${JSON.stringify(after)} earlier ${earlier} headerGone ${headerGone}`)
+      && headerGone && untrusted === 'Will ask you for each tool: unattended mode is off.' && earlierUntrusted === 0
+    if (!ok) errors.push(`[dispatch] untrusted ${untrusted} ${earlierUntrusted} buttons ${JSON.stringify(buttons)} detail ${detailOk} esc ${escClosed} preview ${previewOk} ${preview} posts ${JSON.stringify(posts)} launched ${JSON.stringify(launched)} dialogs ${dialogs} toasts ${toasts} line ${lineText} href ${href} after ${JSON.stringify(after)} earlier ${earlier} headerGone ${headerGone}`)
     else console.log('check dispatch: ok', JSON.stringify(buttons), lineText, JSON.stringify(after))
     await link.click()
     const opened = await page.evaluate(() => window.__launched || [])
