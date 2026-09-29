@@ -61,14 +61,14 @@ def test_groups_are_ordered_and_empty_ledger_is_empty() -> None:
     assert out["handled_total"] == 0
 
 
-def test_decide_takes_open_p0_p1_sorted_by_priority_then_age() -> None:
+def test_decide_takes_open_p0_p1_sorted_by_priority_then_newest() -> None:
     p1_old = item(1, priority="p1", hours=30)
     p1_new = item(2, priority="p1", hours=2)
     p0 = item(3, priority="p0", hours=1)
     p2 = item(4, priority="p2")
     closed = item(5, priority="p0", status="resolved")
     out = needs.build_needs(ledger(p1_old, p1_new, p0, p2, closed), NOW)
-    assert keys(out, "decide") == [p0["key"], p1_old["key"], p1_new["key"]]
+    assert keys(out, "decide") == [p0["key"], p1_new["key"], p1_old["key"]]
     e = group(out, "decide")["entries"][0]
     assert e["reason"] == "Open p0" and e["age_hours"] == 1.0 and e["permalink"].startswith("https://")
     assert e["summary"] == "message 3"  # no summary yet: the text stands in
@@ -142,7 +142,46 @@ def test_groups_cap_at_twenty_but_total_is_full() -> None:
     rows = [item(i, priority="p1", hours=i + 1) for i in range(25)]
     g = group(needs.build_needs(ledger(*rows), NOW), "decide")
     assert g["total"] == 25 and len(g["entries"]) == 20
-    assert g["entries"][0]["key"] == rows[-1]["key"]  # oldest first within p1
+    assert g["entries"][0]["key"] == rows[0]["key"]  # newest first within p1
+    assert [e["key"] for e in g["entries"]] == [r["key"] for r in rows[:20]]
+
+
+def test_every_decide_reason_sorts_by_priority_then_newest() -> None:
+    # Reasons do not reorder the list: a newer p2 reply draft sits above an older p2 hand-off.
+    old_fix = item(1, priority="p2", hours=40, category="bug-report",
+                   fix_handoff={"title": "t", "prompt": "p", "repo": "o/r", "links": [], "at": NOW})
+    new_reply = item(2, priority="p2", hours=3, reply_draft={"text": "hi", "at": NOW, "by": "lead"})
+    mid_resolved = item(3, priority="p2", hours=10, possibly_resolved={"reason": "fixed", "at": NOW})
+    p1 = item(4, priority="p1", hours=90)
+    none = item(5, hours=1, possibly_resolved={"reason": "ok", "at": NOW})
+    out = needs.build_needs(ledger(old_fix, new_reply, mid_resolved, p1, none), NOW)
+    assert keys(out, "decide") == [p1["key"], new_reply["key"], mid_resolved["key"], old_fix["key"], none["key"]]
+
+
+def test_unanswered_sorts_by_priority_then_newest() -> None:
+    old = item(1, category="question", hours=200)
+    new = item(2, category="question", hours=50)
+    p3 = item(3, category="question", hours=300, priority="p3")
+    out = needs.build_needs(ledger(old, new, p3), NOW)
+    assert keys(out, "unanswered") == [p3["key"], new["key"], old["key"]]
+
+
+def test_clusters_sort_by_priority_then_size_then_newest() -> None:
+    # Two same-size, no-priority clusters: the one with the newer member comes first.
+    a1 = item(1, summary="login page timeout error", hours=30)
+    a2 = item(2, summary="timeout error on login", hours=20)
+    b1 = item(3, summary="billing invoice missing tax", hours=40)
+    b2 = item(4, summary="invoice missing tax line", hours=2)
+    big1 = item(5, channel=C2, summary="search slow results filter", hours=80)
+    big2 = item(6, channel=C2, summary="slow search results page", hours=81)
+    big3 = item(7, channel=C2, summary="search results slow again", hours=82)
+    p1a = item(8, channel=C2, summary="upload crash large video", hours=100, priority="p1")
+    p1b = item(9, channel=C2, summary="large video upload crash", hours=101)
+    out = needs.build_needs(ledger(a1, a2, b1, b2, big1, big2, big3, p1a, p1b), NOW)
+    lead = keys(out, "clusters")
+    assert lead == [p1a["key"], big1["key"], b2["key"], a2["key"]]
+    # within a cluster the lead is the best-ranked, newest member
+    assert group(out, "clusters")["entries"][2]["members"][0] == b2["key"]
 
 
 def test_summary_is_clipped_to_200_when_falling_back_to_text() -> None:

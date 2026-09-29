@@ -82,9 +82,17 @@ def age_hours(item: dict[str, Any], now: float) -> float:
     return round(max(0.0, now - posted) / 3600.0, 1) if posted else 0.0
 
 
+def posted_at(item: dict[str, Any]) -> float:
+    """The message's own Slack time (``ts_float``), 0 when unknown."""
+    try:
+        return float(item.get("ts_float") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _rank(item: dict[str, Any], now: float) -> tuple[int, float]:
-    """Sort key: priority first (p0 … p3, then none), then oldest first."""
-    return (_PRIORITY_RANK.get(str(item.get("priority") or ""), 4), -age_hours(item, now))
+    """Sort key: priority first (p0 … p3, then none), then newest first."""
+    return (_PRIORITY_RANK.get(str(item.get("priority") or ""), 4), -posted_at(item))
 
 
 def _entry(item: dict[str, Any], now: float, reason: str,
@@ -376,8 +384,12 @@ def build_needs(
             unanswered.append(it)
     decide.sort(key=lambda pair: _rank(pair[0], t))
     unanswered.sort(key=lambda it: _rank(it, t))
-    clusters = [_cluster_entry(c, t) for c in find_clusters(pool)]
-    clusters.sort(key=lambda e: (_PRIORITY_RANK.get(e["priority"], 4), -len(e["members"]), -e["age_hours"]))
+    # Clusters: best member priority, then size, then the newest member first.
+    ranked = sorted(
+        find_clusters(pool),
+        key=lambda c: (min(_rank(m, t)[0] for m in c), -len(c), -max(posted_at(m) for m in c)),
+    )
+    clusters = [_cluster_entry(c, t) for c in ranked]
 
     def hours(it: dict[str, Any]) -> str:
         return f"No reply for {int(age_hours(it, t) // 24)} days"

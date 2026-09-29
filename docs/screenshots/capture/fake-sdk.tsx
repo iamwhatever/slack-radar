@@ -31,6 +31,8 @@ const item = (
   needs_triage: false,
   possibly_resolved: null as null | { reason: string; at: number },
   ts_float: T0 + n * 600,
+  fix_handoff: null as null | Record<string, unknown>,
+  reply_draft: null as null | Record<string, unknown>,
   ...extra,
 })
 
@@ -94,11 +96,24 @@ const HANDOFF2 = {
   at: T0 + 5800,
 }
 
-const REPLY_ITEM = item(4, 'C0DEMO2', 'hana', 'Does the CSV export keep my column filters?', {
-  category: 'question', priority: 'p3', summary: 'Does CSV export keep column filters?', reply_count: 0,
-})
 const REPLY_DRAFT = 'Yes. The export uses the columns you filtered, and hidden columns are left out. ' +
   'The one known gap is tracked here: https://github.com/example-org/example-app/issues/398'
+const REPLY_ITEM = item(4, 'C0DEMO2', 'hana', 'Does the CSV export keep my column filters?', {
+  category: 'question', priority: 'p3', summary: 'Does CSV export keep column filters?', reply_count: 0,
+  reply_draft: { text: REPLY_DRAFT, at: T0 + 6200, by: 'lead' },
+})
+// Two more decide rows (no priority, older), so the group shows "Show 2 more".
+const EXTRA_RESOLVED = item(0, 'C0DEMO2', 'kai', 'Webhook retries stopped after the outage', {
+  category: 'bug-report', summary: 'Webhook retries stopped after the outage', reply_count: 3,
+  possibly_resolved: { reason: 'reply says “working again”', at: T0 + 5200 },
+})
+const EXTRA_LINKED = item(-1, 'C0DEMO1', 'lee', 'Where do I export the audit log?', {
+  category: 'question', summary: 'Where to export the audit log', reply_count: 1,
+  links: ['https://github.com/example-org/example-app/issues/377'], investigation: 'spawn s-demo',
+})
+ITEMS.push(REPLY_ITEM, EXTRA_RESOLVED, EXTRA_LINKED)
+ITEMS[0].fix_handoff = HANDOFF
+ITEMS[4].fix_handoff = HANDOFF2
 const dispatched = (it: (typeof ITEMS)[number], title: string, extra: Record<string, unknown>) => ({
   session_key: `chat-${it.ts_float}-1`, title: `Fix: ${title}`, agent: 'kirocrew-conductor',
   at: T0 + 6600, state: 'running', pr_url: '', pr_number: 0, ...extra,
@@ -152,12 +167,14 @@ const NEEDS = {
     summary: ITEMS[4].text, status: ITEMS[4].status, handled_how: '', handoff: HANDOFF2,
   }],
   groups: [
-    { id: 'decide', total: 5, entries: [
+    { id: 'decide', total: 7, entries: [
       need(ITEMS[0], 'Fix ready to hand off', { handoff_title: HANDOFF.title }),
-      need(ITEMS[4], 'Fix ready to hand off', { handoff_title: HANDOFF2.title }),
-      need(REPLY_ITEM, 'Reply ready to send', { reply_draft: REPLY_DRAFT }),
       need(ITEMS[3], `Fix in progress · ${IN_PROGRESS.title}`, { handoff_title: IN_PROGRESS.title.slice(5), dispatch: IN_PROGRESS }),
       need(ITEMS[2], 'Looks resolved: reply says “thanks”'),
+      need(REPLY_ITEM, 'Reply ready to send', { reply_draft: REPLY_DRAFT }),
+      need(ITEMS[4], 'Fix ready to hand off', { handoff_title: HANDOFF2.title }),
+      need(EXTRA_RESOLVED, 'Looks resolved: reply says “working again”'),
+      need(EXTRA_LINKED, 'Matching GitHub work found'),
     ] },
     { id: 'unanswered', total: 1, entries: [
       need(item(1, 'C0DEMO2', 'gina', 'Is there an SSO option for the free plan?', {
@@ -213,9 +230,9 @@ const STATE = {
     updated_at: T0 + 5400,
   },
   counts: {
-    total: 5, needs_triage: 1, possibly_resolved: 1,
-    by_status: { new: 1, triaged: 3, investigating: 1 },
-    open_by_priority: { p1: 2, p2: 1, p3: 1 },
+    total: 8, needs_triage: 1, possibly_resolved: 2,
+    by_status: { new: 1, triaged: 6, investigating: 1 },
+    open_by_priority: { p1: 2, p2: 1, p3: 2 },
   },
   channels: {
     C0DEMO1: { cursor_ts: `${T0 + 5400}.000100`, last_polled_at: T0 + 5700, last_error: '' },

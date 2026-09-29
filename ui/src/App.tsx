@@ -23,6 +23,8 @@ type Item = {
   ts_float: number
   handled_at?: number
   handled_how?: 'done' | 'ignored' | ''
+  fix_handoff?: { title?: string; prompt?: string } | null
+  reply_draft?: { text?: string } | null
 }
 
 // GET /needs: rule-built groups (backend/needs.py). A cluster entry names its members.
@@ -181,9 +183,10 @@ const QUICK_QUESTIONS = ['What needs me today?', "Draft today's digest", 'Which 
 
 type EventRow = { at: number; kind: string; text: string; key: string }
 
-type TabId = 'board' | 'team' | 'activity' | 'settings'
+type TabId = 'board' | 'ledger' | 'team' | 'activity' | 'settings'
 const TABS: { id: TabId; label: string }[] = [
   { id: 'board', label: 'Board' },
+  { id: 'ledger', label: 'Ledger' },
   { id: 'team', label: 'Team' },
   { id: 'activity', label: 'Activity' },
   { id: 'settings', label: 'Settings' },
@@ -682,27 +685,32 @@ export default function SlackRadar() {
         ) : tab === 'board' ? (
           <Board
             state={view}
-            items={items}
             needs={needs}
             handled={handled}
             configured={configured}
             mcp={mcp}
+            busy={busy}
+            onPoll={() => act('Poll', () => api.post(`${BASE}/poll`, {}))}
+            onStart={() => act('Start crew', () => api.post(`${BASE}/crew/start`, {}))}
+            onDigest={() => act('Request digest', () => api.post(`${BASE}/digest/request`, {}))}
+            events={events}
+            onChanged={load}
+          />
+        ) : tab === 'ledger' ? (
+          <LedgerTab
+            state={view}
+            items={items}
             filter={filter}
             setFilter={setFilter}
             selected={selected}
             setSelected={setSelected}
             busy={busy}
-            onPoll={() => act('Poll', () => api.post(`${BASE}/poll`, {}))}
             onInvestigate={(repo) =>
               act('Investigate', async () => {
                 await api.post(`${BASE}/investigate`, { keys: [...selected], repo })
                 setSelected(new Set())
               })
             }
-            onStart={() => act('Start crew', () => api.post(`${BASE}/crew/start`, {}))}
-            onDigest={() => act('Request digest', () => api.post(`${BASE}/digest/request`, {}))}
-            events={events}
-            onChanged={load}
           />
         ) : tab === 'team' ? (
           <TeamTab state={view} />
@@ -786,41 +794,26 @@ function ConnectionLine({ mcp, state, withPoll }: { mcp: McpStatus | null; state
 
 // ── Board ───────────────────────────────────────────────────────────────────
 
+// The Board answers "what do I do next": the Now strip, the Lead's line and digest,
+// and the Needs-you groups. Every ledger item, its filters and Investigate live on
+// the Ledger tab.
 function Board(props: {
   state: State
-  items: Item[]
   needs: Needs | null
   handled: Item[]
   configured: boolean
   mcp: McpStatus | null
-  filter: string
-  setFilter: (f: string) => void
-  selected: Set<string>
-  setSelected: (s: Set<string>) => void
   busy: string
   onPoll: () => void
-  onInvestigate: (repo: string) => void
   onStart: () => void
   onDigest: () => void
   events: EventRow[]
   onChanged: () => void
 }) {
-  const { state, items, selected, setSelected } = props
-  const [repo, setRepo] = useState('')
+  const { state } = props
   const [pending, setPending] = useState('')
   const [expanded, setExpanded] = useChatOpen(state.crew.slot_key)
   const chatRef = useRef<HTMLDivElement>(null)
-  const p = state.counts.open_by_priority
-  const toggle = (key: string) => {
-    const next = new Set(selected)
-    if (next.has(key)) next.delete(key)
-    else next.add(key)
-    setSelected(next)
-  }
-  const channelRows = useMemo(
-    () => state.settings.channels.map((cid) => ({ cid, ...(state.channels[cid] || {}) })),
-    [state],
-  )
   const askWhy = (e: NeedEntry) => {
     setPending(whyQuestion(e))
     setExpanded(true)
@@ -867,81 +860,7 @@ function Board(props: {
         onWhy={askWhy}
       />
 
-      <div className="grid gap-3 grid-cols-[repeat(auto-fit,minmax(150px,1fr))] mb-4">
-        <StatCard label="Awaiting triage" value={state.counts.needs_triage} accent />
-        <StatCard label="Possibly resolved" value={state.counts.possibly_resolved} />
-        <StatCard label="Open p0 / p1" value={`${p.p0 || 0} / ${p.p1 || 0}`} />
-        <StatCard label="Tracked items" value={state.counts.total} />
-      </div>
-
-      <Card className="mb-4">
-        <div className="flex flex-wrap items-center gap-2 mb-3">
-          <CardTitle>Ledger</CardTitle>
-          <label className="text-sm text-muted" htmlFor="sr-filter">Show</label>
-          <select
-            id="sr-filter"
-            className="text-sm bg-transparent border rounded px-2 py-1"
-            value={props.filter}
-            onChange={(e) => props.setFilter(e.target.value)}
-          >
-            <option value="open">open</option>
-            <option value="new">new</option>
-            <option value="triaged">triaged</option>
-            <option value="investigating">investigating</option>
-            <option value="resolved">resolved</option>
-            <option value="noise">noise</option>
-            <option value="">all</option>
-          </select>
-          <div className="flex-1" />
-          <Input
-            aria-label="GitHub repository to search (owner/name, optional)"
-            placeholder="owner/repo (optional)"
-            value={repo}
-            onChange={(e) => setRepo(e.target.value)}
-            className="w-48"
-          />
-          <Btn onClick={() => props.onInvestigate(repo)} disabled={selected.size === 0 || !!props.busy}>
-            Investigate {selected.size || ''}
-          </Btn>
-        </div>
-        {items.length === 0 ? (
-          <EmptyState icon={<span aria-hidden>📡</span>} title="Nothing here yet" subtitle="New messages appear after the next poll." />
-        ) : (
-          <ul className="flex flex-col">
-            {items.map((it, idx) => (
-              <LedgerRow key={it.key} it={it} first={idx === 0} checked={selected.has(it.key)} onToggle={() => toggle(it.key)} />
-            ))}
-          </ul>
-        )}
-      </Card>
-
       <DigestCard state={state} busy={props.busy} onDigest={props.onDigest} />
-
-      <Card>
-        <CardTitle>Channels</CardTitle>
-        {channelRows.length === 0 ? (
-          <p className="text-sm text-muted">No channels configured.</p>
-        ) : (
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="text-left text-muted">
-                <th scope="col">Channel</th>
-                <th scope="col">Last polled</th>
-                <th scope="col">Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {channelRows.map((c) => (
-                <tr key={c.cid}>
-                  <td className="font-mono">{c.cid}</td>
-                  <td>{fmtTime(c.last_polled_at)}</td>
-                  <td>{c.last_error ? <Badge variant="err" title={c.last_error}>error</Badge> : <Badge variant="ok">ok</Badge>}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </Card>
     </div>
   )
 }
@@ -957,11 +876,15 @@ const GROUP_TITLE: Record<NeedGroup['id'], string> = {
 
 type HandleHow = 'done' | 'ignored' | 'reopen'
 
+// How long ago the message was posted, from the entry's `age_hours`.
 function fmtAge(h: number): string {
-  if (h < 1) return 'under 1 h old'
-  if (h < 48) return `${Math.round(h)} h old`
-  return `${Math.floor(h / 24)} days old`
+  if (h < 1) return `${Math.max(1, Math.round(h * 60))} min ago`
+  if (h < 48) return `${Math.round(h)} h ago`
+  return `${Math.floor(h / 24)} days ago`
 }
+
+// Rows shown per Needs-you group before "Show N more".
+const ROWS_SHOWN = 5
 
 function whyQuestion(e: NeedEntry): string {
   const s = e.summary.length > 80 ? `${e.summary.slice(0, 79)}…` : e.summary
@@ -988,132 +911,82 @@ function ErrorNotice({ message, onRetry }: { message: string; onRetry: () => voi
   )
 }
 
-// "⋯": row actions beyond the two visible buttons.
-function MoreMenu({ label, actions }: { label: string; actions: { label: string; onClick: () => void }[] }) {
-  const ref = useRef<HTMLDetailsElement>(null)
-  return (
-    <details ref={ref} style={{ position: 'relative' }}>
-      <summary
-        aria-label={label}
-        title={label}
-        style={{ listStyle: 'none', cursor: 'pointer', padding: '2px 8px', borderRadius: 6, color: 'var(--muted)' }}
-      >
-        ⋯
-      </summary>
-      <div
-        role="menu"
-        style={{
-          position: 'absolute', right: 0, top: '100%', zIndex: 5, minWidth: 180, padding: 4,
-          background: 'var(--card)', border: '1px solid var(--border-strong)', borderRadius: 8,
-        }}
-      >
-        {actions.map((a) => (
-          <button
-            key={a.label}
-            type="button"
-            role="menuitem"
-            onClick={() => {
-              if (ref.current) ref.current.open = false
-              a.onClick()
-            }}
-            style={{
-              display: 'block', width: '100%', textAlign: 'left', fontSize: 13, padding: '6px 10px',
-              border: 0, borderRadius: 6, background: 'transparent', color: 'var(--text)', cursor: 'pointer',
-            }}
-          >
-            {a.label}
-          </button>
-        ))}
-      </div>
-    </details>
-  )
-}
-
 const small: CSSProperties = { fontSize: 12, padding: '2px 10px' }
 
-// A row whose item carries a reply draft: the draft in an editable box, Send to thread
-// and Ignore. Send saves an edited draft first, then posts as the owner.
-function ReplyRow({
+// What the owner should do with a row: the label of its one primary button.
+type Primary = 'Reply' | 'Dispatch fix' | 'Decide' | 'Done'
+
+function primaryOf(groupId: NeedGroup['id'], e: NeedEntry): Primary {
+  if (groupId === 'decide' && e.dispatch) return 'Done'
+  if (groupId === 'decide' && e.handoff_title) return 'Dispatch fix'
+  if (groupId === 'decide' && e.reply_draft) return 'Reply'
+  if (groupId === 'decide' && e.reason.startsWith('Looks resolved')) return 'Done'
+  if (groupId === 'unanswered' && e.permalink) return 'Reply'
+  return 'Decide'
+}
+
+// One Needs-you row. Collapsed: priority, summary, why and when, ONE button naming the
+// next step, and the expand toggle. Expanded: channel, Slack link, the reply draft for
+// a reply row (Send to thread is the send), and the secondary actions.
+function NeedRow({
   e,
+  groupId,
   first,
   onMark,
   onWhy,
+  onDispatch,
   onSend,
+  busy,
 }: {
   e: NeedEntry
+  groupId: NeedGroup['id']
   first: boolean
   onMark: (how: HandleHow) => void
   onWhy: () => void
-  onSend: (text: string, edited: boolean) => void
+  onDispatch?: () => void
+  onSend?: (text: string, edited: boolean) => void
+  busy?: boolean
 }) {
+  const primary = primaryOf(groupId, e)
+  const replyRow = groupId === 'decide' && !!e.reply_draft && !e.handoff_title && !!onSend
+  const [open, setOpen] = useState(false)
   const [text, setText] = useState(e.reply_draft || '')
   useEffect(() => setText(e.reply_draft || ''), [e.reply_draft])
-  const id = `sr-reply-${e.key.replace(/[^A-Za-z0-9]/g, '-')}`
-  const more = [
-    ...(e.permalink ? [{ label: 'Open in Slack', onClick: () => window.open(e.permalink, '_blank', 'noopener,noreferrer') }] : []),
-    { label: 'Done without sending', onClick: () => onMark('done') },
+  const boxRef = useRef<HTMLTextAreaElement>(null)
+  const safe = e.key.replace(/[^A-Za-z0-9]/g, '-')
+  const boxId = `sr-reply-${groupId}-${safe}`
+  const panelId = `sr-row-${groupId}-${safe}`
+  const sent = e.dispatch
+  const openSlack = () => e.permalink && window.open(e.permalink, '_blank', 'noopener,noreferrer')
+  const onPrimary = () => {
+    if (primary === 'Dispatch fix') onDispatch?.()
+    else if (primary === 'Done') onMark('done')
+    else if (primary === 'Reply' && !replyRow) openSlack()
+    else {
+      setOpen(true)
+      if (replyRow) window.requestAnimationFrame(() => boxRef.current?.focus())
+    }
+  }
+  const secondary: { label: string; onClick: () => void }[] = [
+    ...(primary !== 'Done' ? [{ label: replyRow ? 'Done without sending' : 'Done', onClick: () => onMark('done') }] : []),
+    { label: 'Ignore', onClick: () => onMark('ignored') },
     { label: 'Why? Ask the lead', onClick: onWhy },
   ]
   return (
-    <li className="text-sm" style={{ padding: '10px 0', borderTop: first ? 0 : '1px solid var(--border)' }}>
+    <li
+      className="text-sm"
+      data-testid="need-row"
+      data-priority={e.priority || ''}
+      data-age-hours={e.age_hours}
+      style={{ padding: '8px 0', borderTop: first ? 0 : '1px solid var(--border)' }}
+    >
       <div className="flex items-start gap-2">
         <div style={{ flex: 'none', minWidth: 28 }}>{priorityBadge(e.priority)}</div>
         <div style={{ minWidth: 0, flex: 1 }}>
           <div style={{ color: 'var(--text-strong)' }}>{e.summary || '(no text)'}</div>
           <div className="text-xs text-muted" style={{ marginTop: 2 }}>
-            {e.reason} · <span className="font-mono">{e.channel}</span> · {fmtAge(e.age_hours)}
+            {e.reason} · <span data-testid="need-age">{fmtAge(e.age_hours)}</span>
           </div>
-          <label htmlFor={id} className="text-xs text-muted" style={{ display: 'block', marginTop: 6 }}>
-            Reply to the thread, sent as you
-          </label>
-          <textarea
-            id={id}
-            value={text}
-            maxLength={1500}
-            rows={3}
-            onChange={(ev) => setText(ev.target.value)}
-            style={{
-              width: '100%', marginTop: 2, fontSize: 13, padding: '6px 8px', borderRadius: 6, resize: 'vertical',
-              border: '1px solid var(--border-strong)', background: 'var(--bg)', color: 'var(--text)',
-            }}
-          />
-        </div>
-        <div className="flex items-center gap-1" style={{ flex: 'none' }}>
-          <Btn style={small} disabled={!text.trim()} onClick={() => onSend(text.trim(), text.trim() !== (e.reply_draft || '').trim())}>
-            Send to thread
-          </Btn>
-          <Btn style={small} onClick={() => onMark('ignored')}>Ignore</Btn>
-          <MoreMenu label="More actions" actions={more} />
-        </div>
-      </div>
-    </li>
-  )
-}
-
-function NeedRow({
-  e,
-  first,
-  onMark,
-  onWhy,
-  onDispatch,
-  busy,
-}: {
-  e: NeedEntry
-  first: boolean
-  onMark: (how: HandleHow) => void
-  onWhy: () => void
-  onDispatch?: () => void
-  busy?: boolean
-}) {
-  const fix = !!e.handoff_title && !!onDispatch
-  const sent = e.dispatch
-  return (
-    <li className="text-sm" style={{ padding: '10px 0', borderTop: first ? 0 : '1px solid var(--border)' }}>
-      <div className="flex items-start gap-2">
-        <div style={{ flex: 'none', minWidth: 28 }}>{priorityBadge(e.priority)}</div>
-        <div style={{ minWidth: 0, flex: 1 }}>
-          <div style={{ color: 'var(--text-strong)' }}>{e.summary || '(no text)'}</div>
-          {fix && !sent && <div className="text-xs" style={{ marginTop: 2 }}>Fix: {e.handoff_title}</div>}
           {sent && (
             <div className="text-xs" style={{ marginTop: 2 }} data-testid="fix-in-progress">
               <SessionLink d={sent} /> · {FIX_STATE[sent.state] || sent.state}
@@ -1127,11 +1000,31 @@ function NeedRow({
               )}
             </div>
           )}
-          <div className="text-xs text-muted" style={{ marginTop: 2 }}>
-            {e.reason}
-            {e.words && e.words.length > 0 && <> ({e.words.join(', ')})</>}
-            {' · '}
-            <span className="font-mono">{e.channel}</span> · {fmtAge(e.age_hours)}
+        </div>
+        <div className="flex items-center gap-1" style={{ flex: 'none' }} data-testid="need-actions">
+          <Btn primary style={small} onClick={onPrimary} disabled={primary === 'Dispatch fix' && busy}>
+            {primary === 'Dispatch fix' && busy ? 'Dispatching…' : primary}
+          </Btn>
+          <button
+            type="button"
+            aria-expanded={open}
+            aria-controls={panelId}
+            aria-label={open ? 'Hide details' : 'Show details and more actions'}
+            title={open ? 'Hide details' : 'Details and more actions'}
+            onClick={() => setOpen(!open)}
+            style={{ border: 0, background: 'transparent', cursor: 'pointer', padding: '2px 8px', borderRadius: 6, color: 'var(--muted)' }}
+          >
+            {open ? '▴' : '▾'}
+          </button>
+        </div>
+      </div>
+      {open && (
+        <div id={panelId} data-testid="need-more" style={{ margin: '6px 0 0 36px' }}>
+          <div className="text-xs text-muted">
+            <span className="font-mono">{e.channel}</span>
+            {e.category && <> · {e.category}</>}
+            {e.words && e.words.length > 0 && <> · shared words: {e.words.join(', ')}</>}
+            {e.members && e.members.length > 0 && <> · Done and Ignore apply to all {e.members.length}</>}
             {e.permalink && (
               <>
                 {' · '}
@@ -1141,41 +1034,66 @@ function NeedRow({
               </>
             )}
           </div>
-        </div>
-        <div className="flex items-center gap-1" style={{ flex: 'none' }}>
-          {sent ? (
+          {e.handoff_title && !sent && <div className="text-xs" style={{ marginTop: 4 }}>Fix: {e.handoff_title}</div>}
+          {replyRow && (
             <>
-              <Btn style={small} onClick={() => onMark('ignored')}>Ignore</Btn>
-              <MoreMenu
-                label="More actions"
-                actions={[
-                  { label: 'Done', onClick: () => onMark('done') },
-                  { label: 'Why? Ask the lead', onClick: onWhy },
-                ]}
+              <label htmlFor={boxId} className="text-xs text-muted" style={{ display: 'block', marginTop: 6 }}>
+                Reply to the thread, sent as you
+              </label>
+              <textarea
+                id={boxId}
+                ref={boxRef}
+                value={text}
+                maxLength={1500}
+                rows={3}
+                onChange={(ev) => setText(ev.target.value)}
+                style={{
+                  width: '100%', marginTop: 2, fontSize: 13, padding: '6px 8px', borderRadius: 6, resize: 'vertical',
+                  border: '1px solid var(--border-strong)', background: 'var(--bg)', color: 'var(--text)',
+                }}
               />
-            </>
-          ) : fix ? (
-            <>
-              <Btn style={small} onClick={onDispatch} disabled={busy}>{busy ? 'Dispatching…' : 'Dispatch fix'}</Btn>
-              <Btn style={small} onClick={() => onMark('ignored')}>Ignore</Btn>
-              <MoreMenu
-                label="More actions"
-                actions={[
-                  { label: 'Done', onClick: () => onMark('done') },
-                  { label: 'Why? Ask the lead', onClick: onWhy },
-                ]}
-              />
-            </>
-          ) : (
-            <>
-              <Btn style={small} onClick={() => onMark('done')}>Done</Btn>
-              <Btn style={small} onClick={() => onMark('ignored')}>Ignore</Btn>
-              <MoreMenu label="More actions" actions={[{ label: 'Why? Ask the lead', onClick: onWhy }]} />
             </>
           )}
+          <div className="flex flex-wrap items-center gap-1" style={{ marginTop: 6 }} data-testid="need-secondary">
+            {replyRow && (
+              <Btn
+                primary
+                style={small}
+                disabled={!text.trim()}
+                onClick={() => onSend?.(text.trim(), text.trim() !== (e.reply_draft || '').trim())}
+              >
+                Send to thread
+              </Btn>
+            )}
+            {secondary.map((a) => (
+              <Btn key={a.label} style={small} onClick={a.onClick}>{a.label}</Btn>
+            ))}
+          </div>
         </div>
-      </div>
+      )}
     </li>
+  )
+}
+
+// One Needs-you group: the first ROWS_SHOWN rows, then "Show N more".
+function NeedGroupList({ g, render }: { g: NeedGroup & { shown: NeedEntry[] }; render: (e: NeedEntry, i: number) => ReactNode }) {
+  const [all, setAll] = useState(false)
+  const rows = all ? g.shown : g.shown.slice(0, ROWS_SHOWN)
+  const hidden = g.shown.length - rows.length
+  return (
+    <>
+      <ul className="flex flex-col">{rows.map(render)}</ul>
+      {(hidden > 0 || (all && g.shown.length > ROWS_SHOWN)) && (
+        <button
+          type="button"
+          className="text-xs underline"
+          onClick={() => setAll(!all)}
+          style={{ border: 0, background: 'transparent', cursor: 'pointer', padding: '4px 0', color: 'var(--muted)' }}
+        >
+          {all ? 'Show fewer' : `Show ${hidden} more`}
+        </button>
+      )}
+    </>
   )
 }
 
@@ -1557,28 +1475,22 @@ function NeedsCard({
               <h4 className="text-sm" style={{ margin: 0, fontWeight: 600, color: 'var(--text-strong)' }}>
                 {GROUP_TITLE[g.id]} <span className="text-muted" style={{ fontWeight: 400 }}>({g.total - (g.entries.length - g.shown.length)})</span>
               </h4>
-              <ul className="flex flex-col">
-                {g.shown.map((e, i) => g.id === 'decide' && e.reply_draft && !e.handoff_title ? (
-                  <ReplyRow
-                    key={e.key}
-                    e={e}
-                    first={i === 0}
-                    onMark={(how) => post([e.key], how, `${g.id}:${e.key}`)}
-                    onWhy={() => onWhy(e)}
-                    onSend={(text, edited) => sendReply(e.key, text, edited, `${g.id}:${e.key}`)}
-                  />
-                ) : (
+              <NeedGroupList
+                g={g}
+                render={(e, i) => (
                   <NeedRow
                     key={e.key}
                     e={e}
+                    groupId={g.id}
                     first={i === 0}
                     onMark={(how) => post(e.members?.length ? e.members : [e.key], how, `${g.id}:${e.key}`)}
                     onWhy={() => onWhy(e)}
                     onDispatch={g.id === 'decide' && e.handoff_title ? () => fixer.dispatch(e.key) : undefined}
+                    onSend={g.id === 'decide' ? (text, edited) => sendReply(e.key, text, edited, `${g.id}:${e.key}`) : undefined}
                     busy={fixer.busyKey === e.key}
                   />
-                ))}
-              </ul>
+                )}
+              />
             </section>
           ),
         )
@@ -1732,6 +1644,8 @@ function LedgerRow({ it, first, checked, onToggle }: { it: Item; first: boolean;
         <div style={{ minWidth: 0, flex: 1 }}>
           <div style={{ color: 'var(--text-strong)' }}>{it.summary || it.text.slice(0, 280)}</div>
           <div className="text-xs text-muted" style={{ marginTop: 2 }}>
+            <span data-testid="ledger-ts" data-ts={it.ts_float}>{ago(it.ts_float)}</span>
+            {' · '}
             <span className="font-mono">{it.channel}</span>
             {it.user && <> · {it.user}</>}
             {it.reply_count > 0 && <> · {it.reply_count} replies</>}
@@ -1754,6 +1668,151 @@ function LedgerRow({ it, first, checked, onToggle }: { it: Item; first: boolean;
         </div>
       </div>
     </li>
+  )
+}
+
+// ── Ledger tab ─────────────────────────────────────────────────────────────
+
+// "Needs me": the item waits on the owner (a reply draft, a fix hand-off, or a
+// thread that looks resolved).
+function needsMe(it: Item): boolean {
+  return !!(it.reply_draft?.text || it.fix_handoff?.prompt || it.possibly_resolved)
+}
+
+const PRIORITY_FILTERS = ['', 'p0', 'p1', 'p2', 'p3', 'none']
+
+function LedgerTab(props: {
+  state: State
+  items: Item[]
+  filter: string
+  setFilter: (f: string) => void
+  selected: Set<string>
+  setSelected: (s: Set<string>) => void
+  busy: string
+  onInvestigate: (repo: string) => void
+}) {
+  const { state, items, selected, setSelected } = props
+  const [repo, setRepo] = useState('')
+  const [priority, setPriority] = useState('')
+  const [category, setCategory] = useState('')
+  const [mine, setMine] = useState(false)
+  const p = state.counts.open_by_priority
+  const categories = useMemo(() => [...new Set(items.map((it) => it.category).filter(Boolean))].sort(), [items])
+  const rows = useMemo(
+    () =>
+      items
+        .filter((it) => !priority || (priority === 'none' ? !it.priority : it.priority === priority))
+        .filter((it) => !category || it.category === category)
+        .filter((it) => !mine || needsMe(it))
+        .sort((a, b) => (b.ts_float || 0) - (a.ts_float || 0)),
+    [items, priority, category, mine],
+  )
+  const toggle = (key: string) => {
+    const next = new Set(selected)
+    if (next.has(key)) next.delete(key)
+    else next.add(key)
+    setSelected(next)
+  }
+  const channelRows = useMemo(
+    () => state.settings.channels.map((cid) => ({ cid, ...(state.channels[cid] || {}) })),
+    [state],
+  )
+  const select = 'text-sm bg-transparent border rounded px-2 py-1'
+  return (
+    <div style={{ minWidth: 0 }}>
+      <div className="grid gap-3 grid-cols-[repeat(auto-fit,minmax(150px,1fr))] mb-4">
+        <StatCard label="Awaiting triage" value={state.counts.needs_triage} accent />
+        <StatCard label="Possibly resolved" value={state.counts.possibly_resolved} />
+        <StatCard label="Open p0 / p1" value={`${p.p0 || 0} / ${p.p1 || 0}`} />
+        <StatCard label="Tracked items" value={state.counts.total} />
+      </div>
+
+      <Card className="mb-4">
+        <div className="flex flex-wrap items-center gap-2 mb-3">
+          <CardTitle>Ledger</CardTitle>
+          <span className="text-xs text-muted" data-testid="ledger-count">
+            {rows.length} of {items.length} · newest first
+          </span>
+          <label className="text-sm text-muted" htmlFor="sr-filter">Status</label>
+          <select id="sr-filter" className={select} value={props.filter} onChange={(e) => props.setFilter(e.target.value)}>
+            <option value="open">open</option>
+            <option value="new">new</option>
+            <option value="triaged">triaged</option>
+            <option value="investigating">investigating</option>
+            <option value="resolved">resolved</option>
+            <option value="noise">noise</option>
+            <option value="">all</option>
+          </select>
+          <label className="text-sm text-muted" htmlFor="sr-priority">Priority</label>
+          <select id="sr-priority" className={select} value={priority} onChange={(e) => setPriority(e.target.value)}>
+            {PRIORITY_FILTERS.map((v) => (
+              <option key={v} value={v}>{v || 'all'}</option>
+            ))}
+          </select>
+          <label className="text-sm text-muted" htmlFor="sr-category">Category</label>
+          <select id="sr-category" className={select} value={category} onChange={(e) => setCategory(e.target.value)}>
+            <option value="">all</option>
+            {categories.map((c) => (
+              <option key={c} value={c}>{c}</option>
+            ))}
+          </select>
+          <label className="text-sm flex items-center gap-1" style={{ cursor: 'pointer' }}>
+            <input type="checkbox" checked={mine} onChange={(e) => setMine(e.target.checked)} />
+            Needs me
+          </label>
+          <div className="flex-1" />
+          <Input
+            aria-label="GitHub repository to search (owner/name, optional)"
+            placeholder="owner/repo (optional)"
+            value={repo}
+            onChange={(e) => setRepo(e.target.value)}
+            className="w-48"
+          />
+          <Btn onClick={() => props.onInvestigate(repo)} disabled={selected.size === 0 || !!props.busy}>
+            Investigate {selected.size || ''}
+          </Btn>
+        </div>
+        {rows.length === 0 ? (
+          <EmptyState
+            icon={<span aria-hidden>📡</span>}
+            title={items.length ? 'Nothing matches these filters' : 'Nothing here yet'}
+            subtitle={items.length ? 'Change a filter to see more.' : 'New messages appear after the next poll.'}
+          />
+        ) : (
+          <ul className="flex flex-col" data-testid="ledger-list">
+            {rows.map((it, idx) => (
+              <LedgerRow key={it.key} it={it} first={idx === 0} checked={selected.has(it.key)} onToggle={() => toggle(it.key)} />
+            ))}
+          </ul>
+        )}
+      </Card>
+
+      <Card>
+        <CardTitle>Channels</CardTitle>
+        {channelRows.length === 0 ? (
+          <p className="text-sm text-muted">No channels configured.</p>
+        ) : (
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-muted">
+                <th scope="col">Channel</th>
+                <th scope="col">Last polled</th>
+                <th scope="col">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {channelRows.map((c) => (
+                <tr key={c.cid}>
+                  <td className="font-mono">{c.cid}</td>
+                  <td>{fmtTime(c.last_polled_at)}</td>
+                  <td>{c.last_error ? <Badge variant="err" title={c.last_error}>error</Badge> : <Badge variant="ok">ok</Badge>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Card>
+    </div>
   )
 }
 
