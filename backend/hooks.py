@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 from . import crew_runtime, watch
@@ -14,6 +15,9 @@ async def on_startup(ctx: Any) -> None:
     """Start the poll loop. Returns immediately; the loop runs as a gateway task."""
     # The fallback state handle for a gateway with no Slack bot (see _gateway_state).
     crew_runtime.bind_http_app(getattr(ctx, "http_app", None))
+    # A crew session left over from before an app update still runs the old ledger
+    # tool; replace it now rather than on the first poll.
+    await crew_runtime.check_tool_version_on_startup(Path(ctx.data_dir))
     watch.start(ctx)
     logger.info("slack-radar: poll loop started (data dir %s)", ctx.data_dir)
 

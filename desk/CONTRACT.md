@@ -48,6 +48,8 @@ Two kinds of state, stored in two places on purpose.
 <data>/ledger.json.lock     # sidecar lock (ledger.json is replaced by rename)
 <data>/events.jsonl         # append-only work log, halved when it passes 2 MiB
 <data>/crew.json            # the crew record
+<data>/kv/tool_version.json # written by each ledger MCP server on start (see §4)
+<data>/kv/crew_session.json # written by the gateway: the version the crew session started under
 ```
 
 `<data>` is `~/.kiro/crew/apps/slack-radar/data/` (`AppContext.data_dir` in the gateway, `store.default_data_dir()` in the MCP server, `SLACK_RADAR_DATA_DIR` to override).
@@ -165,16 +167,29 @@ One stdio server, declared in `app.json` `mcpServers.ledger`, reached by agents 
 
 | Tool | Arguments | Returns |
 |---|---|---|
-| `slack_radar_read` | `{limit?: int 1–100}` (default 40) | `crew` (`name`, `enabled`, `paused_reason`), `crew_memory`, `counts`, `slack_source` (`state`, `error`), `digest` (`requested_at`, `pending`, `last_posted_date`, `last_error`), `channels` (`last_polled_at`, `last_error`), `needs_triage`, `thread_updates` (each item also carries its LOCAL `replies`) |
+| `slack_radar_read` | `{limit?: int 1–100}` (default 40) | `tool_version` (the app version this server process loaded), `crew` (`name`, `enabled`, `paused_reason`), `crew_memory`, `counts`, `slack_source` (`state`, `error`), `digest` (`requested_at`, `pending`, `last_posted_date`, `last_error`), `channels` (`last_polled_at`, `last_error`), `needs_triage`, `thread_updates` (each item also carries its LOCAL `replies`) |
 | `slack_radar_record` | `{items?: [...≤100], crew?: {...}, event?: str}` | `{ok, applied, refused}` |
 | `slack_radar_digest` | `{headline: str ≤400, top_keys?: [item key ≤10]}` | `{ok, queued}`; sets `digest.pending` and `crew_memory.phase: idle` |
 | `slack_radar_request_digest` | `{}` | `{ok, requested}`; sets `digest.requested_at` |
 
-`slack_radar_record` item shape: `{key, category?, priority?, status?, summary?, links?, note?, investigation?, clear_possibly_resolved?: bool, fix_handoff?: {title, prompt, repo, links?}}`. `fix_handoff` is checked after `status`/`category` in the same row; a refused one is reported per item and the other fields still apply. `key` must be one `slack_radar_read` returned. `status` may not be `new`. Enums are `store.CATEGORIES`, `store.PRIORITIES`, `store.STATUSES`. Unknown keys and bad enums are refused per item; recording any field on an item clears its `needs_triage` and `thread_changed`.
+`slack_radar_record` item shape: `{key, category?, priority?, status?, summary?, links?, note?, investigation?, clear_possibly_resolved?: bool, fix_handoff?: {title, prompt, repo, links?}}`. `fix_handoff` is checked after `status`/`category` in the same row; a refused one is reported per item and the other fields still apply. `key` must be one `slack_radar_read` returned. `status` may not be `new`. Enums are `store.CATEGORIES`, `store.PRIORITIES`, `store.STATUSES`. Unknown item keys and bad enums are refused per item; recording any field on an item clears its `needs_triage` and `thread_changed`.
 
 `slack_radar_record` crew shape: `{phase?: idle|triaging|investigating|rechecking|digest, next?: str ≤500, today?: str ≤240, tried_add?: [str], rejected_add?: [str]}`. A refused `today` is reported in `refused` as key `crew.today`; the other crew fields still apply.
 
 `event` is one line for the Activity tab: no paths, no hosts.
+
+**Unknown fields are refused, never ignored.** A row with any key outside `store.ITEM_RECORD_FIELDS` (the item shape above plus `reply_draft`) is refused whole, before anything in it is written: `refused: [{key, why: "unknown field(s): a, b -- the ledger tool is stale; ask the owner to restart the crew session"}]`, and the key is not in `applied`. A `crew` object with a key outside `store.CREW_RECORD_FIELDS` is refused whole as key `crew`. Other rows still apply. The schema's field sets equal these two sets (`tests/test_stale_tool.py`).
+
+### Version handshake and the restart rule
+
+A kiro-cli process keeps its ledger server for its whole life, so after an app update the Lead can still be calling the old tool code, which drops fields it does not know. Two records let the gateway see that:
+
+| File | Writer | Shape |
+|---|---|---|
+| `kv/tool_version.json` | every ledger server, on start | `{version, pid, ppid, at, servers}`: the top level is the latest start; `servers` holds one entry per host process (`ppid`, the kiro-cli), entries whose host process is gone are dropped. `version` is the `app.json` next to the server when it started |
+| `kv/crew_session.json` | gateway | `{slot_key, version, at, awaiting}`: the installed version when the gateway created or restarted the crew slot |
+
+`crew_runtime.check_tool_version` runs on every poll of a live crew, once in `hooks.on_startup`, and in `/crew/start`. It only looks at a crew slot the gateway holds (one it does not hold has no process and starts fresh). The session is stale when `crew_session.json` names another slot or an older version (or is missing: a session from before this check), or when a running server reported an older version. A stale slot is retired (`chat_handlers.close_slot`) and the record moves to `store.next_slot_key`, exactly like an agent move, with one `crew` event `crew session restarted after app update (<old> -> <new>)` (`unknown` when nothing recorded the old version). Older server entries are forgotten and `crew_session.json` is written with `awaiting: true`; no further comparison happens until a server reports the installed version, so one update restarts once. A slot mid-turn (`slot.running`) is never restarted: the restart waits for the next poll, and the pending wake brings that poll back to the new session.
 
 `slack_radar_record` also takes `reply_draft?: {text} | null` per item (see the item table). A refused draft is reported per item and the other fields still apply; there is no field for `replied`.
 

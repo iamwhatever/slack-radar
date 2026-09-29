@@ -137,7 +137,7 @@ already names other apps, keep them in the list. The app is off by default
 
 To pick up a newer version, re-run `kirocrew app install` on the updated
 directory, then use **Library → ⋮ → Sync** on the app so the gateway re-renders
-its agent specs.
+its agent specs. After an update the Lead's session restarts itself on the next poll.
 
 ## First run
 
@@ -418,7 +418,7 @@ kirocrew app enable slack-radar
 里已经有别的应用，记得一并保留。应用默认不启用（`defaultEnabled: false`）。
 
 升级时，对更新后的目录重新执行 `kirocrew app install`，然后在
-**Library → ⋮ → Sync** 里同步本应用，让网关重新生成它的 agent 配置。
+**Library → ⋮ → Sync** 里同步本应用，让网关重新生成它的 agent 配置。升级后，Lead 的会话会在下一次轮询时自动重启。
 
 ## 首次运行
 

@@ -45,6 +45,10 @@ EVENTS_FILENAME = "events.jsonl"
 CREW_FILENAME = "crew.json"
 #: Child runs of the crew session seen on the last observation (``member`` events).
 RUNS_SEEN_FILENAME = "member_runs.json"
+#: Written by the ledger MCP server on start: which app version that process loaded.
+TOOL_VERSION_FILENAME = "kv/tool_version.json"
+#: Written by the gateway: which app version the current crew session was started under.
+CREW_SESSION_FILENAME = "kv/crew_session.json"
 
 #: Classification vocabulary. The crew may only write these values.
 CATEGORIES = ("feature-request", "bug-report", "question", "already-answered", "noise")
@@ -556,6 +560,111 @@ def update_crew(data_dir: Path, patch: dict[str, Any]) -> dict[str, Any]:
     return rec
 
 
+# ── app version handshake (ledger MCP server <-> gateway) ──────────────────
+
+_APP_JSON = Path(__file__).resolve().parents[1] / "app.json"
+
+
+def installed_version() -> str:
+    """The ``version`` of the app.json installed next to this file, or ``""``."""
+    try:
+        raw = json.loads(_APP_JSON.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    v = raw.get("version") if isinstance(raw, dict) else None
+    return v if isinstance(v, str) else ""
+
+
+def version_tuple(value: Any) -> tuple[int, ...]:
+    """``"0.8.1"`` -> ``(0, 8, 1)``; anything unparsable -> ``()``, older than every version."""
+    parts = str(value or "").strip().split(".")
+    try:
+        return tuple(int(x) for x in parts) if parts != [""] else ()
+    except ValueError:
+        return ()
+
+
+def is_older(version: Any, than: Any) -> bool:
+    return version_tuple(version) < version_tuple(than)
+
+
+def _pid_alive(pid: Any) -> bool:
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except PermissionError:
+        return True
+    except (OSError, OverflowError):
+        return False
+    return True
+
+
+def read_tool_version(data_dir: Path) -> dict[str, Any]:
+    """``{version, pid, ppid, at, servers}``; ``servers`` keeps one entry per host process
+    (``ppid``, the kiro-cli that spawned the server), so the Lead's server and an
+    investigator's server never overwrite each other. Missing or corrupt -> empty."""
+    try:
+        raw = _read_json(Path(data_dir) / TOOL_VERSION_FILENAME)
+    except StoreError:
+        raw = None
+    if not isinstance(raw, dict):
+        return {"version": "", "pid": 0, "ppid": 0, "at": 0.0, "servers": {}}
+    servers = raw.get("servers") if isinstance(raw.get("servers"), dict) else {}
+    raw["servers"] = {k: v for k, v in servers.items() if isinstance(v, dict)}
+    return raw
+
+
+def write_tool_version(data_dir: Path, version: str, pid: int, ppid: int) -> dict[str, Any]:
+    """Record one server start. Entries whose host process is gone are dropped."""
+    path = Path(data_dir) / TOOL_VERSION_FILENAME
+    with _file_lock(path):
+        cur = read_tool_version(data_dir)
+        servers = {k: v for k, v in cur["servers"].items() if _pid_alive(v.get("ppid"))}
+        entry = {"version": version, "pid": int(pid), "ppid": int(ppid), "at": now()}
+        servers[str(int(ppid))] = entry
+        rec = {**entry, "servers": servers}
+        _atomic_write_text(path, json.dumps(rec, indent=1, sort_keys=True))
+    return rec
+
+
+def drop_tool_versions_older_than(data_dir: Path, version: str) -> None:
+    """Forget every server entry older than ``version``: their session was retired."""
+    path = Path(data_dir) / TOOL_VERSION_FILENAME
+    with _file_lock(path):
+        cur = read_tool_version(data_dir)
+        servers = {k: v for k, v in cur["servers"].items() if not is_older(v.get("version"), version)}
+        if servers == cur["servers"]:
+            return
+        _atomic_write_text(path, json.dumps({**cur, "servers": servers}, indent=1, sort_keys=True))
+
+
+def live_tool_versions(data_dir: Path) -> list[dict[str, Any]]:
+    """Server entries whose host process is still running."""
+    return [v for v in read_tool_version(data_dir)["servers"].values() if _pid_alive(v.get("ppid"))]
+
+
+def read_crew_session(data_dir: Path) -> dict[str, Any]:
+    """``{slot_key, version, at, awaiting}`` or ``{}``: the app version the gateway
+    started the current crew session under, and whether it is still waiting for that
+    session's ledger server to report in after a restart."""
+    try:
+        raw = _read_json(Path(data_dir) / CREW_SESSION_FILENAME)
+    except StoreError:
+        raw = None
+    return raw if isinstance(raw, dict) else {}
+
+
+def write_crew_session(data_dir: Path, slot_key: str, version: str, *, awaiting: bool) -> dict[str, Any]:
+    rec = {"slot_key": slot_key, "version": version, "at": now(), "awaiting": bool(awaiting)}
+    _atomic_write_text(Path(data_dir) / CREW_SESSION_FILENAME, json.dumps(rec, indent=1, sort_keys=True))
+    return rec
+
+
 # ── events (work log) ──────────────────────────────────────────────────────
 
 
@@ -669,12 +778,33 @@ def swap_seen_runs(data_dir: Path, current: dict[str, dict[str, str]]) -> dict[s
 # ── crew write path (used by the MCP server) ───────────────────────────────
 
 
+#: Every field ``apply_crew_record`` reads on an item row. A row with any other key is
+#: refused whole: a caller sending a field this code does not know is running a newer
+#: tool description against an older store (or the reverse), and silently dropping the
+#: field would answer ``applied`` for a write that never happened.
+ITEM_RECORD_FIELDS = frozenset({
+    "key", "category", "priority", "status", "summary", "note", "investigation", "links",
+    "reply_draft", "fix_handoff", "clear_possibly_resolved",
+})
+#: Every field ``apply_crew_record`` reads on ``crew``; same rule.
+CREW_RECORD_FIELDS = frozenset({"phase", "next", "today", "tried_add", "rejected_add"})
+
+STALE_TOOL_HINT = "the ledger tool is stale; ask the owner to restart the crew session"
+
+
+def _unknown_fields_why(row: dict[str, Any], known: frozenset[str]) -> str:
+    unknown = sorted(str(k) for k in row if k not in known)
+    return f"unknown field(s): {', '.join(unknown)} -- {STALE_TOOL_HINT}" if unknown else ""
+
+
 def apply_crew_record(ledger: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
     """Validate and apply one ``slack_radar_record`` call. Returns a result summary.
 
     Every enum is checked against the vocabulary above and every text field is
     clipped and redacted. Unknown item keys are reported, not created: the crew can
-    only annotate items the poller recorded.
+    only annotate items the poller recorded. A row (or ``crew``) carrying a field
+    outside :data:`ITEM_RECORD_FIELDS` / :data:`CREW_RECORD_FIELDS` is refused whole,
+    before anything in it is written.
     """
     items = ledger["items"]
     applied: list[str] = []
@@ -687,6 +817,10 @@ def apply_crew_record(ledger: dict[str, Any], payload: dict[str, Any]) -> dict[s
         item = items.get(key)
         if item is None:
             refused.append({"key": key, "why": "unknown item key"})
+            continue
+        unknown = _unknown_fields_why(row, ITEM_RECORD_FIELDS)
+        if unknown:
+            refused.append({"key": key, "why": unknown})
             continue
         problems: list[str] = []
         if "category" in row:
@@ -741,7 +875,10 @@ def apply_crew_record(ledger: dict[str, Any], payload: dict[str, Any]) -> dict[s
         applied.append(key)
     mem = ledger["crew_memory"]
     crew = payload.get("crew")
-    if isinstance(crew, dict):
+    unknown_crew = _unknown_fields_why(crew, CREW_RECORD_FIELDS) if isinstance(crew, dict) else ""
+    if unknown_crew:
+        refused.append({"key": "crew", "why": unknown_crew})
+    elif isinstance(crew, dict):
         if crew.get("phase") in CREW_PHASES:
             mem["phase"] = crew["phase"]
         if "next" in crew:
