@@ -70,7 +70,10 @@ const HANDLED = [
 const need = (it: (typeof ITEMS)[number], reason: string, extra: Record<string, unknown> = {}) => ({
   key: it.key, channel: it.channel, permalink: it.permalink, summary: it.summary || it.text.slice(0, 200),
   priority: it.priority, category: it.category, age_hours: Math.round((T0 + 7200 - it.ts_float) / 360) / 10,
-  reason, ...extra,
+  reason, text: it.text, user: it.user, ts_float: it.ts_float,
+  replies: (it as { replies?: unknown[] }).replies || [], last_thread_check_at: T0 + 6000,
+  ...(it.reply_draft ? { reply_draft_by: it.reply_draft.by, reply_draft_at: it.reply_draft.at } : {}),
+  ...extra,
 })
 
 const HANDOFF = {
@@ -99,10 +102,16 @@ const HANDOFF2 = {
 
 const REPLY_DRAFT = 'Yes. The export uses the columns you filtered, and hidden columns are left out. ' +
   'The one known gap is tracked here: https://github.com/example-org/example-app/issues/398'
-const REPLY_ITEM = item(4, 'C0DEMO2', 'hana', 'Does the CSV export keep my column filters?', {
-  category: 'question', priority: 'p3', summary: 'Does CSV export keep column filters?', reply_count: 0,
-  reply_draft: { text: REPLY_DRAFT, at: T0 + 6200, by: 'lead' },
-})
+const REPLY_ITEM = item(4, 'C0DEMO2', 'hana',
+  'Does the CSV export keep my column filters?\nI hide a few columns before I export, and the file goes to <#C0FIN|finance>. ' +
+  'Hidden columns must stay out of it.', {
+    category: 'question', priority: 'p3', summary: 'Does CSV export keep column filters?', reply_count: 1,
+    reply_draft: { text: REPLY_DRAFT, at: T0 + 6200, by: 'lead' },
+    replies: [
+      { ts: `${T0 + 2700}.000300`, user: 'ivan', text: 'I think filters stay, not sure about hidden columns.' },
+    ],
+  })
+export const REPLY_SENT_LINK = `https://example.slack.com/archives/C0DEMO2/p${T0 + 7200}000400?thread_ts=${REPLY_ITEM.ts_float}.000100`
 // Two more decide rows (no priority, older), so the group shows "Show 2 more".
 const EXTRA_RESOLVED = item(0, 'C0DEMO2', 'kai', 'Webhook retries stopped after the outage', {
   category: 'bug-report', summary: 'Webhook retries stopped after the outage', reply_count: 3,
@@ -300,6 +309,9 @@ const api = {
       const keys = (body as { keys?: string[] })?.keys || []
       return { ok: true, mode: 'server', session_key: 'chat-88-1', title: `Fix batch: ${keys.length} problems (example-org/example-app)`,
         agent: 'kirocrew-conductor', at: T0 + 7000, batch: true, batch_keys: keys }
+    }
+    if (path.endsWith('/items/reply/send')) {
+      return { ok: true, item: { key: (body as { key?: string })?.key, replied: { ts: `${T0 + 7200}.000400`, at: T0 + 7200, text: REPLY_DRAFT, permalink: REPLY_SENT_LINK } } }
     }
     if (path.endsWith('/items/handoff/dispatch')) {
       return { ok: true, mode: 'server', session_key: 'chat-99-1', title: `Fix: ${HANDOFF.title}`, agent: 'kirocrew-conductor', at: T0 + 7000 }

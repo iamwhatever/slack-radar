@@ -46,7 +46,8 @@ const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PAT
 
 const shots = [
   { name: 'board', source: 'ok', tab: null },
-  { name: 'needs-you', source: 'ok', tab: null, clip: 'Needs you', openReply: true, openHandled: true, openHandoffs: true, openReplied: true },
+  { name: 'needs-you', source: 'ok', tab: null, clip: 'Needs you', openHandled: true, openHandoffs: true, openReplied: true },
+  { name: 'reply-detail', source: 'ok', tab: null, openDetail: true, fixed: true },
   { name: 'ledger', source: 'ok', tab: 'Ledger', wait: 'newest first' },
   { name: 'batch-dispatch', source: 'ok', tab: null, clip: 'Needs you', openBatch: true },
   { name: 'chat-expanded', source: 'ok', tab: null, chat: true },
@@ -59,6 +60,8 @@ const errors = []
 // A row of the "Needs a decision" group, by its summary.
 const decideRow = (page, summary) =>
   page.getByRole('region', { name: 'Needs a decision' }).getByTestId('need-row').filter({ hasText: summary })
+// The reply row's original message, first line (the row shows this, not the Lead's summary).
+const REPLY_FIRST = 'Does the CSV export keep my column filters?'
 const rowButtons = (row) => row.getByTestId('need-actions').locator('button').allTextContents()
 try {
   for (const s of shots) {
@@ -74,7 +77,7 @@ try {
     }
     if (s.chat) await page.getByRole('button', { name: 'What needs me today?' }).first().click()
     if (s.openBatch) await page.getByRole('button', { name: /^Dispatch all fixes \(/ }).click()
-    if (s.openReply) await decideRow(page, 'Does CSV export keep column filters?').getByRole('button', { name: 'Reply', exact: true }).click()
+    if (s.openDetail) await decideRow(page, REPLY_FIRST).getByRole('button', { name: 'Open', exact: true }).click()
     if (s.openHandled) await page.getByText(/^Handled \(/).click()
     if (s.openHandoffs) await page.getByText(/^Fixes in flight \(/).click()
     if (s.openReplied) await page.getByText(/^Replied \(/).click()
@@ -85,6 +88,13 @@ try {
         : page.getByText(s.clip, { exact: true }).locator('xpath=ancestor::div[contains(@class,"rounded")][1]')
       const file = path.join(outDir, `${s.name}.png`)
       await card.screenshot({ path: file })
+      console.log('wrote', file)
+      await ctx.close()
+      continue
+    }
+    if (s.fixed) {
+      const file = path.join(outDir, `${s.name}.png`)
+      await page.screenshot({ path: file })
       console.log('wrote', file)
       await ctx.close()
       continue
@@ -122,11 +132,16 @@ try {
     const row = decideRow(page, 'CSV export fails for files over ~50k rows')
     await row.waitFor({ timeout: 30000 })
     const buttons = await rowButtons(row)
-    await row.getByRole('button', { name: 'Show details and more actions' }).click()
-    const fixLine = await row.getByTestId('need-more').textContent()
-    const secondary = await row.getByTestId('need-secondary').locator('button').allTextContents()
-    const toggled = JSON.stringify(secondary) === JSON.stringify(['Done', 'Ignore', 'Why? Ask the lead'])
+    await row.getByTestId('need-open').click()
+    const dialog = page.getByRole('dialog')
+    await dialog.waitFor({ timeout: 5000 })
+    const fixLine = await dialog.textContent()
+    const secondary = await dialog.getByTestId('detail-actions').locator('button').allTextContents()
+    const toggled = JSON.stringify(secondary) === JSON.stringify(['Dispatch fix', 'Done', 'Ignore', 'Why? Ask the lead'])
       && fixLine.includes('Fix: Raise the CSV export row limit (issue #412)') && fixLine.includes('Open in Slack')
+      && fixLine.includes('Export to CSV fails on large files')
+    await page.keyboard.press('Escape')
+    const escClosed = (await page.getByRole('dialog').count()) === 0
     await row.getByRole('button', { name: 'Dispatch fix' }).click()
     const toast = page.getByTestId('dispatch-toast')
     await toast.waitFor({ timeout: 5000 })
@@ -135,11 +150,11 @@ try {
     const launched = await page.evaluate(() => window.__launched || [])
     const progress = await page.getByTestId('fix-in-progress').allTextContents()
     const toastLink = await toast.getByRole('link').getAttribute('href')
-    const ok = JSON.stringify(buttons) === JSON.stringify(['Dispatch fix', '▾']) && toggled
+    const ok = JSON.stringify(buttons) === JSON.stringify(['Dispatch fix']) && toggled && escClosed
       && posts.length === 1 && launched.length === 0
       && toastText.includes('Fix dispatched to a conductor') && toastLink === '/chat?sid=chat-99-1'
       && progress.length === 1 && progress[0].includes('Fix: Roll back the dashboard bundle split') && progress[0].includes('working')
-    if (!ok) errors.push(`[dispatch] buttons ${JSON.stringify(buttons)} secondary ${JSON.stringify(secondary)} ${fixLine} posts ${JSON.stringify(posts)} launched ${JSON.stringify(launched)} toast ${toastText} ${toastLink} progress ${JSON.stringify(progress)}`)
+    if (!ok) errors.push(`[dispatch] esc ${escClosed} buttons ${JSON.stringify(buttons)} secondary ${JSON.stringify(secondary)} ${fixLine} posts ${JSON.stringify(posts)} launched ${JSON.stringify(launched)} toast ${toastText} ${toastLink} progress ${JSON.stringify(progress)}`)
     else console.log('check dispatch: ok', JSON.stringify(buttons), toastText, JSON.stringify(progress))
     await toast.getByRole('link').click()
     const opened = await page.evaluate(() => window.__launched || [])
@@ -174,7 +189,7 @@ try {
     await toast.waitFor({ timeout: 5000 })
     const toastText = await toast.textContent()
     const posts = await page.evaluate(() => (window.__posts || []).filter((p) => p.path.includes('/items/handoff/dispatch')))
-    const replyButtons = await rowButtons(decideRow(page, 'Does CSV export keep column filters?'))
+    const replyButtons = await rowButtons(decideRow(page, REPLY_FIRST))
     await page.getByText(/^Fixes in flight \(/).click()
     const header = await page.getByTestId('fix-batch-header').allTextContents()
     const ok = label === 'Dispatch all fixes (2)' && listed === 2 && checked === 2
@@ -182,40 +197,92 @@ try {
       && posts.length === 1 && posts[0].path.endsWith('/dispatch-batch') && posts[0].body.keys.length === 2
       && toastText.includes('Fixes dispatched to one conductor') && toastText.includes('Fix batch: 2 problems')
       && (await page.getByTestId('batch-panel').count()) === 0
-      && JSON.stringify(replyButtons) === JSON.stringify(['Reply', '▾'])
+      && JSON.stringify(replyButtons) === JSON.stringify(['Open'])
       && header.length === 1 && header[0].includes('Fix batch: 2 problems') && header[0].includes('1 PRs found / 2')
     if (!ok) errors.push(`[batch] label ${label} listed ${listed} checked ${checked} ${text2} / ${text1} posts ${JSON.stringify(posts)} toast ${toastText} reply ${JSON.stringify(replyButtons)} header ${JSON.stringify(header)}`)
     else console.log('check batch: ok', label, listed, text2, text1, JSON.stringify(header))
     await ctx.close()
   }
-  // DOM check: a reply row shows the draft in a textbox with Send to thread + Ignore;
-  // Send posts the send route for that key, the row leaves and "Sent as you" shows.
+  // DOM check: a reply row shows "Reply ready", the ORIGINAL message's first line and one
+  // Open button, never the draft. Open shows a dialog: original -> replies -> draft -> Send
+  // in DOM order, focus in the draft; Esc closes and focus returns to Open. Send posts the
+  // send route exactly once, shows the sent reply's link, and the next click closes.
   {
     const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, timezoneId: 'UTC', locale: 'en-US' })
     const page = await ctx.newPage()
     page.on('pageerror', (e) => errors.push(`[reply] ${e.message}`))
     await page.goto('http://127.0.0.1:5287/index.html?source=ok')
-    const row = decideRow(page, 'Does CSV export keep column filters?')
+    const row = decideRow(page, REPLY_FIRST)
     await row.waitFor({ timeout: 30000 })
-    const closed = await page.getByRole('textbox', { name: 'Reply to the thread, sent as you' }).count()
-    await row.getByRole('button', { name: 'Reply', exact: true }).click()
-    const box = page.getByRole('textbox', { name: 'Reply to the thread, sent as you' })
-    await box.waitFor({ timeout: 5000 })
+    const rowText = await row.textContent()
+    const first = await row.getByTestId('need-first-line').textContent()
+    const rowOk = first === REPLY_FIRST && rowText.includes('Reply ready') && rowText.includes('hana')
+      && !rowText.includes('Yes. The export uses') && !rowText.includes('Send')
+      && JSON.stringify(await rowButtons(row)) === JSON.stringify(['Open'])
+      && (await page.getByRole('textbox', { name: 'Reply to the thread, sent as you' }).count()) === 0
+    const openBtn = row.getByRole('button', { name: 'Open', exact: true })
+    await openBtn.click()
+    const dialog = page.getByRole('dialog', { name: REPLY_FIRST })
+    await dialog.waitFor({ timeout: 5000 })
     await page.waitForTimeout(100)
+    const box = dialog.getByRole('textbox', { name: 'Reply to the thread, sent as you' })
     const focused = await box.evaluate((el) => el === document.activeElement)
     const draft = await box.inputValue()
-    const buttons = await row.getByTestId('need-secondary').locator('button').allTextContents()
-    await row.getByRole('button', { name: 'Send to thread' }).click()
-    await page.getByRole('status').filter({ hasText: 'Sent as you' }).waitFor({ timeout: 5000 })
+    const order = await dialog.evaluate((d) => {
+      const nodes = [
+        d.querySelector('[data-testid="detail-original"]'),
+        d.querySelector('[data-testid="detail-replies"]'),
+        d.querySelector('[data-testid="detail-draft"]'),
+        [...d.querySelectorAll('button')].find((b) => b.textContent === 'Send to thread'),
+      ]
+      if (nodes.some((n) => !n)) return false
+      return nodes.every((n, i) => i === 0 || nodes[i - 1].compareDocumentPosition(n) & Node.DOCUMENT_POSITION_FOLLOWING)
+    })
+    const original = await dialog.getByTestId('detail-text').textContent()
+    const replies = await dialog.getByTestId('detail-replies').textContent()
+    const actions = await dialog.getByTestId('detail-actions').locator('button').allTextContents()
+    await page.keyboard.press('Escape')
+    const escClosed = (await page.getByRole('dialog').count()) === 0
+    const back = await openBtn.evaluate((el) => el === document.activeElement)
+    await row.getByTestId('need-open').click()
+    await dialog.waitFor({ timeout: 5000 })
+    await dialog.getByRole('button', { name: 'Send to thread' }).click()
+    await dialog.getByRole('status').filter({ hasText: 'Sent as you' }).waitFor({ timeout: 5000 })
+    const link = await dialog.getByTestId('sent-link').getAttribute('href')
     const posts = await page.evaluate(() => window.__posts || [])
     const sends = posts.filter((p) => p.path.endsWith('/items/reply/send'))
-    const left = await page.getByRole('textbox', { name: 'Reply to the thread, sent as you' }).count()
-    const ok = closed === 0 && focused
-      && JSON.stringify(buttons) === JSON.stringify(['Send to thread', 'Done without sending', 'Ignore', 'Why? Ask the lead'])
-      && draft.startsWith('Yes. The export uses') && sends.length === 1 && sends[0].body.key.startsWith('C0DEMO2:')
-      && !posts.some((p) => p.path.endsWith('/items/reply/draft')) && left === 0
-    if (!ok) errors.push(`[reply] closed ${closed} focused ${focused} buttons ${JSON.stringify(buttons)} posts ${JSON.stringify(posts)} left ${left}`)
-    else console.log('check reply: ok', JSON.stringify(buttons), JSON.stringify(sends))
+    await dialog.getByRole('button', { name: 'Close', exact: true }).last().click()
+    const closed = (await page.getByRole('dialog').count()) === 0
+    const left = await decideRow(page, REPLY_FIRST).count()
+    const ok = rowOk && focused && order && draft.startsWith('Yes. The export uses')
+      && original.includes('the file goes to #finance') && replies.includes('ivan') && replies.includes('not sure about hidden columns')
+      && replies.includes('replies as of')
+      && JSON.stringify(actions) === JSON.stringify(['Send to thread', 'Done without sending', 'Ignore', 'Why? Ask the lead'])
+      && escClosed && back && sends.length === 1 && sends[0].body.key.startsWith('C0DEMO2:')
+      && !posts.some((p) => p.path.endsWith('/items/reply/draft')) && link.includes('thread_ts=') && closed && left === 0
+    if (!ok) errors.push(`[reply] row ${rowOk} ${JSON.stringify(rowText)} focused ${focused} order ${order} actions ${JSON.stringify(actions)} esc ${escClosed} back ${back} posts ${JSON.stringify(posts)} link ${link} closed ${closed} left ${left}`)
+    else console.log('check reply: ok', first, JSON.stringify(actions), JSON.stringify(sends))
+    await ctx.close()
+  }
+  // DOM check: a row without a draft opens the same view with the original message and
+  // its replies, then its own actions; an unanswered question keeps Reply-in-Slack.
+  {
+    const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, timezoneId: 'UTC', locale: 'en-US' })
+    const page = await ctx.newPage()
+    page.on('pageerror', (e) => errors.push(`[detail] ${e.message}`))
+    await page.goto('http://127.0.0.1:5287/index.html?source=ok')
+    const row = page.getByRole('region', { name: 'Questions nobody answered' }).getByTestId('need-row').first()
+    await row.waitFor({ timeout: 30000 })
+    await row.getByTestId('need-open').click()
+    const dialog = page.getByRole('dialog')
+    await dialog.waitFor({ timeout: 5000 })
+    const text = await dialog.textContent()
+    const actions = await dialog.getByTestId('detail-actions').locator('button').allTextContents()
+    const ok = text.includes('Is there an SSO option for the free plan?') && text.includes('No replies yet')
+      && text.includes('Reply opens the thread in Slack') && (await dialog.getByRole('textbox').count()) === 0
+      && JSON.stringify(actions) === JSON.stringify(['Reply', 'Done', 'Ignore', 'Why? Ask the lead'])
+    if (!ok) errors.push(`[detail] ${JSON.stringify(text)} actions ${JSON.stringify(actions)}`)
+    else console.log('check detail (no draft): ok', JSON.stringify(actions))
     await ctx.close()
   }
   // DOM check: the Board reads Now strip, Today card, Needs you, chat bar, top to
@@ -336,7 +403,7 @@ try {
     const primaries = await decide.getByTestId('need-actions').locator('button:first-child').allTextContents()
     const ages = await decide.getByTestId('need-age').allTextContents()
     const ok = noLedger && before === 5 && moreShown && rows.length === 7 && sorted
-      && JSON.stringify(primaries) === JSON.stringify(['Dispatch fix', 'Done', 'Done', 'Reply', 'Dispatch fix', 'Done', 'Decide'])
+      && JSON.stringify(primaries) === JSON.stringify(['Dispatch fix', 'Done', 'Done', 'Open', 'Dispatch fix', 'Done', 'Decide'])
       && ages.every((a) => / ago$/.test(a))
     if (!ok) errors.push(`[board] ledger words ${ledgerWords} noLedger ${noLedger} before ${before} more ${moreShown} rows ${JSON.stringify(rows)} sorted ${sorted} primaries ${JSON.stringify(primaries)} ages ${JSON.stringify(ages)}`)
     else console.log('check board: ok', JSON.stringify(rows), JSON.stringify(primaries))
