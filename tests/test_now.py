@@ -269,3 +269,60 @@ def test_after_poll_observes_runs_even_when_paused(tmp_path: Path, monkeypatch: 
     monkeypatch.setattr(crew_runtime, "revoke", lambda *a, **k: None)
     assert asyncio.run(crew_runtime.after_poll(tmp_path, {})) is False
     assert [e["text"][:21] for e in store.read_events(tmp_path)] == ["investigator started:"]
+
+
+# ── since for runs the Board started ───────────────────────────────────────
+
+
+class _Spawn:
+    def __init__(self, open_ids: set[str]) -> None:
+        self.open_ids = open_ids
+
+    def is_done(self, sid: str) -> bool:
+        return sid not in self.open_ids
+
+
+def _investigating(data: Path, key: str, spawn: str, at: float) -> None:
+    def _put(led: dict[str, Any]) -> None:
+        led["items"][key] = {"key": key, "status": "investigating", "investigation": f"spawn {spawn}",
+                             "investigation_at": at, "updated_at": at + 500}
+
+    store.mutate(data, _put)
+
+
+def test_board_spawn_fills_since_when_no_listed_run(routes, live_crew) -> None:
+    data, state = live_crew
+    state.subagents.runs = []
+    _investigating(data, "C0AAAAAAA:1727184100.000001", "s-1", 700.0)
+    ctx = types.SimpleNamespace(data_dir=str(data), spawn=_Spawn({"s-1"}))
+    inv = asyncio.run(routes._handle_now(_Req(state), ctx)).body["members"][1]
+    assert (inv["state"], inv["count"], inv["since"], inv["doing"]) == ("working", 1, 700.0, "1 run in flight")
+
+
+def test_older_board_spawn_moves_since_back(routes, live_crew) -> None:
+    data, state = live_crew
+    _investigating(data, "C0AAAAAAA:1727184100.000001", "s-1", 700.0)
+    ctx = types.SimpleNamespace(data_dir=str(data), spawn=_Spawn({"s-1"}))
+    inv = asyncio.run(routes._handle_now(_Req(state), ctx)).body["members"][1]
+    assert (inv["count"], inv["since"]) == (2, 700.0)
+
+
+def test_finished_board_spawn_gives_no_since(routes, live_crew) -> None:
+    data, state = live_crew
+    state.subagents.runs = []
+    _investigating(data, "C0AAAAAAA:1727184100.000001", "s-1", 700.0)
+    ctx = types.SimpleNamespace(data_dir=str(data), spawn=_Spawn(set()))
+    inv = asyncio.run(routes._handle_now(_Req(state), ctx)).body["members"][1]
+    assert (inv["state"], inv["count"], inv["since"]) == ("idle", 0, None)
+
+
+def test_record_stamps_investigation_at_only_on_change(monkeypatch: pytest.MonkeyPatch) -> None:
+    key = "C0AAAAAAA:1727184100.000001"
+    led = store.empty_ledger()
+    led["items"][key] = {"key": key, "status": "triaged", "investigation": ""}
+    monkeypatch.setattr(store, "now", lambda: 1234.0)
+    assert key in store.apply_crew_record(led, {"items": [{"key": key, "investigation": "spawn s-9"}]})["applied"]
+    assert led["items"][key]["investigation_at"] == 1234.0
+    monkeypatch.setattr(store, "now", lambda: 9999.0)
+    store.apply_crew_record(led, {"items": [{"key": key, "investigation": "spawn s-9", "note": "same"}]})
+    assert led["items"][key]["investigation_at"] == 1234.0

@@ -209,6 +209,7 @@ async def _now(
         except org.MembersError:
             members = None
     runs = crew_runtime.child_runs(_state(request), crew)
+    open_ids = _open_spawn_ids(ledger, ctx)
     try:
         await asyncio.to_thread(crew_runtime.observe_member_runs, _data_dir(ctx), runs)
     except (OSError, store.StoreError):
@@ -218,7 +219,8 @@ async def _now(
         ledger=ledger,
         investigations=investigations,
         runs=runs,
-        open_spawn_ids=_open_spawn_ids(ledger, ctx) if runs is not None else frozenset(),
+        open_spawn_ids=open_ids if runs is not None else frozenset(),
+        open_spawn_since=_spawn_since(ledger, open_ids),
         poll_interval=int(settings.get("poll_interval_secs") or org.DEFAULT_POLL_INTERVAL),
         members=members,
     )
@@ -233,6 +235,19 @@ def _investigations(ledger: dict[str, Any], ctx: Any) -> dict[str, int]:
     running = len(_open_spawn_ids(ledger, ctx))
     items = sum(1 for it in (ledger.get("items") or {}).values() if it.get("status") == "investigating")
     return {"items": items, "running": running}
+
+
+def _spawn_since(ledger: dict[str, Any], ids: frozenset[str]) -> float | None:
+    """When the oldest of these still-running ledger spawns started: the item's
+    ``investigation_at`` (set whenever ``investigation`` changes), else its ``updated_at``."""
+    starts = [
+        float(it.get("investigation_at") or it.get("updated_at") or 0)
+        for it in (ledger.get("items") or {}).values()
+        if str(it.get("investigation") or "")[len("spawn "):].strip() in ids
+        and str(it.get("investigation") or "").startswith("spawn ")
+    ]
+    starts = [t for t in starts if t > 0]
+    return min(starts) if starts else None
 
 
 def _open_spawn_ids(ledger: dict[str, Any], ctx: Any) -> frozenset[str]:
@@ -545,10 +560,13 @@ async def _handle_investigate(request: web.Request, ctx: Any) -> web.Response:
     except Exception as exc:  # noqa: BLE001 - SpawnError and host failures alike
         return _err(502, "spawn_failed", str(exc)[:300])
 
+    started = store.now()
+
     def _mark(led: dict[str, Any]) -> None:
         for k in keys:
             if k in led["items"]:
                 led["items"][k]["investigation"] = f"spawn {spawn_id}"
+                led["items"][k]["investigation_at"] = started
                 if led["items"][k].get("status") in ("new", "triaged"):
                     led["items"][k]["status"] = "investigating"
 

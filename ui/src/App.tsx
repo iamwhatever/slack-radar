@@ -101,6 +101,16 @@ type Settings = {
 
 type Today = { text: string; at: number }
 
+/** One `GET /now` row: what a member is doing right now. */
+type NowRow = {
+  id: MemberId
+  state: 'working' | 'idle' | 'paused' | 'planned'
+  doing: string
+  since: number | null
+  count: number
+  source: string
+}
+
 type State = {
   vault_available: boolean
   source_state: string
@@ -123,6 +133,7 @@ type State = {
   }
   crew_memory: { phase: string; next: string; updated_at: number }
   investigations?: { items: number; running: number }
+  now?: { members: NowRow[] }
   counts: {
     total: number
     needs_triage: number
@@ -185,7 +196,7 @@ function Details({ children, summary = 'Details' }: { children: ReactNode; summa
   )
 }
 
-// ── crew roster (static until members.json lands in Phase 2) ────────────────
+// ── crew roster and live status (the `now` rows) ────────────────────────────
 
 type MemberId = 'lead' | 'investigator' | 'watcher' | 'poller'
 type Member = {
@@ -239,23 +250,156 @@ const ROSTER: Member[] = [
   },
 ]
 
-type MemberStatus = { label: string; tone: 'ok' | 'aim' | 'warn' | 'muted' }
+type StatusLabel = { label: string; tone: 'ok' | 'aim' | 'warn' | 'muted' }
 
-function memberStatus(m: Member, s: State): MemberStatus {
+const nowRow = (s: State, id: MemberId): NowRow | undefined => s.now?.members.find((r) => r.id === id)
+
+/** A short label for a member, from its `now` row (older gateways: from the state). */
+function memberStatus(m: Member, s: State): StatusLabel {
+  const row = nowRow(s, m.id)
   if (m.id === 'lead') {
-    if (!s.crew.live) return { label: 'paused', tone: 'muted' }
-    return s.crew.running ? { label: 'working', tone: 'aim' } : { label: 'live', tone: 'ok' }
+    if (row?.state === 'paused' || !s.crew.live) return { label: 'paused', tone: 'muted' }
+    return (row ? row.state === 'working' : s.crew.running) ? { label: 'working', tone: 'aim' } : { label: 'live', tone: 'ok' }
   }
-  if (m.id === 'investigator') {
-    const n = s.investigations?.running || 0
-    return n ? { label: `${n} running`, tone: 'aim' } : { label: 'standing by', tone: 'muted' }
+  if (m.id === 'poller') {
+    if (s.source_state === 'needs_login') return { label: 'sign in again', tone: 'warn' }
+    if (row?.state === 'paused') return { label: 'paused', tone: 'warn' }
+    return { label: `polled ${ago(s.last_poll_at)}`, tone: 'muted' }
   }
-  if (m.id === 'watcher') return { label: 'standing by', tone: 'muted' }
-  if (s.source_state === 'needs_login') return { label: 'sign in again', tone: 'warn' }
-  return { label: `polled ${ago(s.last_poll_at)}`, tone: 'muted' }
+  const n = row ? row.count : m.id === 'investigator' ? s.investigations?.running || 0 : 0
+  if (n) return { label: `${n} running`, tone: 'aim' }
+  if (row?.state === 'planned') return { label: 'not started yet', tone: 'muted' }
+  return { label: 'idle', tone: 'muted' }
 }
 
-const TONE_VAR: Record<MemberStatus['tone'], string> = {
+/** `42s`, `5m`, `3h` since an epoch-seconds time. */
+function elapsed(since: number | null | undefined): string {
+  if (!since) return ''
+  const secs = Math.max(0, Math.round(Date.now() / 1000 - since))
+  if (secs < 90) return `${secs}s`
+  if (secs < 90 * 60) return `${Math.round(secs / 60)}m`
+  return `${Math.round(secs / 3600)}h`
+}
+
+const clip = (text: string, n = 60) => (text.length > n ? `${text.slice(0, n - 1).trimEnd()}…` : text)
+
+/** What a member is doing, as one line: `working: triaging 2 new items`, `1 running: …`, `idle`. */
+function doingLine(m: Member, s: State): string {
+  const row = nowRow(s, m.id)
+  if (!row) return memberStatus(m, s).label
+  if (m.id === 'poller') return row.doing
+  if (row.state !== 'working') return row.state === 'paused' ? `paused: ${row.doing}` : memberStatus(m, s).label
+  if (m.id === 'lead') return `working: ${row.doing}`
+  return `${row.count} running: ${row.doing}`
+}
+
+// One stylesheet for the pulsing dot; still when the reader asks for less motion.
+const PULSE_CSS = `@keyframes slack-radar-pulse { 0%, 100% { opacity: 1; transform: scale(1) } 50% { opacity: .35; transform: scale(.7) } }
+.sr-pulse { animation: slack-radar-pulse 1.4s ease-in-out infinite }
+@media (prefers-reduced-motion: reduce) { .sr-pulse { animation: none } }`
+
+function Dot({ tone, pulse }: { tone: StatusLabel['tone']; pulse: boolean }) {
+  return (
+    <i
+      aria-hidden
+      className={pulse ? 'sr-pulse' : undefined}
+      style={{ width: 8, height: 8, borderRadius: '50%', flex: 'none', display: 'inline-block', background: TONE_VAR[tone] }}
+    />
+  )
+}
+
+/** A member's live status: a dot (pulsing while working), the name, and what it is doing.
+ *  The Board's Now strip and the Team tab both render this. */
+function MemberStatus({ m, state, withName = true, onOpen }: { m: Member; state: State; withName?: boolean; onOpen?: () => void }) {
+  const st = memberStatus(m, state)
+  const row = nowRow(state, m.id)
+  const working = row ? row.state === 'working' : st.tone === 'aim'
+  const full = doingLine(m, state)
+  const name = m.id === 'lead' ? state.crew.name || m.title : m.title
+  const body = (
+    <>
+      <Dot tone={st.tone} pulse={working} />
+      {withName && <span style={{ fontWeight: 600, color: 'var(--text-strong)' }}>{name}</span>}
+      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{clip(full)}</span>
+    </>
+  )
+  const style: CSSProperties = {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 6,
+    minWidth: 0,
+    fontSize: 13,
+    opacity: working || st.tone === 'warn' ? 1 : 0.6,
+    color: 'var(--text)',
+  }
+  const common = { title: `${name} · ${full}`, 'data-member': m.id, 'data-state': row?.state || (working ? 'working' : 'idle') }
+  if (onOpen) {
+    return (
+      <button
+        type="button"
+        onClick={onOpen}
+        {...common}
+        aria-label={`${name}: ${full}. Show activity`}
+        style={{ ...style, background: 'transparent', border: 0, padding: 0, cursor: 'pointer' }}
+      >
+        {body}
+      </button>
+    )
+  }
+  return (
+    <span {...common} style={style}>
+      {body}
+    </span>
+  )
+}
+
+/** The Board's one-line Now strip: every member, what it is doing, right now. */
+function NowStrip({ state, onOpenActivity }: { state: State; onOpenActivity: () => void }) {
+  return (
+    <div
+      data-testid="now-strip"
+      role="status"
+      aria-label="Who is working right now"
+      className="flex flex-wrap items-center"
+      style={{ gap: '6px 18px', padding: '8px 12px', marginBottom: 12, borderRadius: 10, border: '1px solid var(--border)', background: 'var(--bg-elevated)', minWidth: 0 }}
+    >
+      <span className="text-xs text-muted" style={{ fontWeight: 600, letterSpacing: '.04em' }}>NOW</span>
+      {ROSTER.map((m) => (
+        <MemberStatus
+          key={m.id}
+          m={m}
+          state={state}
+          onOpen={m.id === 'investigator' || m.id === 'watcher' ? onOpenActivity : undefined}
+        />
+      ))}
+    </div>
+  )
+}
+
+/** Under the chat header: one line per Investigator/Watcher run in flight. The chat
+ *  itself only shows a run once it is finished. */
+function RunningLines({ state }: { state: State }) {
+  const rows = ROSTER.filter((m) => m.id === 'investigator' || m.id === 'watcher')
+    .map((m) => ({ m, row: nowRow(state, m.id) }))
+    .filter(({ row }) => row?.state === 'working')
+  if (!rows.length) return null
+  return (
+    <div data-testid="chat-running" style={{ padding: '6px 16px', borderBottom: '1px solid var(--border)', background: 'var(--bg-hover)' }}>
+      {rows.map(({ m, row }) => {
+        const t = elapsed(row!.since)
+        const text = `${m.title} running${row!.count > 1 ? ` (${row!.count})` : ''} · ${row!.doing}${t ? ` · ${t}` : ''}`
+        return (
+          <div key={m.id} className="text-xs flex items-center gap-2" title={text} style={{ minWidth: 0 }}>
+            <Dot tone="aim" pulse />
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{text}</span>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+const TONE_VAR: Record<StatusLabel['tone'], string> = {
   ok: 'var(--ok)',
   aim: 'var(--aim)',
   warn: 'var(--warn)',
@@ -384,6 +528,8 @@ export default function SlackRadar() {
   const [busy, setBusy] = useState('')
   const [message, setMessage] = useState('')
   const [mcp, setMcp] = useState<McpStatus | null>(null)
+  const [nowRows, setNowRows] = useState<NowRow[] | null>(null)
+  const [activityKinds, setActivityKinds] = useState<string[] | null>(null)
 
   const probe = useCallback(async () => {
     try {
@@ -407,6 +553,7 @@ export default function SlackRadar() {
         api.get<{ items: Item[] }>(`${BASE}/items?handled=1&limit=100`),
       ])
       setState(s)
+      setNowRows(s.now?.members || null)
       setItems(i.items)
       setNeeds(n)
       setHandled(h.items)
@@ -421,6 +568,35 @@ export default function SlackRadar() {
     const id = window.setInterval(load, 30000)
     return () => window.clearInterval(id)
   }, [load])
+
+  // While anyone works, refresh just `/now` every 5 s so the strip moves; the
+  // Activity log follows whenever a run starts or ends. Stops when all are idle.
+  const anyWorking = !!nowRows?.some((r) => r.state === 'working')
+  const runSig = useRef('')
+  useEffect(() => {
+    if (!anyWorking) return
+    const tick = async () => {
+      try {
+        const n = await api.get<{ members: NowRow[] }>(`${BASE}/now`)
+        setNowRows(n.members)
+        const sig = n.members.map((r) => `${r.id}:${r.state}:${r.count}`).join(',')
+        if (runSig.current && sig !== runSig.current) {
+          const e = await api.get<{ events: EventRow[] }>(`${BASE}/events?limit=150`)
+          setEvents(e.events.slice().reverse())
+        }
+        runSig.current = sig
+      } catch {
+        /* the 30 s load reports errors */
+      }
+    }
+    const id = window.setInterval(tick, 5000)
+    return () => window.clearInterval(id)
+  }, [anyWorking, api])
+  const view = useMemo(() => (state && nowRows ? { ...state, now: { members: nowRows } } : state), [state, nowRows])
+  const openMemberActivity = () => {
+    setActivityKinds(['member', 'crew', 'investigate'])
+    setTab('activity')
+  }
 
   const act = async (label: string, fn: () => Promise<unknown>) => {
     setBusy(label)
@@ -454,7 +630,13 @@ export default function SlackRadar() {
         subtitle={statusLine}
         actions={
           <div className="flex flex-wrap items-center gap-4">
-            <TabStrip tab={tab} setTab={setTab} />
+            <TabStrip
+              tab={tab}
+              setTab={(t) => {
+                setActivityKinds(null)
+                setTab(t)
+              }}
+            />
             {state && (
               <CrewSwitch
                 state={state}
@@ -467,7 +649,9 @@ export default function SlackRadar() {
           </div>
         }
       />
+      <style>{PULSE_CSS}</style>
       <div className="px-6 pb-8 overflow-y-auto flex-1 min-h-0">
+        {view && tab === 'board' && <NowStrip state={view} onOpenActivity={openMemberActivity} />}
         {state && conn === 'needs_login' && (
           <SignInBanner mcp={mcp} sourceError={state.source_error} busy={busy} onCheck={recheck} />
         )}
@@ -476,11 +660,11 @@ export default function SlackRadar() {
             {message}
           </p>
         )}
-        {!state ? (
+        {!view ? (
           <p className="text-sm text-muted">Loading…</p>
         ) : tab === 'board' ? (
           <Board
-            state={state}
+            state={view}
             items={items}
             needs={needs}
             handled={handled}
@@ -504,11 +688,11 @@ export default function SlackRadar() {
             onChanged={load}
           />
         ) : tab === 'team' ? (
-          <TeamTab state={state} />
+          <TeamTab state={view} />
         ) : tab === 'activity' ? (
-          <Activity events={events} />
+          <Activity events={events} kinds={activityKinds} onShowAll={() => setActivityKinds(null)} />
         ) : (
-          <SettingsTab state={state} busy={busy} act={act} mcp={mcp} onProbe={probe} />
+          <SettingsTab state={view} busy={busy} act={act} mcp={mcp} onProbe={probe} />
         )}
       </div>
     </>
@@ -1626,6 +1810,7 @@ function AskLead(props: {
         </div>
         <RosterStrip state={state} />
       </div>
+      <RunningLines state={state} />
       {pending && (
         // ChatEmbed has no API to fill its composer, so the question waits here.
         <div
@@ -1684,7 +1869,6 @@ function TeamTab({ state }: { state: State }) {
       </p>
       <ul className="flex flex-col">
         {ROSTER.map((m) => {
-          const st = memberStatus(m, state)
           const agentId = m.id === 'lead' ? state.crew.agent : m.agent
           return (
             <li
@@ -1714,7 +1898,9 @@ function TeamTab({ state }: { state: State }) {
                   </Details>
                 )}
               </div>
-              <span className="text-xs" style={{ color: TONE_VAR[st.tone], whiteSpace: 'nowrap' }}>{st.label}</span>
+              <div data-testid={`team-status-${m.id}`} style={{ maxWidth: 360, minWidth: 0, display: 'flex' }}>
+                <MemberStatus m={m} state={state} withName={false} />
+              </div>
             </li>
           )
         })}
@@ -1723,10 +1909,17 @@ function TeamTab({ state }: { state: State }) {
   )
 }
 
-function Activity({ events }: { events: EventRow[] }) {
+function Activity({ events: all, kinds, onShowAll }: { events: EventRow[]; kinds: string[] | null; onShowAll: () => void }) {
+  const events = kinds ? all.filter((e) => kinds.includes(e.kind)) : all
   return (
     <Card>
       <CardTitle>Activity</CardTitle>
+      {kinds && (
+        <p className="text-sm text-muted flex flex-wrap items-center gap-2" style={{ marginBottom: 8 }}>
+          <span>Showing the crew and its members only.</span>
+          <Btn style={small} onClick={onShowAll}>Show all</Btn>
+        </p>
+      )}
       {events.length === 0 ? (
         <p className="text-sm text-muted">No activity yet.</p>
       ) : (

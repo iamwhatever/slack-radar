@@ -211,7 +211,8 @@ def _lead_row(crew: dict[str, Any], ledger: dict[str, Any], counts: dict[str, An
 
 
 def _leaf_row(mid: str, agent: str, runs: list[dict[str, Any]] | None, fallback: int,
-              planned: bool, extra_ids: frozenset[str] = frozenset()) -> dict[str, Any]:
+              planned: bool, extra_ids: frozenset[str] = frozenset(),
+              extra_since: float | None = None) -> dict[str, Any]:
     if runs is None:
         mine: list[dict[str, Any]] = []
         count, source = fallback, "ledger"
@@ -229,6 +230,8 @@ def _leaf_row(mid: str, agent: str, runs: list[dict[str, Any]] | None, fallback:
     else:
         state, doing = ("planned", "not started yet") if planned else ("idle", "idle")
     since = (float(mine[0].get("startedAt") or 0) or None) if mine else None
+    if count and extra_since and (since is None or extra_since < since):
+        since = extra_since
     return {"id": mid, "state": state, "doing": doing, "since": since, "count": count, "source": source}
 
 
@@ -255,6 +258,7 @@ def now_view(
     investigations: dict[str, int],
     runs: list[dict[str, Any]] | None = None,
     open_spawn_ids: frozenset[str] = frozenset(),
+    open_spawn_since: float | None = None,
     poll_interval: int = DEFAULT_POLL_INTERVAL,
     members: list[dict[str, Any]] | None = None,
     at: float | None = None,
@@ -267,6 +271,9 @@ def now_view(
     with ``source: "ledger"``. ``open_spawn_ids`` are ledger-recorded spawns the host
     says are still running (the Board's Investigate button spawns outside the crew
     session); each one not already in ``runs`` adds one to the investigator's count.
+    ``open_spawn_since`` is when the oldest of those was started (the ledger's
+    ``investigation_at``); it becomes the investigator's ``since`` when it is older
+    than every listed run, or when no run carries a start.
     """
     from . import store
 
@@ -277,7 +284,7 @@ def now_view(
     return {"members": [
         _lead_row(crew, ledger, c),
         _leaf_row("investigator", INVESTIGATOR_AGENT, runs, int(investigations.get("running") or 0),
-                  planned.get("investigator", False), open_spawn_ids),
+                  planned.get("investigator", False), open_spawn_ids, open_spawn_since),
         _leaf_row("watcher", WATCHER_AGENT, runs, 0, planned.get("watcher", False)),
         _poller_row(ledger, interval, t),
     ]}
