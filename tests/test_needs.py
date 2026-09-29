@@ -189,6 +189,26 @@ def test_summary_is_clipped_to_200_when_falling_back_to_text() -> None:
     assert len(group(needs.build_needs(ledger(it), NOW), "decide")["entries"][0]["summary"]) == 200
 
 
+def test_entry_carries_the_original_message_and_its_thread_oldest_first() -> None:
+    it = item(
+        1, priority="p1", text="line one\nline two", user="U1", last_thread_check_at=NOW - 7200,
+        replies=[{"ts": "20.0", "user": "U3", "text": "second"}, {"ts": "10.0", "user": "U2", "text": "first"}],
+        reply_draft={"text": "draft", "at": NOW - 60, "by": "owner"},
+    )
+    e = group(needs.build_needs(ledger(it), NOW), "decide")["entries"][0]
+    assert e["text"] == "line one\nline two" and e["user"] == "U1" and e["ts_float"] == it["ts_float"]
+    assert [r["text"] for r in e["replies"]] == ["first", "second"]
+    assert e["last_thread_check_at"] == NOW - 7200
+    assert (e["reply_draft"], e["reply_draft_by"], e["reply_draft_at"]) == ("draft", "owner", NOW - 60)
+
+
+def test_entry_without_replies_or_draft_has_empty_thread_and_no_draft_fields() -> None:
+    it = item(1, category="question", hours=80)
+    e = group(needs.build_needs(ledger(it), NOW), "unanswered")["entries"][0]
+    assert e["replies"] == [] and e["text"] == "message 1" and e["user"] == ""
+    assert "reply_draft" not in e and "reply_draft_by" not in e
+
+
 # ── store: owner-only fields ───────────────────────────────────────────────
 
 

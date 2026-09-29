@@ -21,7 +21,7 @@ The rules the crew works by. The exact names, fields and routes are in [CONTRACT
 - The Lead spawns the Investigator with `spawn_run`, at most two investigations in flight.
 - The Thread Watcher is dispatched for the Lead, per poll. When a poll leaves possibly-resolved flags no Watcher has seen, the gateway starts ONE Watcher run through the app spawn SDK with all of them (at most 20; the rest wait for the next poll) and stamps `possibly_resolved.watcher_at` on each. Never two in flight, never while the crew is paused. The Lead does not judge those flags itself: it reviews the Watcher's verdicts, and judges a flag only when the Watcher left it or the gateway has no spawn SDK. The Watcher's only tool is the ledger, so this run can do nothing but record verdicts.
 - The owner can also start an Investigator from the Ledger tab's **Investigate** button. That is an owner action, not a crew action.
-- The Board shows only what needs the owner, top to bottom: the Now strip; one thin Slack connection line with Poll now; the Today card (the Lead's line as its heading, the latest digest's top items, the digest date and Digest now); the Needs-you groups (priority first, then newest; 5 rows per group; each row has ONE button naming the next step: Dispatch fix, Reply, Done or Decide); and, pinned to the bottom, the collapsed Lead chat bar, which opens upward on the first question. Every ledger item, its filters and **Investigate** are on the Ledger tab. Neither page adds a way to post or dispatch: **Send to thread** and **Dispatch fix** stay the owner's clicks.
+- The Board shows only what needs the owner, top to bottom: the Now strip; one thin Slack connection line with Poll now; the Today card (the Lead's line as its heading, the latest digest's top items, the digest date and Digest now); the Needs-you groups (priority first, then newest; 5 rows per group; each row has ONE button naming the next step: Dispatch fix, Open, Reply, Done or Decide); and, pinned to the bottom, the collapsed Lead chat bar, which opens upward on the first question. A row with a reply draft shows the original message's first line and **Open**, never the draft; the owner sends from the row's detail view, which shows the original message and its thread replies before the draft. Every ledger item, its filters and **Investigate** are on the Ledger tab. Neither page adds a way to post or dispatch: **Send to thread** and **Dispatch fix** stay the owner's clicks.
 - Leaves never spawn. The Investigator and the Thread Watcher have no spawn tool; they record into the ledger and stop.
 - Every member's last run is shown on the Board's Now strip and the Team tab: the Poller's last and next cycle, the Lead's last wake, each leaf's last run (or `--` before its first).
 - A fix is never dispatched by the crew. When an investigation ends with a code-shaped fix, the Lead writes ONE `fix_handoff` on the item: a self-contained task for a coding session (repo, item keys, links, coverage verdict, what to change, how to verify, "Do not merge; open a PR for review"). The Board shows **Dispatch fix**. One click by the owner is the consent: the app opens ONE `kirocrew-conductor` session, sends it the hand-off plus the Slack context (quoted as untrusted data), and tracks it on the Board until it reports a PR. No confirmation dialog: the click is the decision.
@@ -31,7 +31,7 @@ The rules the crew works by. The exact names, fields and routes are in [CONTRACT
 
 ### 3. What may never be sent to Slack
 
-- The app posts to Slack only when the owner clicks **Send to thread** on a draft; it posts as the owner, in that item's own thread; the crew cannot post.
+- The app posts to Slack only when the owner clicks **Send to thread** on a draft in the detail view, one click per reply; it posts as the owner, in that item's own thread; the crew cannot post.
 - The Lead may write a `reply_draft` on an open item. It is text on this machine until the owner clicks Send. The owner can edit it first, ignore it, or mark the item done without sending. Nothing is posted without that click.
 - The other Slack write is the digest DM to the owner themselves (`self_dm`), sent by the Poller, never by an agent. The owner may choose a dashboard notification instead.
 - The app never reacts, edits, deletes or posts a new top-level message in a channel.
@@ -89,7 +89,7 @@ See [docs/unattended-mode.md](../docs/unattended-mode.md) for the full approval 
 - 组长用 `spawn_run` 派出调查员，同时最多两个调查在进行。
 - 线程观察员按每次轮询替组长派出。一次轮询留下还没有观察员看过的“可能已解决”标记时，网关通过应用的派生 SDK 启动一次观察员运行，带上全部标记（最多 20 个，其余等下一次轮询），并在每个标记上写 `possibly_resolved.watcher_at`。同时最多一个，小组暂停时不派。组长不再自己判断这些标记：它复核观察员的结论，只有观察员留下的标记或网关没有派生 SDK 时才自己判断。观察员唯一的工具是台账，所以这次运行除了记录结论什么也做不了。
 - 所有者也可以用 Ledger（台账）标签页的 **Investigate** 按钮启动调查员。这是所有者的操作，不是小组的操作。
-- 看板只显示需要所有者处理的东西：Now 条、组长的一句话和摘要，以及 Needs-you 各组（先按优先级，再新的在前；每组 5 行；每行只有一个写明下一步的按钮：Dispatch fix、Reply、Done 或 Decide）。台账的全部条目、筛选和 **Investigate** 都在 Ledger 标签页。两个页面都没有新增发消息或派发的途径：**Send to thread** 和 **Dispatch fix** 仍然只能由所有者点击。
+- 看板只显示需要所有者处理的东西：Now 条、组长的一句话和摘要，以及 Needs-you 各组（先按优先级，再新的在前；每组 5 行；每行只有一个写明下一步的按钮：Dispatch fix、Open、Reply、Done 或 Decide）。有回复草稿的行显示原消息的第一行和 **Open**，从不显示草稿；所有者在这一行的详情里发送，详情先显示原消息和线程回复，再显示草稿。台账的全部条目、筛选和 **Investigate** 都在 Ledger 标签页。两个页面都没有新增发消息或派发的途径：**Send to thread** 和 **Dispatch fix** 仍然只能由所有者点击。
 - 叶子成员从不派生。调查员和线程观察员没有派生工具；它们写入台账后就结束。
 - 每个成员上次的运行都显示在看板的 Now 行和 Team 标签页上：轮询器的上一轮和下一轮、组长上次被唤醒的时间、每个叶子成员上次的运行（第一次之前是 `--`）。
 - 小组从不自己派发修复。调查得出一个代码层面的修复时，组长在条目上写一个 `fix_handoff`：给编码会话的自包含任务（仓库、条目 key、链接、覆盖结论、改什么、怎么验证、"Do not merge; open a PR for review"）。看板显示 **Dispatch fix**。所有者点一次就是同意：应用开一个 `kirocrew-conductor` 会话，把交接和 Slack 上下文（作为不可信数据引用）发给它，并在看板上跟踪，直到它报告一个 PR。没有确认对话框：点击本身就是决定。
@@ -99,7 +99,7 @@ See [docs/unattended-mode.md](../docs/unattended-mode.md) for the full approval 
 
 ### 3. 绝不能发到 Slack 的东西
 
-- 只有所有者在草稿上点 **Send to thread** 时，应用才会向 Slack 发消息；以所有者本人的身份，发在该条目自己的线程里；小组无法发消息。
+- 只有所有者在详情里的草稿上点 **Send to thread** 时，应用才会向 Slack 发消息，每条回复一次点击；以所有者本人的身份，发在该条目自己的线程里；小组无法发消息。
 - 组长可以在未关闭的条目上写一个 `reply_draft`。在所有者点发送之前，它只是本机上的文字。所有者可以先改、忽略它，或者不发送直接标记完成。没有这一下点击，什么都不会发出去。
 - 另一个 Slack 写操作是发给所有者本人的摘要私信（`self_dm`），由轮询器发送，从不由 agent 发送。所有者也可以改成仪表盘通知。
 - 应用从不加表情、编辑、删除，也从不在频道里发新的顶层消息。
