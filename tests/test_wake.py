@@ -60,6 +60,8 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(crew_runtime, "_warned_no_state", False)
     monkeypatch.setattr(crew_runtime, "_http_app", None)
     store.update_crew(tmp_path, {"enabled": True})
+    # The slot below was started under the installed version (what creating it records).
+    store.write_crew_session(tmp_path, "crew-slack-radar", store.installed_version(), awaiting=False)
     state = _WakeState()
     state._slots["crew-slack-radar"] = _WakeSlot("crew-slack-radar", "slack-radar-crew")
     return state, handler, tmp_path

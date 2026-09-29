@@ -181,9 +181,11 @@ def test_crew_record_cannot_set_handled_fields(tmp_path: Path, monkeypatch: pyte
         "name": "slack_radar_record",
         "arguments": {"items": [{"key": it["key"], "handled_at": 123.0, "handled_how": "done", "summary": "s"}]},
     }})
-    assert out["result"]["isError"] is False
+    body = json.loads(out["result"]["content"][0]["text"])
+    assert out["result"]["isError"] is True and body["applied"] == []
+    assert "unknown field(s): handled_at, handled_how" in body["refused"][0]["why"]
     row = store.read_ledger(tmp_path)["items"][it["key"]]
-    assert row["summary"] == "s"
+    assert row["summary"] != "s"  # refused whole: nothing in the row is written
     assert (row["handled_at"], row["handled_how"]) == (0.0, "")
 
 

@@ -18,6 +18,7 @@ Protocol: JSON-RPC 2.0, one message per line on stdin/stdout (MCP stdio transpor
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,10 @@ import store  # noqa: E402  (sibling module; this file runs as a script)
 
 PROTOCOL_VERSION = "2024-11-05"
 DATA_DIR = store.default_data_dir()
+#: The app version THIS process loaded. A long-lived kiro-cli keeps its server across
+#: an app update, so this can be older than the app.json now on disk; the gateway
+#: compares the two (``crew_runtime.check_tool_version``) and restarts the session.
+RUNNING_VERSION = store.installed_version()
 
 TOOLS: list[dict[str, Any]] = [
     {
@@ -48,7 +53,7 @@ TOOLS: list[dict[str, Any]] = [
             "Write triage results and your crew memory to the ledger. items[].key must be a "
             "key returned by slack_radar_read. category: feature-request|bug-report|question|"
             "already-answered|noise. priority: p0|p1|p2|p3. status: triaged|investigating|"
-            "resolved|noise. summary and links are PUBLIC (they appear in the Slack digest); "
+            "resolved|noise. Any field not listed here is refused: a `refused` entry saying 'unknown field' means this tool is stale; tell the owner. summary and links are PUBLIC (they appear in the Slack digest); "
             "note and investigation are local-only. crew.phase: idle|triaging|investigating|"
             "rechecking|digest; crew.next is your resumable next-step intent (local). crew.today is "
             "PUBLIC (shown on the Board): one sentence, at most 240 characters, saying what changed "
@@ -143,6 +148,7 @@ def tool_read(args: dict[str, Any]) -> dict[str, Any]:
     crew = store.read_crew(DATA_DIR)
     return _text(
         {
+            "tool_version": RUNNING_VERSION,
             "crew": {k: crew.get(k) for k in ("name", "enabled", "paused_reason")},
             "crew_memory": ledger.get("crew_memory"),
             "counts": store.counts(ledger),
@@ -203,7 +209,7 @@ def handle(msg: dict[str, Any]) -> dict[str, Any] | None:
         result: Any = {
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": "slack-radar", "version": "0.1.0"},
+            "serverInfo": {"name": "slack-radar", "version": RUNNING_VERSION or "0"},
         }
     elif method == "ping":
         result = {}
@@ -228,7 +234,16 @@ def handle(msg: dict[str, Any]) -> dict[str, Any] | None:
     return {"jsonrpc": "2.0", "id": mid, "result": result}
 
 
+def record_start() -> None:
+    """Tell the gateway which app version this process serves. Never fatal."""
+    try:
+        store.write_tool_version(DATA_DIR, RUNNING_VERSION, os.getpid(), os.getppid())
+    except Exception as exc:  # noqa: BLE001 - the ledger must stay usable
+        sys.stderr.write(f"slack-radar: could not record tool version: {exc}\n")
+
+
 def main() -> None:
+    record_start()
     for line in sys.stdin:
         line = line.strip()
         if not line:

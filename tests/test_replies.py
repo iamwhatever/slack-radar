@@ -76,10 +76,11 @@ def test_replies_dropped_past_seven_days(tmp_path: Path) -> None:
 def test_record_tool_cannot_set_replies(tmp_path: Path) -> None:
     key, _ = _item_with_thread(tmp_path, [_reply(0, "U2", "try the admin page")])
     before = store.read_ledger(tmp_path)["items"][key]["replies"]
-    store.mutate(tmp_path, lambda led: store.apply_crew_record(
+    result = store.mutate(tmp_path, lambda led: store.apply_crew_record(
         led, {"items": [{"key": key, "replies": [{"ts": "1.0", "user": "X", "text": "forged"}], "note": "n"}]}))
     after = store.read_ledger(tmp_path)["items"][key]
-    assert after["replies"] == before and after["note"] == "n"
+    assert result["applied"] == [] and "unknown field(s): replies" in result["refused"][0]["why"]
+    assert after["replies"] == before and after.get("note") != "n"
 
 
 # ── pass-through ───────────────────────────────────────────────────────────

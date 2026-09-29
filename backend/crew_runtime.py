@@ -15,10 +15,15 @@ needs:
    session both carries the sentinel AND is at least as long as the brief — which
    covers session start, compaction, restart and truncation with one check.
 3. **Nudge composition** (:func:`compose_nudge`). Volatile snapshot + the Never list.
-4. **Event-driven wakes** (:func:`after_poll`). There is no autonudge idle loop:
+4. **A fresh session after an app update** (:func:`check_tool_version`). The
+   crew's kiro-cli keeps its ledger MCP server across an update, so the Lead would
+   keep calling the OLD tool code. Every poll compares the installed version with
+   the version the session was started under and the versions the running ledger
+   servers reported; a stale session is retired and recreated like an agent move.
+5. **Event-driven wakes** (:func:`after_poll`). There is no autonudge idle loop:
    ``watch.py`` is the scheduler, and it wakes the crew only when a poll moved
    something or a digest was requested. An idle channel therefore costs zero turns.
-5. **The auto-approve grant** (:func:`sync_trust`). Opt-in per crew
+6. **The auto-approve grant** (:func:`sync_trust`). Opt-in per crew
    (``unattended``), a ``SafetyOverride`` SCOPED grant with a short TTL re-derived
    every poll cycle, never the interactive ``slot._trust`` flag. Off by default,
    because the crew reads Slack messages — text any channel member controls.
@@ -422,6 +427,7 @@ async def _resolve_slot(state: Any, data_dir: Path, crew: dict[str, Any], *, cre
                 model=str(crew.get("model") or ""),
                 app=APP_NAME,
             )
+            await asyncio.to_thread(_note_session_created, data_dir, key)
         if slot is None or str(getattr(slot, "agent", "") or "") == want:
             return slot, crew
         old_agent = str(getattr(slot, "agent", "") or "?")
@@ -434,6 +440,99 @@ async def _resolve_slot(state: Any, data_dir: Path, crew: dict[str, Any], *, cre
         )
         logger.info("slack-radar: crew session moved from agent %s to %s (%s -> %s)", old_agent, want, key, new_key)
     raise RuntimeError(f"slack-radar: crew slot kept resolving to the wrong agent; wanted {want}")
+
+
+# ── a fresh session after an app update ────────────────────────────────────
+
+RESTART_WAKE_REASON = "crew session restart after app update"
+
+
+def _note_session_created(data_dir: Path, key: str) -> None:
+    """Record the version a newly created crew slot starts under. A restart already
+    wrote the record for this key (``awaiting``); keep it."""
+    installed = store.installed_version()
+    cur = store.read_crew_session(data_dir)
+    if cur.get("slot_key") == key and cur.get("version") == installed:
+        return
+    store.write_crew_session(data_dir, key, installed, awaiting=False)
+
+
+def tool_staleness(data_dir: Path, key: str, installed: str) -> tuple[bool, str]:
+    """``(stale, old_version)`` for the crew slot ``key`` against ``installed``.
+
+    Stale when the session was started under an older version (or the gateway never
+    recorded one: a session from before this check existed), or when a ledger server
+    that is still running reported an older version. Not stale while a restart is
+    waiting for the new session's server to report in, so one update restarts once.
+    """
+    session = store.read_crew_session(data_dir)
+    servers = store.live_tool_versions(data_dir)
+    same = session.get("slot_key") == key
+    if same and session.get("awaiting") and session.get("version") == installed:
+        since = float(session.get("at") or 0)
+        if not any(not store.is_older(sv.get("version"), installed) and float(sv.get("at") or 0) >= since
+                   for sv in servers):
+            return False, ""
+        store.write_crew_session(data_dir, key, installed, awaiting=False)
+    older = sorted((str(sv.get("version") or "") for sv in servers if store.is_older(sv.get("version"), installed)),
+                   key=store.version_tuple)
+    session_old = not same or store.is_older(session.get("version"), installed)
+    if not (older or session_old):
+        return False, ""
+    old = (str(session.get("version") or "") if same and session_old else "") or (older[0] if older else "")
+    return True, old or "unknown"
+
+
+async def check_tool_version(state: Any, data_dir: Path, crew: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+    """Restart the crew session when its ledger tool is older than the installed app.
+
+    Only a slot the gateway holds has a kiro-cli process; a slot it does not hold
+    starts fresh whenever it is next opened, so there is nothing to restart. A slot
+    mid-turn is never touched: the restart waits for the next poll, and the pending
+    wake makes sure that poll comes back to it. Returns ``(restarted, crew)``.
+    """
+    global _pending_wake
+    if state is None or not hasattr(state, "get_slot"):
+        return False, crew
+    installed = await asyncio.to_thread(store.installed_version)
+    if not installed:
+        return False, crew
+    key = store.slot_key(crew)
+    slot = state.get_slot(key)
+    if slot is None:
+        return False, crew
+    stale, old = await asyncio.to_thread(tool_staleness, data_dir, key, installed)
+    if not stale:
+        return False, crew
+    if getattr(slot, "running", False):
+        _pending_wake = _pending_wake or RESTART_WAKE_REASON
+        logger.info("slack-radar: crew session is stale (%s -> %s) but mid-turn; restart deferred", old, installed)
+        return False, crew
+    new_key = store.next_slot_key(key)
+    await _retire_slot(state, slot, key)
+    crew = await asyncio.to_thread(store.update_crew, data_dir, {"slot_key": new_key})
+    await asyncio.to_thread(store.write_crew_session, data_dir, new_key, installed, awaiting=True)
+    await asyncio.to_thread(store.drop_tool_versions_older_than, data_dir, installed)
+    await asyncio.to_thread(
+        store.append_event, data_dir, "crew", f"crew session restarted after app update ({old} -> {installed})",
+    )
+    logger.info("slack-radar: crew session restarted after app update (%s -> %s; %s -> %s)", old, installed, key, new_key)
+    _call_if_present(state, "push_slots_update")
+    return True, crew
+
+
+async def check_tool_version_on_startup(data_dir: Path) -> bool:
+    """The startup pass of :func:`check_tool_version`. Never raises."""
+    try:
+        state = _gateway_state()
+        crew = await asyncio.to_thread(store.read_crew, data_dir)
+        if state is None or not is_live(crew):
+            return False
+        restarted, _crew = await check_tool_version(state, data_dir, crew)
+        return restarted
+    except Exception:  # noqa: BLE001 - startup must complete
+        logger.warning("slack-radar: tool version check on startup failed", exc_info=True)
+        return False
 
 
 async def ensure_crew_session(state: Any, data_dir: Path, crew: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
@@ -528,7 +627,7 @@ async def wake_crew(state: Any, data_dir: Path, reason: str) -> bool:
             return False
         slot, crew = await ensure_crew_session(state, data_dir, crew)
         if getattr(slot, "running", False):
-            _pending_wake = reason
+            _pending_wake = reason.removeprefix("retry: ")  # a retry deferred again stays one retry
             logger.info("slack-radar: crew mid-turn, wake deferred to the next poll (%s)", reason)
             return False
         settings = await asyncio.to_thread(settings_mod.read_settings)
@@ -575,6 +674,10 @@ async def after_poll(data_dir: Path, summary: dict[str, Any], *, reason: str = "
     # created before the app shipped its own crew agent): resolution moves it now,
     # not only when a wake happens to come along.
     slot, crew = await _resolve_slot(state, data_dir, crew, create=False)
+    # After an app update: a session still running the old ledger tool is replaced.
+    restarted, crew = await check_tool_version(state, data_dir, crew)
+    if restarted:
+        slot = None
     if slot is not None:
         await asyncio.to_thread(sync_trust, slot, crew)
     ledger = await asyncio.to_thread(store.read_ledger, data_dir)
@@ -614,6 +717,7 @@ async def after_poll(data_dir: Path, summary: dict[str, Any], *, reason: str = "
 
 async def start_crew(state: Any, data_dir: Path) -> dict[str, Any]:
     crew = await asyncio.to_thread(store.update_crew, data_dir, {"enabled": True, "paused_reason": ""})
+    _restarted, crew = await check_tool_version(state, data_dir, crew)
     await ensure_crew_session(state, data_dir, crew)
     store.append_event(data_dir, "crew", "crew started")
     await wake_crew(state, data_dir, "started")
