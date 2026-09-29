@@ -146,15 +146,49 @@ def slot_state(state: Any, session_key: str) -> tuple[str, Any]:
     return ("running" if getattr(slot, "running", False) else "idle"), slot
 
 
-async def observe(state: Any, data_dir: Path, ledger: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """Live facts per dispatched item: ``{key: {state, pr_url}}``.
+def _batch_scan(ledger: dict[str, Any], batches: dict[str, list[str]], slots: dict[str, Any]
+                ) -> tuple[dict[str, str], dict[str, list[str]]]:
+    """Per batch session: ``({key: pr_url}, {key: [unmatched pr urls]})`` read from its messages."""
+    one: dict[str, str] = {}
+    many: dict[str, list[str]] = {}
+    items = ledger.get("items") or {}
+    for session_key, members in batches.items():
+        slot = slots.get(session_key)
+        if slot is None:
+            continue
+        d = items[members[0]]["fix_handoff"]["dispatch"]
+        order = [k for k in d.get("batch_keys") or [] if k in items] or members
+        titles = {k: " ".join(str(items[k]["fix_handoff"].get("title") or "").split()) for k in order}
+        exclude: set[str] = set()
+        for k in order:
+            exclude |= set(items[k]["fix_handoff"].get("links") or []) | set(items[k].get("links") or [])
+        matched, unmatched = handoff.find_batch_prs(
+            list(getattr(slot, "messages", None) or [])[-80:], order, titles, exclude=exclude
+        )
+        for k in members:
+            h = items[k]["fix_handoff"]
+            if matched.get(k) and not h.get("pr_url"):
+                one[k] = matched[k]
+            extra = [u for u in unmatched if u not in (h.get("pr_urls") or [])]
+            if extra:
+                many[k] = extra
+    return one, many
 
-    Reads each dispatched session's slot on the event loop (slots are loop-owned). A PR URL found in its assistant messages
-    is stored on ``fix_handoff.pr_url`` (once) with a ``dispatch`` event, and written
-    into ``ledger`` too so the caller's view already shows it.
+
+async def observe(state: Any, data_dir: Path, ledger: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Live facts per dispatched item: ``{key: {state, pr_url, pr_urls}}``.
+
+    Reads each dispatched session's slot on the event loop (slots are loop-owned). A
+    single dispatch's PR URL found in its assistant messages is stored on
+    ``fix_handoff.pr_url`` (once) with a ``dispatch`` event. A batch session is read
+    once for all its members: each ``PR: <url>`` line goes to the fix it names, and
+    the ones naming none go to every member's ``pr_urls``. Stored values are written
+    into ``ledger`` too so the caller's view already shows them.
     """
     out: dict[str, dict[str, Any]] = {}
     found: dict[str, str] = {}
+    batches: dict[str, list[str]] = {}
+    slots: dict[str, Any] = {}
     for key, it in (ledger.get("items") or {}).items():
         h = it.get("fix_handoff") if isinstance(it, dict) else None
         d = h.get("dispatch") if isinstance(h, dict) else None
@@ -162,7 +196,11 @@ async def observe(state: Any, data_dir: Path, ledger: dict[str, Any]) -> dict[st
             continue
         live, slot = slot_state(state, str(d["session_key"]))
         pr = str(h.get("pr_url") or "")
-        if not pr and slot is not None:
+        if d.get("batch"):
+            batches.setdefault(str(d["session_key"]), []).append(key)
+            if slot is not None:
+                slots[str(d["session_key"])] = slot
+        elif not pr and slot is not None:
             pr = handoff.find_pr_url(
                 list(getattr(slot, "messages", None) or [])[-40:],
                 exclude=set(h.get("links") or []) | set(it.get("links") or []),
@@ -170,17 +208,35 @@ async def observe(state: Any, data_dir: Path, ledger: dict[str, Any]) -> dict[st
             )
             if pr:
                 found[key] = pr
-        out[key] = {"state": live, "pr_url": pr}
-    if found:
-        def _store(led: dict[str, Any]) -> list[str]:
-            return [k for k, url in found.items() if store.apply_fix_pr(led, k, url)]
+        out[key] = {"state": live, "pr_url": pr, "pr_urls": [u for u in h.get("pr_urls") or [] if isinstance(u, str)]}
+    many: dict[str, list[str]] = {}
+    if batches:
+        one, many = _batch_scan(ledger, batches, slots)
+        found.update(one)
+        for k, url in one.items():
+            out[k]["pr_url"] = url
+    if found or many:
+        def _store(led: dict[str, Any]) -> tuple[list[str], dict[str, list[str]]]:
+            singles = [k for k, url in found.items() if store.apply_fix_pr(led, k, url)]
+            added = {k: store.apply_fix_pr_urls(led, k, urls) for k, urls in many.items()}
+            return singles, {k: v for k, v in added.items() if v}
 
         try:
-            new = await asyncio.to_thread(store.mutate, data_dir, _store)
+            new, added = await asyncio.to_thread(store.mutate, data_dir, _store)
         except (OSError, store.StoreError):
             logger.debug("slack-radar: could not store a fix PR", exc_info=True)
-            new = []
+            new, added = [], {}
         for k in new:
             ledger["items"][k]["fix_handoff"]["pr_url"] = found[k]
+            out[k]["pr_url"] = found[k]
             await asyncio.to_thread(store.append_event, data_dir, "dispatch", f"fix PR opened: {found[k]}", k)
+        logged: set[str] = set()
+        for k, urls in added.items():
+            h = ledger["items"][k]["fix_handoff"]
+            h["pr_urls"] = [*(h.get("pr_urls") or []), *urls]
+            out[k]["pr_urls"] = list(h["pr_urls"])
+            for u in urls:
+                if u not in logged:
+                    logged.add(u)
+                    await asyncio.to_thread(store.append_event, data_dir, "dispatch", f"fix batch PR opened: {u}", k)
     return out

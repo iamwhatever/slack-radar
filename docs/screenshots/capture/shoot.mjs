@@ -47,6 +47,7 @@ const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PAT
 const shots = [
   { name: 'board', source: 'ok', tab: null },
   { name: 'needs-you', source: 'ok', tab: null, clip: 'Needs you', openHandled: true, openHandoffs: true, openReplied: true },
+  { name: 'batch-dispatch', source: 'ok', tab: null, clip: 'Needs you', openBatch: true },
   { name: 'chat-expanded', source: 'ok', tab: null, chat: true },
   { name: 'settings', source: 'ok', tab: 'Settings', wait: 'Basics', open: 'Advanced' },
   { name: 'team', source: 'ok', tab: 'Team', wait: 'Only the Radar Lead has a session' },
@@ -67,6 +68,7 @@ try {
       if (s.open) await page.getByText(s.open, { exact: true }).click()
     }
     if (s.chat) await page.getByRole('button', { name: 'What needs me today?' }).first().click()
+    if (s.openBatch) await page.getByRole('button', { name: /^Dispatch all fixes \(/ }).click()
     if (s.openHandled) await page.getByText(/^Handled \(/).click()
     if (s.openHandoffs) await page.getByText(/^Fixes in flight \(/).click()
     if (s.openReplied) await page.getByText(/^Replied \(/).click()
@@ -132,6 +134,48 @@ try {
     const opened = await page.evaluate(() => window.__launched || [])
     if (!(opened.length === 1 && opened[0].slotKey === 'chat-99-1')) errors.push(`[dispatch] toast link opened ${JSON.stringify(opened)}`)
     else console.log('check toast link: ok', JSON.stringify(opened))
+    await ctx.close()
+  }
+  // DOM check: two undispatched hand-offs put "Dispatch all fixes (2)" in the header.
+  // It opens an inline panel listing both, checked; unchecking one relabels the primary
+  // button; the primary posts ONE batch with the checked keys and a toast links it.
+  // The fold groups the earlier batch under one header with its PR count.
+  {
+    const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, timezoneId: 'UTC', locale: 'en-US' })
+    const page = await ctx.newPage()
+    page.on('pageerror', (e) => errors.push(`[batch] ${e.message}`))
+    await page.goto('http://127.0.0.1:5287/index.html?source=ok')
+    const open = page.getByRole('button', { name: /^Dispatch all fixes \(/ })
+    await open.waitFor({ timeout: 30000 })
+    const label = (await open.textContent()).trim()
+    await open.click()
+    const panel = page.getByTestId('batch-panel')
+    await panel.waitFor({ timeout: 5000 })
+    const listed = await panel.locator('li').count()
+    const checked = await panel.locator('input[type=checkbox]:checked').count()
+    const primary = panel.getByRole('button', { name: /to one conductor$/ })
+    const text2 = (await primary.textContent()).trim()
+    await panel.locator('input[type=checkbox]').nth(1).uncheck()
+    const text1 = (await primary.textContent()).trim()
+    await panel.locator('input[type=checkbox]').nth(1).check()
+    await primary.click()
+    const toast = page.getByTestId('dispatch-toast')
+    await toast.waitFor({ timeout: 5000 })
+    const toastText = await toast.textContent()
+    const posts = await page.evaluate(() => (window.__posts || []).filter((p) => p.path.includes('/items/handoff/dispatch')))
+    const replyButtons = await page.getByRole('textbox', { name: 'Reply to the thread, sent as you' })
+      .locator('xpath=ancestor::li[1]').locator(':scope > div > div:last-child > button').allTextContents()
+    await page.getByText(/^Fixes in flight \(/).click()
+    const header = await page.getByTestId('fix-batch-header').allTextContents()
+    const ok = label === 'Dispatch all fixes (2)' && listed === 2 && checked === 2
+      && text2 === 'Dispatch 2 to one conductor' && text1 === 'Dispatch 1 to one conductor'
+      && posts.length === 1 && posts[0].path.endsWith('/dispatch-batch') && posts[0].body.keys.length === 2
+      && toastText.includes('Fixes dispatched to one conductor') && toastText.includes('Fix batch: 2 problems')
+      && (await page.getByTestId('batch-panel').count()) === 0
+      && JSON.stringify(replyButtons) === JSON.stringify(['Send to thread', 'Ignore'])
+      && header.length === 1 && header[0].includes('Fix batch: 2 problems') && header[0].includes('1 PRs found / 2')
+    if (!ok) errors.push(`[batch] label ${label} listed ${listed} checked ${checked} ${text2} / ${text1} posts ${JSON.stringify(posts)} toast ${toastText} reply ${JSON.stringify(replyButtons)} header ${JSON.stringify(header)}`)
+    else console.log('check batch: ok', label, listed, text2, text1, JSON.stringify(header))
     await ctx.close()
   }
   // DOM check: a reply row shows the draft in a textbox with Send to thread + Ignore;

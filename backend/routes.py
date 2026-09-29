@@ -520,6 +520,74 @@ async def _handle_handoff_dispatch(request: web.Request, ctx: Any) -> web.Respon
                               "members": built["members"]})
 
 
+async def _handle_handoff_dispatch_batch(request: web.Request, ctx: Any) -> web.Response:
+    """Owner's **Dispatch N to one conductor**: the reviewed list is the consent for the
+    whole batch. ONE kirocrew-conductor session gets one seed with a section per
+    hand-off (``handoff.build_batch_seed``) and decomposes the work itself; every
+    member stores the same ``fix_handoff.dispatch`` with ``batch: true``.
+    """
+    body = await _json_body(request)
+    if body is None:
+        return _err(400, "body_not_object", "request body must be a JSON object")
+    keys = body.get("keys")
+    if not isinstance(keys, list) or not keys or not all(store.is_item_key(k) for k in keys):
+        return _err(400, "invalid_field", "keys must be a non-empty list of ledger item keys")
+    try:
+        ledger = await asyncio.to_thread(store.read_ledger, _data_dir(ctx))
+    except store.StoreError as exc:
+        return _err(500, "ledger_corrupt", str(exc))
+    items = ledger.get("items") or {}
+    state = _state(request)
+    taken = []
+    for k in keys:
+        prior = needs.dispatch_of(items[k]) if isinstance(items.get(k), dict) else None
+        if prior and dispatch.slot_state(state, str(prior["session_key"]))[0] != "closed":
+            taken.append({"key": k, "session_key": prior["session_key"], "title": prior.get("title") or ""})
+    if taken:
+        return web.json_response(
+            {"ok": False, "code": "already_dispatched",
+             "error": f"{len(taken)} of these fixes already have a session", "dispatched": taken},
+            status=409,
+        )
+    try:
+        built = handoff.build_batch_seed(ledger, list(keys))
+    except handoff.HandoffError as exc:
+        return _err(404 if exc.code == "unknown_item" else 400, exc.code, str(exc))
+    if not dispatch.can_create(state):
+        store.append_event(_data_dir(ctx), "dispatch", f"fix batch seed ({len(keys)}) handed to the chat launcher")
+        return web.json_response({"ok": True, "mode": "client", "agent": handoff.CONDUCTOR_AGENT,
+                                  "title": built["title"], "seed": built["seed"]})
+    claimed: list[str] = []
+    for k in keys:
+        if not dispatch.claim(k):
+            for c in claimed:
+                dispatch.release(c)
+            return _err(409, "dispatch_in_progress", "one of these fixes is being dispatched already")
+        claimed.append(k)
+    try:
+        crew = await asyncio.to_thread(store.read_crew, _data_dir(ctx))
+        try:
+            opened = await dispatch.open_session(
+                state, title=built["title"], seed=built["seed"], workspace=str(crew.get("workspace") or "default")
+            )
+        except Exception as exc:  # noqa: BLE001 - host refusal of any kind
+            logger.warning("slack-radar: batch dispatch failed", exc_info=True)
+            return _err(502, "dispatch_failed", str(exc)[:300])
+        record = {"session_key": opened["session_key"], "title": opened["title"],
+                  "agent": handoff.CONDUCTOR_AGENT, "at": store.now(), "batch": True, "batch_keys": list(keys)}
+
+        def _mark(led: dict[str, Any]) -> None:
+            for k in keys:
+                store.apply_dispatch(led, k, record)
+
+        await asyncio.to_thread(store.mutate, _data_dir(ctx), _mark)
+    finally:
+        for c in claimed:
+            dispatch.release(c)
+    store.append_event(_data_dir(ctx), "dispatch", f"fix batch dispatched: {len(keys)} problems -> {opened['title']}")
+    return web.json_response({"ok": True, "mode": "server", **record, "filed": opened["filed"]})
+
+
 async def _handle_digest_request(request: web.Request, ctx: Any) -> web.Response:
     def _req(led: dict[str, Any]) -> None:
         led["digest"]["requested_at"] = store.now()
@@ -701,6 +769,7 @@ def register_routes(ctx: Any) -> list[Any]:
         r("POST", "/items/handle", _owner_only(_handle_item_handle)),
         r("POST", "/items/handoff/dismiss", _owner_only(_handle_handoff_dismiss)),
         r("POST", "/items/handoff/dispatch", _owner_only(_handle_handoff_dispatch)),
+        r("POST", "/items/handoff/dispatch-batch", _owner_only(_handle_handoff_dispatch_batch)),
         r("GET", "/fixes", _handle_fixes),
         r("GET", "/events", _handle_events),
         r("PUT", "/settings", _owner_only(_handle_put_settings)),
