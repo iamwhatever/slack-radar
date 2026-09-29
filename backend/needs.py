@@ -222,16 +222,20 @@ def has_fix_pr(item: dict[str, Any], fix_live: dict[str, dict[str, Any]] | None 
 
 
 def fix_view(item: dict[str, Any], fix_live: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
-    """``{session_key, title, agent, at, state, pr_url, pr_number, batch, batch_keys, pr_urls}``.
+    """``{session_key, title, agent, at, state, pr_url, pr_number, batch, batch_keys, pr_urls, trusted}``.
 
     ``state`` comes from ``fix_live`` (the route reads the session's slot):
     running / idle / closed, or ``unknown`` when nobody asked the gateway.
+    ``trusted`` is the open slot's live grant when the route read one, else the
+    ``fix_handoff.dispatch.trusted`` stored at dispatch.
     """
     from .handoff import pr_number
 
     d = dispatch_of(item) or {}
     pr = fix_pr(item) or str(((fix_live or {}).get(item.get("key") or "") or {}).get("pr_url") or "")
-    live = ((fix_live or {}).get(item.get("key") or "") or {}).get("state") or "unknown"
+    seen = (fix_live or {}).get(item.get("key") or "") or {}
+    live = seen.get("state") or "unknown"
+    trusted = seen["trusted"] if isinstance(seen.get("trusted"), bool) else d.get("trusted") is True
     return {
         "session_key": str(d.get("session_key") or ""),
         "title": str(d.get("title") or ""),
@@ -243,6 +247,7 @@ def fix_view(item: dict[str, Any], fix_live: dict[str, dict[str, Any]] | None = 
         "batch": bool(d.get("batch")),
         "batch_keys": [str(k) for k in d.get("batch_keys") or []] if d.get("batch") else [],
         "pr_urls": fix_pr_urls(item, fix_live),
+        "trusted": trusted,
     }
 
 

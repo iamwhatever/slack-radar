@@ -26,7 +26,7 @@ The rules the crew works by. The exact names, fields and routes are in [CONTRACT
 - Every member's last run is shown on the Board's Now strip and the Team tab: the Poller's last and next cycle, the Lead's last wake, each leaf's last run (or `--` before its first).
 - A fix is never dispatched by the crew. When an investigation ends with a code-shaped fix, the Lead writes ONE `fix_handoff` on the item: a self-contained task for a coding session (repo, item keys, links, coverage verdict, what to change, how to verify, "Do not merge; open a PR for review"). The Board shows **Dispatch fix** on the row. One click by the owner is the consent: the app opens ONE `kirocrew-conductor` session, sends it the hand-off plus the Slack context (quoted as untrusted data), and tracks it on the same row (`Dispatched · <session> · <state>`, **Open session**, the PR) until it reports a PR. No confirmation dialog and no card to open first: the click is the decision. The row's ▾ shows the hand-off read-only; it is never a step.
 - Several hand-offs can go as one batch. With two or more waiting, **Dispatch all fixes (N)** in the *Needs a decision* header names them all; one click on it is the consent for every one it counts. The owner leaves one out beforehand with **Exclude from batch** in that row's ▾. The app opens ONE `kirocrew-conductor` session with one seed holding a section per hand-off (each with its own quoted Slack context), and that conductor splits the work into its own items. One repo per batch, at most 10 fixes. Replies are never sent in a batch.
-- The app never dispatches on its own, and the Lead never dispatches. Only the owner's click on **Dispatch fix** or **Dispatch all fixes (N)** reaches a dispatch route; nothing dispatches on page load or on a timer; agent calls are refused by the owner gate. The conductor session is the owner's, not the crew's: an ordinary dashboard session (no app tag, no trust grant), listed under `Slack Radar/fixes`, which the owner reads, steers and closes like any chat. The conductor decomposes and dispatches its own workers.
+- The app never dispatches on its own, and the Lead never dispatches. Only the owner's click on **Dispatch fix** or **Dispatch all fixes (N)** reaches a dispatch route; nothing dispatches on page load or on a timer; agent calls are refused by the owner gate. The conductor session is the owner's, not the crew's: an ordinary dashboard session (no app tag), listed under `Slack Radar/fixes`, which the owner reads, steers and closes like any chat. The conductor decomposes and dispatches its own workers.
 - Still forbidden for every member: `session_send` to any session, a follow-up card for a fix, dev work of its own, non-Radar work in `crew.next`, and any `gh` write (issue, comment, label, PR). The app itself writes nothing to Slack or GitHub for a hand-off.
 
 ### 3. What may never be sent to Slack
@@ -59,6 +59,7 @@ See [docs/unattended-mode.md](../docs/unattended-mode.md) for the full approval 
 - Risk: Slack text anyone in a watched channel can write reaches an agent with a shell. Turn unattended mode on only when every watched channel is trusted.
 - The Ledger tab's **Investigate** button runs the Investigator fully auto-approved, so it is refused unless unattended mode is on.
 - The Thread Watcher runs through the app spawn SDK in either mode. Its only tool is the ledger, so auto-approval covers nothing but recording verdicts.
+- A dispatched conductor session rides the same scoped grant while unattended mode is on and the crew is live: the owner's **Dispatch fix** click is the consent, so it is put on the grant before its first message. Every poll holds it and the workers the gateway minted for it in step; turning unattended off, pausing the crew or disabling the app clears it within one poll. The app never sets the interactive trust flag on it. Nothing is trusted without a dispatch. With unattended off the session asks the owner for each tool, and the row says so. A worker opened before a gateway restart asks, because its parent link then comes from an agent-editable transcript.
 
 ### 6. Stop conditions
 
@@ -94,7 +95,7 @@ See [docs/unattended-mode.md](../docs/unattended-mode.md) for the full approval 
 - 每个成员上次的运行都显示在看板的 Now 行和 Team 标签页上：轮询器的上一轮和下一轮、组长上次被唤醒的时间、每个叶子成员上次的运行（第一次之前是 `--`）。
 - 小组从不自己派发修复。调查得出一个代码层面的修复时，组长在条目上写一个 `fix_handoff`：给编码会话的自包含任务（仓库、条目 key、链接、覆盖结论、改什么、怎么验证、"Do not merge; open a PR for review"）。看板在这一行上显示 **Dispatch fix**。所有者点一次就是同意：应用开一个 `kirocrew-conductor` 会话，把交接和 Slack 上下文（作为不可信数据引用）发给它，并在同一行上跟踪（`Dispatched · <会话> · <状态>`、**Open session**、PR），直到它报告一个 PR。没有确认对话框，也不用先打开卡片：点击本身就是决定。这一行的 ▾ 只读地显示交接，它从来不是一个步骤。
 - 多个交接可以作为一批一起派发。有两个或以上待派发时，*Needs a decision* 标题上的 **Dispatch all fixes (N)** 点名它们全部；点它一次就是对它所数的每一个的同意。所有者想留下某一个，事先在那一行的 ▾ 里勾 **Exclude from batch**。应用只开一个 `kirocrew-conductor` 会话，发一份种子，每个交接一节（各自带引用的 Slack 上下文），由这个 conductor 自己拆成工作项。每批只能一个仓库，最多 10 个修复。回复从不批量发送。
-- 应用从不自己派发，组长也从不派发。只有所有者点 **Dispatch fix** 或 **Dispatch all fixes (N)** 才会到达派发路由；页面加载或定时器都不会派发；智能体的调用会被所有者闸门拒绝。conductor 会话属于所有者，不属于小组：它是一个普通的看板会话（没有应用标签、没有信任授权），放在 `Slack Radar/fixes` 下，所有者可以像任何聊天一样阅读、引导和关闭它。conductor 自己拆分任务并派发自己的 worker。
+- 应用从不自己派发，组长也从不派发。只有所有者点 **Dispatch fix** 或 **Dispatch all fixes (N)** 才会到达派发路由；页面加载或定时器都不会派发；智能体的调用会被所有者闸门拒绝。conductor 会话属于所有者，不属于小组：它是一个普通的看板会话（没有应用标签），放在 `Slack Radar/fixes` 下，所有者可以像任何聊天一样阅读、引导和关闭它。conductor 自己拆分任务并派发自己的 worker。
 - 对所有成员仍然禁止：对任何会话用 `session_send`、为修复弹出跟进卡片、自己做开发、把非雷达工作写进 `crew.next`，以及任何 `gh` 写操作（issue、评论、标签、PR）。交接时应用本身不向 Slack 或 GitHub 写任何东西。
 
 ### 3. 绝不能发到 Slack 的东西
@@ -127,6 +128,7 @@ See [docs/unattended-mode.md](../docs/unattended-mode.md) for the full approval 
 - 风险：监听频道里任何人都能写的 Slack 文字会到达一个有 shell 的 agent。只有当所有监听频道都可信时才打开无人值守模式。
 - Ledger 标签页的 **Investigate** 按钮会让调查员全程自动批准运行，所以只有无人值守模式打开时才允许。
 - 线程观察员在两种模式下都通过应用的派生 SDK 运行。它唯一的工具是台账，所以自动批准只覆盖记录结论。
+- 无人值守模式打开且小组在运行时，派发出去的 conductor 会话也用同一个限定范围授权：所有者点 **Dispatch fix** 就是同意，所以在第一条消息之前就挂上授权。每次轮询都会同步它和网关为它开的 worker；关闭无人值守、暂停小组或停用应用，一次轮询之内就清掉。应用从不给它设置交互式信任标志。没有派发就不会信任任何东西。无人值守关闭时，这个会话每个工具都会询问所有者，这一行会注明。网关重启前开的 worker 会询问，因为那时它的父链接来自 agent 可以改的对话记录。
 
 ### 6. 停止条件
 

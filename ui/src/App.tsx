@@ -77,6 +77,8 @@ type FixDispatch = {
   batch?: boolean
   batch_keys?: string[]
   pr_urls?: string[]
+  // On the crew's scoped grant (unattended mode); false: the session asks for each tool.
+  trusted?: boolean
 }
 // One "Fixes in flight" header per batch session (needs.py `fix_batches`).
 type FixBatch = {
@@ -1029,6 +1031,8 @@ type RowSent = {
   pr_number: number
   // Client mode: the chat launcher opened the conductor chat; there is no session to track.
   launched?: boolean
+  // False: the session is not on the crew's grant and asks for each tool.
+  trusted?: boolean
 }
 
 function sentOf(e: NeedEntry, local?: RowSent): RowSent | null {
@@ -1036,7 +1040,7 @@ function sentOf(e: NeedEntry, local?: RowSent): RowSent | null {
   if (d) {
     return {
       session_key: d.session_key, title: d.title, batch: d.batch ? d.batch_keys?.length || 0 : 0,
-      state: d.state, pr_url: d.pr_url, pr_number: d.pr_number,
+      state: d.state, pr_url: d.pr_url, pr_number: d.pr_number, trusted: d.trusted,
     }
   }
   return local || null
@@ -1147,6 +1151,11 @@ function NeedRow({
                   </a>
                 </>
               )}
+            </div>
+          )}
+          {sent && sent.trusted === false && (sent.state === 'running' || sent.state === 'idle') && (
+            <div className="text-xs text-muted" data-testid="fix-untrusted">
+              Will ask you for each tool: unattended mode is off.
             </div>
           )}
           {failed && !sent && (
@@ -1506,7 +1515,7 @@ function SessionLink({ d, label }: { d: { session_key: string; title: string }; 
 }
 
 type DispatchReply =
-  | { ok: true; mode: 'server'; session_key: string; title: string }
+  | { ok: true; mode: 'server'; session_key: string; title: string; trusted?: boolean }
   | { ok: true; mode: 'client'; agent: string; title: string; seed: string }
 
 function errorBody(err: unknown): { code?: string; error?: string; session_key?: string; title?: string } {
@@ -1567,7 +1576,7 @@ function useDispatchFix(onChanged: () => void): {
       clearFailed([key])
       try {
         const r = await api.post<DispatchReply>(`${BASE}/items/handoff/dispatch`, { key })
-        if (r.mode === 'server') record([key], { session_key: r.session_key, title: r.title, batch: 0, state: 'running', pr_url: '', pr_number: 0 })
+        if (r.mode === 'server') record([key], { session_key: r.session_key, title: r.title, batch: 0, state: 'running', pr_url: '', pr_number: 0, trusted: r.trusted })
         else client(r, [key], 0)
         onChanged()
       } catch (err) {
@@ -1585,7 +1594,7 @@ function useDispatchFix(onChanged: () => void): {
       try {
         const r = await api.post<DispatchReply>(`${BASE}/items/handoff/dispatch-batch`, { keys })
         if (r.mode === 'server') {
-          record(keys, { session_key: r.session_key, title: r.title, batch: keys.length, state: 'running', pr_url: '', pr_number: 0 })
+          record(keys, { session_key: r.session_key, title: r.title, batch: keys.length, state: 'running', pr_url: '', pr_number: 0, trusted: r.trusted })
         } else client(r, keys, keys.length)
         onChanged()
       } catch (err) {

@@ -391,8 +391,14 @@ async def _handle_crew_update(request: web.Request, ctx: Any) -> web.Response:
         # A changed agent moves the session now (the old slot cannot be re-bound);
         # an unchanged one just re-derives the grant.
         slot, crew = await crew_runtime._resolve_slot(state, _data_dir(ctx), crew, create=False)
+        granted: bool | None = None
         if slot is not None:
-            await asyncio.to_thread(crew_runtime.sync_trust, slot, crew)
+            granted = await asyncio.to_thread(crew_runtime.sync_trust, slot, crew)
+        try:
+            ledger = await asyncio.to_thread(store.read_ledger, _data_dir(ctx))
+        except store.StoreError:
+            ledger = {}
+        await crew_runtime.sync_dispatch_trust(state, ledger, crew, granted)
     store.append_event(_data_dir(ctx), "crew", f"crew settings updated ({', '.join(sorted(patch)) or 'nothing'})")
     return web.json_response({"ok": True, "crew": crew})
 
@@ -507,21 +513,23 @@ async def _handle_handoff_dispatch(request: web.Request, ctx: Any) -> web.Respon
         return _err(409, "dispatch_in_progress", "this fix is being dispatched already")
     try:
         crew = await asyncio.to_thread(store.read_crew, _data_dir(ctx))
+        trusted, why = await asyncio.to_thread(crew_runtime.dispatch_grant, crew)
         try:
             opened = await dispatch.open_session(
-                state, title=built["title"], seed=built["seed"], workspace=str(crew.get("workspace") or "default")
+                state, title=built["title"], seed=built["seed"], workspace=str(crew.get("workspace") or "default"),
+                trusted=trusted,
             )
         except Exception as exc:  # noqa: BLE001 - host refusal of any kind
             logger.warning("slack-radar: dispatch failed", exc_info=True)
             return _err(502, "dispatch_failed", str(exc)[:300])
         record = {"session_key": opened["session_key"], "title": opened["title"],
-                  "agent": handoff.CONDUCTOR_AGENT, "at": store.now()}
+                  "agent": handoff.CONDUCTOR_AGENT, "at": store.now(), "trusted": trusted}
         await asyncio.to_thread(store.mutate, _data_dir(ctx), lambda led: store.apply_dispatch(led, key, record))
     finally:
         dispatch.release(key)
     store.append_event(_data_dir(ctx), "dispatch", f"fix dispatched to {handoff.CONDUCTOR_AGENT}: {opened['title']}", key=key)
-    return web.json_response({"ok": True, "mode": "server", **record, "filed": opened["filed"],
-                              "members": built["members"]})
+    return web.json_response({"ok": True, "mode": "server", **record, **({} if trusted else {"why": why}),
+                              "filed": opened["filed"], "members": built["members"]})
 
 
 async def _handle_handoff_dispatch_batch(request: web.Request, ctx: Any) -> web.Response:
@@ -570,15 +578,18 @@ async def _handle_handoff_dispatch_batch(request: web.Request, ctx: Any) -> web.
         claimed.append(k)
     try:
         crew = await asyncio.to_thread(store.read_crew, _data_dir(ctx))
+        trusted, why = await asyncio.to_thread(crew_runtime.dispatch_grant, crew)
         try:
             opened = await dispatch.open_session(
-                state, title=built["title"], seed=built["seed"], workspace=str(crew.get("workspace") or "default")
+                state, title=built["title"], seed=built["seed"], workspace=str(crew.get("workspace") or "default"),
+                trusted=trusted,
             )
         except Exception as exc:  # noqa: BLE001 - host refusal of any kind
             logger.warning("slack-radar: batch dispatch failed", exc_info=True)
             return _err(502, "dispatch_failed", str(exc)[:300])
         record = {"session_key": opened["session_key"], "title": opened["title"],
-                  "agent": handoff.CONDUCTOR_AGENT, "at": store.now(), "batch": True, "batch_keys": list(keys)}
+                  "agent": handoff.CONDUCTOR_AGENT, "at": store.now(), "trusted": trusted,
+                  "batch": True, "batch_keys": list(keys)}
 
         def _mark(led: dict[str, Any]) -> None:
             for k in keys:
@@ -589,7 +600,8 @@ async def _handle_handoff_dispatch_batch(request: web.Request, ctx: Any) -> web.
         for c in claimed:
             dispatch.release(c)
     store.append_event(_data_dir(ctx), "dispatch", f"fix batch dispatched: {len(keys)} problems -> {opened['title']}")
-    return web.json_response({"ok": True, "mode": "server", **record, "filed": opened["filed"]})
+    return web.json_response({"ok": True, "mode": "server", **record, **({} if trusted else {"why": why}),
+                              "filed": opened["filed"]})
 
 
 async def _handle_digest_request(request: web.Request, ctx: Any) -> web.Response:
