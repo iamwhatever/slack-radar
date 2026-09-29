@@ -95,6 +95,29 @@ def _rank(item: dict[str, Any], now: float) -> tuple[int, float]:
     return (_PRIORITY_RANK.get(str(item.get("priority") or ""), 4), -posted_at(item))
 
 
+def _float(v: Any) -> float:
+    try:
+        return float(v or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _thread_replies(item: dict[str, Any]) -> list[dict[str, Any]]:
+    """The item's kept thread ``replies`` as ``[{ts, user, text}]``, oldest first."""
+    rows = [r for r in item.get("replies") or [] if isinstance(r, dict)]
+    rows.sort(key=lambda r: _float(r.get("ts")))
+    return [{"ts": str(r.get("ts") or ""), "user": str(r.get("user") or ""), "text": str(r.get("text") or "")} for r in rows]
+
+
+def _draft_meta(item: dict[str, Any]) -> dict[str, Any]:
+    d = item["reply_draft"]
+    return {
+        "reply_draft": str(d.get("text") or ""),
+        "reply_draft_by": "owner" if d.get("by") == "owner" else "lead",
+        "reply_draft_at": _float(d.get("at")),
+    }
+
+
 def _entry(item: dict[str, Any], now: float, reason: str,
            fix_live: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
     return {
@@ -106,8 +129,14 @@ def _entry(item: dict[str, Any], now: float, reason: str,
         "category": item.get("category") or "",
         "age_hours": age_hours(item, now),
         "reason": reason,
+        # The original message and its thread, for the Board's detail view (LOCAL).
+        "text": str(item.get("text") or ""),
+        "user": str(item.get("user") or ""),
+        "ts_float": posted_at(item),
+        "replies": _thread_replies(item),
+        "last_thread_check_at": _float(item.get("last_thread_check_at")),
         **({"handoff_title": item["fix_handoff"].get("title") or ""} if has_handoff(item) else {}),
-        **({"reply_draft": str(item["reply_draft"].get("text") or "")} if store.has_reply_draft(item) else {}),
+        **(_draft_meta(item) if store.has_reply_draft(item) else {}),
         **({"dispatch": fix_view(item, fix_live)} if dispatch_of(item) else {}),
     }
 

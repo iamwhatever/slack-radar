@@ -1,7 +1,7 @@
 import * as sdk from '@kirocrew/app-sdk'
 import { ChatEmbed, useAppApi } from '@kirocrew/app-sdk'
 import { Badge, Btn, Card, CardTitle, EmptyState, Input, PageHeader, StatCard, Toggle } from '@kirocrew/app-sdk/ui'
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react'
 
 const BASE = '/api/apps/slack-radar'
 
@@ -41,8 +41,17 @@ type NeedEntry = {
   words?: string[]
   handoff_title?: string
   reply_draft?: string
+  reply_draft_by?: 'lead' | 'owner'
+  reply_draft_at?: number
   dispatch?: FixDispatch
+  // The original Slack message and its kept thread replies (oldest first).
+  text?: string
+  user?: string
+  ts_float?: number
+  replies?: ThreadReply[]
+  last_thread_check_at?: number
 }
+type ThreadReply = { ts: string; user: string; text: string }
 type NeedGroup = { id: 'decide' | 'unanswered' | 'clusters'; total: number; entries: NeedEntry[] }
 // A fix task the Lead wrote for a coding session (store.py `fix_handoff`, LOCAL).
 type FixHandoff = { title: string; prompt: string; repo: string; links: string[]; at: number }
@@ -972,64 +981,69 @@ function ErrorNotice({ message, onRetry }: { message: string; onRetry: () => voi
 const small: CSSProperties = { fontSize: 12, padding: '2px 10px' }
 
 // What the owner should do with a row: the label of its one primary button.
-type Primary = 'Reply' | 'Dispatch fix' | 'Decide' | 'Done'
+type Primary = 'Open' | 'Reply' | 'Dispatch fix' | 'Decide' | 'Done'
+
+// A row whose Lead-written reply waits for the owner's Send (in the detail view).
+const isReplyRow = (groupId: NeedGroup['id'], e: NeedEntry) => groupId === 'decide' && !!e.reply_draft && !e.handoff_title
 
 function primaryOf(groupId: NeedGroup['id'], e: NeedEntry): Primary {
   if (groupId === 'decide' && e.dispatch) return 'Done'
   if (groupId === 'decide' && e.handoff_title) return 'Dispatch fix'
-  if (groupId === 'decide' && e.reply_draft) return 'Reply'
+  if (isReplyRow(groupId, e)) return 'Open'
   if (groupId === 'decide' && e.reason.startsWith('Looks resolved')) return 'Done'
   if (groupId === 'unanswered' && e.permalink) return 'Reply'
   return 'Decide'
 }
 
-// One Needs-you row. Collapsed: priority, summary, why and when, ONE button naming the
-// next step, and the expand toggle. Expanded: channel, Slack link, the reply draft for
-// a reply row (Send to thread is the send), and the secondary actions.
+// Slack message markup as plain text: <@U1> -> @U1, <url|label> -> label, entities decoded.
+function slackPlain(t: string): string {
+  return t
+    .replace(/<([@#!])([^>|]+)\|([^>]+)>/g, (_m, sig: string, _id: string, label: string) => `${sig === '#' ? '#' : '@'}${label}`)
+    .replace(/<([@#!])([^>|]+)>/g, (_m, sig: string, id: string) => `${sig === '#' ? '#' : '@'}${id}`)
+    .replace(/<([^>|]+)\|([^>]+)>/g, '$2')
+    .replace(/<([^>]+)>/g, '$1')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&')
+}
+
+// The first non-empty line of a Slack message, clipped for a list row.
+const firstLine = (t: string, n = 90) => clip(slackPlain(t).split('\n').map((l) => l.trim()).find(Boolean) || '', n)
+
+const hhmm = (t: number) => new Date(t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+
+// Thread replies older than this read as "replies as of HH:MM".
+const REPLIES_STALE_SECS = 3600
+
+// One Needs-you row: priority, what the message is, who/why and when, ONE button naming
+// the next step. A reply row shows the ORIGINAL message's first line and "Reply ready";
+// the draft and Send to thread live in the detail view. A click on the row opens it.
 function NeedRow({
   e,
   groupId,
   first,
+  onOpen,
   onMark,
-  onWhy,
   onDispatch,
-  onSend,
   busy,
 }: {
   e: NeedEntry
   groupId: NeedGroup['id']
   first: boolean
+  onOpen: () => void
   onMark: (how: HandleHow) => void
-  onWhy: () => void
   onDispatch?: () => void
-  onSend?: (text: string, edited: boolean) => void
   busy?: boolean
 }) {
   const primary = primaryOf(groupId, e)
-  const replyRow = groupId === 'decide' && !!e.reply_draft && !e.handoff_title && !!onSend
-  const [open, setOpen] = useState(false)
-  const [text, setText] = useState(e.reply_draft || '')
-  useEffect(() => setText(e.reply_draft || ''), [e.reply_draft])
-  const boxRef = useRef<HTMLTextAreaElement>(null)
-  const safe = e.key.replace(/[^A-Za-z0-9]/g, '-')
-  const boxId = `sr-reply-${groupId}-${safe}`
-  const panelId = `sr-row-${groupId}-${safe}`
+  const reply = isReplyRow(groupId, e)
   const sent = e.dispatch
-  const openSlack = () => e.permalink && window.open(e.permalink, '_blank', 'noopener,noreferrer')
   const onPrimary = () => {
     if (primary === 'Dispatch fix') onDispatch?.()
     else if (primary === 'Done') onMark('done')
-    else if (primary === 'Reply' && !replyRow) openSlack()
-    else {
-      setOpen(true)
-      if (replyRow) window.requestAnimationFrame(() => boxRef.current?.focus())
-    }
+    else if (primary === 'Reply' && e.permalink) window.open(e.permalink, '_blank', 'noopener,noreferrer')
+    else onOpen()
   }
-  const secondary: { label: string; onClick: () => void }[] = [
-    ...(primary !== 'Done' ? [{ label: replyRow ? 'Done without sending' : 'Done', onClick: () => onMark('done') }] : []),
-    { label: 'Ignore', onClick: () => onMark('ignored') },
-    { label: 'Why? Ask the lead', onClick: onWhy },
-  ]
   return (
     <li
       className="text-sm"
@@ -1041,10 +1055,32 @@ function NeedRow({
       <div className="flex items-start gap-2">
         <div style={{ flex: 'none', minWidth: 28 }}>{priorityBadge(e.priority)}</div>
         <div style={{ minWidth: 0, flex: 1 }}>
-          <div style={{ color: 'var(--text-strong)' }}>{e.summary || '(no text)'}</div>
-          <div className="text-xs text-muted" style={{ marginTop: 2 }}>
-            {e.reason} · <span data-testid="need-age">{fmtAge(e.age_hours)}</span>
-          </div>
+          <button
+            type="button"
+            data-testid="need-open"
+            onClick={onOpen}
+            title="Open the message and its thread"
+            style={{ border: 0, background: 'transparent', padding: 0, margin: 0, textAlign: 'left', cursor: 'pointer', width: '100%', color: 'inherit', font: 'inherit' }}
+          >
+            {reply ? (
+              <>
+                <div style={{ color: 'var(--text-strong)' }}>
+                  <span data-testid="reply-ready"><Badge variant="aim">Reply ready</Badge></span>{' '}
+                  <span data-testid="need-first-line">{firstLine(e.text || e.summary) || '(no text)'}</span>
+                </div>
+                <div className="text-xs text-muted" style={{ marginTop: 2 }}>
+                  {e.user || 'someone'} · <span data-testid="need-age">{fmtAge(e.age_hours)}</span>
+                </div>
+              </>
+            ) : (
+              <>
+                <div style={{ color: 'var(--text-strong)' }}>{e.summary || '(no text)'}</div>
+                <div className="text-xs text-muted" style={{ marginTop: 2 }}>
+                  {e.reason} · <span data-testid="need-age">{fmtAge(e.age_hours)}</span>
+                </div>
+              </>
+            )}
+          </button>
           {sent && (
             <div className="text-xs" style={{ marginTop: 2 }} data-testid="fix-in-progress">
               <SessionLink d={sent} /> · {FIX_STATE[sent.state] || sent.state}
@@ -1063,26 +1099,140 @@ function NeedRow({
           <Btn primary style={small} onClick={onPrimary} disabled={primary === 'Dispatch fix' && busy}>
             {primary === 'Dispatch fix' && busy ? 'Dispatching…' : primary}
           </Btn>
-          <button
-            type="button"
-            aria-expanded={open}
-            aria-controls={panelId}
-            aria-label={open ? 'Hide details' : 'Show details and more actions'}
-            title={open ? 'Hide details' : 'Details and more actions'}
-            onClick={() => setOpen(!open)}
-            style={{ border: 0, background: 'transparent', cursor: 'pointer', padding: '2px 8px', borderRadius: 6, color: 'var(--muted)' }}
-          >
-            {open ? '▴' : '▾'}
-          </button>
         </div>
       </div>
-      {open && (
-        <div id={panelId} data-testid="need-more" style={{ margin: '6px 0 0 36px' }}>
+    </li>
+  )
+}
+
+type SendResult = { ok: true; link: string } | { ok: false; why: string }
+
+// The detail view of one Needs-you row, a dialog inside the Board: the original message
+// in full, the thread replies so far (oldest first), then the Lead's draft for a reply
+// row with Send to thread. Sending is this one click; nothing here sends on its own.
+function NeedDetail({
+  e,
+  groupId,
+  onClose,
+  onSend,
+  onMark,
+  onWhy,
+  onDispatch,
+  busy,
+}: {
+  e: NeedEntry
+  groupId: NeedGroup['id']
+  onClose: () => void
+  onSend: (text: string, edited: boolean) => Promise<SendResult>
+  onMark: (how: HandleHow) => void
+  onWhy: () => void
+  onDispatch?: () => void
+  busy?: boolean
+}) {
+  const reply = isReplyRow(groupId, e)
+  const primary = primaryOf(groupId, e)
+  const [text, setText] = useState(e.reply_draft || '')
+  const [sending, setSending] = useState(false)
+  const [sentLink, setSentLink] = useState<string | null>(null)
+  const [failed, setFailed] = useState('')
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const boxRef = useRef<HTMLTextAreaElement>(null)
+  const closeRef = useRef<HTMLButtonElement>(null)
+  const safe = e.key.replace(/[^A-Za-z0-9]/g, '-')
+  const headId = `sr-detail-${safe}`
+  const boxId = `sr-reply-${safe}`
+  const replies = e.replies || []
+  const checked = e.last_thread_check_at || 0
+  const stale = checked > 0 && Date.now() / 1000 - checked > REPLIES_STALE_SECS
+
+  // Focus moves into the dialog and back to what opened it.
+  useEffect(() => {
+    const opener = document.activeElement as HTMLElement | null
+    window.requestAnimationFrame(() => (reply ? boxRef.current : closeRef.current)?.focus())
+    return () => {
+      if (opener && opener.isConnected) opener.focus()
+    }
+  }, [])
+
+  const send = async () => {
+    const t = text.trim()
+    setFailed('')
+    setSending(true)
+    const r = await onSend(t, t !== (e.reply_draft || '').trim())
+    setSending(false)
+    if (r.ok) setSentLink(r.link)
+    else setFailed(r.why)
+  }
+
+  const onKeyDown = (ev: ReactKeyboardEvent) => {
+    if (ev.key === 'Escape') {
+      ev.stopPropagation()
+      onClose()
+      return
+    }
+    if (ev.key !== 'Tab' || !dialogRef.current) return
+    const nodes = [...dialogRef.current.querySelectorAll<HTMLElement>('a[href], button:not([disabled]), textarea, input, select')]
+    if (nodes.length === 0) return
+    const firstNode = nodes[0]
+    const lastNode = nodes[nodes.length - 1]
+    if (ev.shiftKey && document.activeElement === firstNode) {
+      ev.preventDefault()
+      lastNode.focus()
+    } else if (!ev.shiftKey && document.activeElement === lastNode) {
+      ev.preventDefault()
+      firstNode.focus()
+    }
+  }
+
+  const act = (fn: () => void) => () => {
+    fn()
+    onClose()
+  }
+  const section: CSSProperties = { marginTop: 14 }
+  const h4: CSSProperties = { margin: '0 0 4px', fontSize: 13, fontWeight: 600, color: 'var(--text-strong)' }
+  return (
+    <div
+      data-testid="need-detail-backdrop"
+      onMouseDown={(ev) => ev.target === ev.currentTarget && onClose()}
+      style={{ position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(0,0,0,.35)', display: 'flex', justifyContent: 'flex-end' }}
+    >
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={headId}
+        data-testid="need-detail"
+        onKeyDown={onKeyDown}
+        className="text-sm"
+        style={{
+          width: 'min(560px, 100%)', height: '100%', overflowY: 'auto', padding: '16px 20px',
+          background: 'var(--card, var(--bg))', color: 'var(--text)', borderLeft: '1px solid var(--border)',
+        }}
+      >
+        <div className="flex items-start gap-2">
+          <div style={{ flex: 'none' }}>{priorityBadge(e.priority)}</div>
+          <h3 id={headId} style={{ margin: 0, flex: 1, fontSize: 15, fontWeight: 600, color: 'var(--text-strong)' }}>
+            {firstLine(e.text || e.summary, 80) || '(no text)'}
+          </h3>
+          <button
+            ref={closeRef}
+            type="button"
+            aria-label="Close"
+            onClick={onClose}
+            style={{ border: 0, background: 'transparent', cursor: 'pointer', padding: '0 6px', fontSize: 18, lineHeight: 1, color: 'var(--muted)' }}
+          >
+            ×
+          </button>
+        </div>
+
+        <section aria-label="Original message" data-testid="detail-original" style={section}>
+          <h4 style={h4}>Original message</h4>
           <div className="text-xs text-muted">
+            <span data-testid="detail-author">{e.user || 'someone'}</span>
+            {' · '}
             <span className="font-mono">{e.channel}</span>
-            {e.category && <> · {e.category}</>}
-            {e.words && e.words.length > 0 && <> · shared words: {e.words.join(', ')}</>}
-            {e.members && e.members.length > 0 && <> · Done and Ignore apply to all {e.members.length}</>}
+            {' · '}
+            {fmtTime(e.ts_float)}
             {e.permalink && (
               <>
                 {' · '}
@@ -1092,44 +1242,111 @@ function NeedRow({
               </>
             )}
           </div>
-          {e.handoff_title && !sent && <div className="text-xs" style={{ marginTop: 4 }}>Fix: {e.handoff_title}</div>}
-          {replyRow && (
-            <>
-              <label htmlFor={boxId} className="text-xs text-muted" style={{ display: 'block', marginTop: 6 }}>
-                Reply to the thread, sent as you
-              </label>
-              <textarea
-                id={boxId}
-                ref={boxRef}
-                value={text}
-                maxLength={1500}
-                rows={3}
-                onChange={(ev) => setText(ev.target.value)}
-                style={{
-                  width: '100%', marginTop: 2, fontSize: 13, padding: '6px 8px', borderRadius: 6, resize: 'vertical',
-                  border: '1px solid var(--border-strong)', background: 'var(--bg)', color: 'var(--text)',
-                }}
-              />
-            </>
+          <p style={{ margin: '6px 0 0', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }} data-testid="detail-text">
+            {slackPlain(e.text || e.summary) || '(no text)'}
+          </p>
+        </section>
+
+        <section aria-label="Thread replies" data-testid="detail-replies" style={section}>
+          <h4 style={h4}>
+            Thread replies ({replies.length})
+            {stale && (
+              <span className="text-xs text-muted" style={{ fontWeight: 400 }} data-testid="replies-stale">
+                {' · '}replies as of {hhmm(checked)}
+              </span>
+            )}
+          </h4>
+          {replies.length === 0 ? (
+            <p className="text-xs text-muted" style={{ margin: 0 }}>No replies yet</p>
+          ) : (
+            <ol className="flex flex-col" style={{ margin: 0, padding: 0, listStyle: 'none' }}>
+              {replies.map((r, i) => (
+                <li key={`${r.ts}-${i}`} style={{ padding: '4px 0', borderTop: i === 0 ? 0 : '1px solid var(--border)' }}>
+                  <div className="text-xs text-muted">
+                    {r.user || 'someone'} · {fmtTime(Number(r.ts))}
+                  </div>
+                  <div style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{slackPlain(r.text)}</div>
+                </li>
+              ))}
+            </ol>
           )}
-          <div className="flex flex-wrap items-center gap-1" style={{ marginTop: 6 }} data-testid="need-secondary">
-            {replyRow && (
-              <Btn
-                primary
-                style={small}
-                disabled={!text.trim()}
-                onClick={() => onSend?.(text.trim(), text.trim() !== (e.reply_draft || '').trim())}
-              >
-                Send to thread
+        </section>
+
+        {!reply && (
+          <section aria-label="Why it is here" style={section} className="text-xs text-muted">
+            {e.reason}
+            {e.category && <> · {e.category}</>}
+            {e.words && e.words.length > 0 && <> · shared words: {e.words.join(', ')}</>}
+            {e.members && e.members.length > 0 && <> · Done and Ignore apply to all {e.members.length}</>}
+            {e.handoff_title && !e.dispatch && <div style={{ marginTop: 4, color: 'var(--text)' }}>Fix: {e.handoff_title}</div>}
+          </section>
+        )}
+
+        {reply && (
+          <section aria-label="Reply draft" data-testid="detail-draft" style={section}>
+            <label htmlFor={boxId} style={{ ...h4, display: 'block' }}>
+              Reply to the thread, sent as you
+            </label>
+            <div className="text-xs text-muted" data-testid="draft-by">
+              {e.reply_draft_by === 'owner' ? 'Edited by you' : 'Drafted by the Radar Lead'}
+              {e.reply_draft_at ? ` · ${ago(e.reply_draft_at)}` : ''}
+            </div>
+            <textarea
+              id={boxId}
+              ref={boxRef}
+              value={text}
+              maxLength={1500}
+              rows={6}
+              readOnly={sentLink !== null}
+              onChange={(ev) => setText(ev.target.value)}
+              style={{
+                width: '100%', marginTop: 4, fontSize: 13, padding: '6px 8px', borderRadius: 6, resize: 'vertical',
+                border: '1px solid var(--border-strong)', background: 'var(--bg)', color: 'var(--text)',
+              }}
+            />
+          </section>
+        )}
+
+        {failed && <ErrorNotice message={`Could not send that reply: ${failed}`} onRetry={send} />}
+
+        {sentLink !== null ? (
+          <div style={section} className="flex flex-wrap items-center gap-2">
+            <p role="status" style={{ margin: 0, flex: 1 }}>
+              Sent as you
+              {sentLink && (
+                <>
+                  {' · '}
+                  <a className="underline" href={sentLink} target="_blank" rel="noreferrer noopener" data-testid="sent-link">
+                    Open the reply in Slack
+                  </a>
+                </>
+              )}
+            </p>
+            <Btn primary style={small} onClick={onClose}>Close</Btn>
+          </div>
+        ) : (
+          <div className="flex flex-wrap items-center gap-1" style={section} data-testid="detail-actions">
+            {reply && (
+              <Btn primary style={small} disabled={!text.trim() || sending} onClick={send}>
+                {sending ? 'Sending…' : 'Send to thread'}
               </Btn>
             )}
-            {secondary.map((a) => (
-              <Btn key={a.label} style={small} onClick={a.onClick}>{a.label}</Btn>
-            ))}
+            {primary === 'Dispatch fix' && (
+              <Btn primary style={small} disabled={busy} onClick={act(() => onDispatch?.())}>Dispatch fix</Btn>
+            )}
+            {primary === 'Reply' && e.permalink && (
+              <Btn primary style={small} onClick={() => window.open(e.permalink, '_blank', 'noopener,noreferrer')}>Reply</Btn>
+            )}
+            <Btn style={small} onClick={act(() => onMark('done'))}>{reply ? 'Done without sending' : 'Done'}</Btn>
+            <Btn style={small} onClick={act(() => onMark('ignored'))}>Ignore</Btn>
+            <Btn style={small} onClick={act(onWhy)}>Why? Ask the lead</Btn>
           </div>
-        </div>
-      )}
-    </li>
+        )}
+        {primary === 'Reply' && sentLink === null && (
+          <p className="text-xs text-muted" style={{ margin: '6px 0 0' }}>Reply opens the thread in Slack.</p>
+        )}
+      </div>
+    </div>
   )
 }
 
@@ -1413,28 +1630,17 @@ function NeedsCard({
       return { key: e.key, title: e.handoff_title || h.title, repo: h.repo || '', prompt: h.prompt || '' }
     })
   const [batchOpen, setBatchOpen] = useState(false)
-  const [sendFailed, setSendFailed] = useState<{ key: string; text: string; edited: boolean; why: string } | null>(null)
-  const [sent, setSent] = useState('')
-  useEffect(() => {
-    if (!sent) return
-    const id = window.setTimeout(() => setSent(''), 4000)
-    return () => window.clearTimeout(id)
-  }, [sent])
-  const sendReply = async (key: string, text: string, edited: boolean, rowId: string) => {
-    setSendFailed(null)
-    setGone((prev) => new Set(prev).add(rowId))
+  // The row whose detail view is open, kept whole so it stays open while the list refreshes.
+  const [detail, setDetail] = useState<{ e: NeedEntry; groupId: NeedGroup['id'] } | null>(null)
+  const sendReply = async (key: string, text: string, edited: boolean, rowId: string): Promise<SendResult> => {
     try {
       if (edited) await api.post(`${BASE}/items/reply/draft`, { key, text })
-      await api.post(`${BASE}/items/reply/send`, { key })
-      setSent('Sent as you')
+      const r = await api.post<{ item?: { replied?: { permalink?: string } } }>(`${BASE}/items/reply/send`, { key })
+      setGone((prev) => new Set(prev).add(rowId))
       onChanged()
+      return { ok: true, link: String(r?.item?.replied?.permalink || '') }
     } catch (err) {
-      setGone((prev) => {
-        const next = new Set(prev)
-        next.delete(rowId)
-        return next
-      })
-      setSendFailed({ key, text, edited, why: (err as Error).message || 'unknown error' })
+      return { ok: false, why: (err as Error).message || 'unknown error' }
     }
   }
   const replied = needs?.replied || []
@@ -1497,17 +1703,6 @@ function NeedsCard({
           }}
         />
       )}
-      {sent && (
-        <p role="status" className="text-sm" style={{ margin: '0 0 8px', color: 'var(--success, var(--text))' }}>
-          {sent}
-        </p>
-      )}
-      {sendFailed && (
-        <ErrorNotice
-          message={`Could not send that reply: ${sendFailed.why}`}
-          onRetry={() => sendReply(sendFailed.key, sendFailed.text, sendFailed.edited, `decide:${sendFailed.key}`)}
-        />
-      )}
       {failed && (
         <ErrorNotice
           message={`Could not ${verb} that message. Nothing changed.`}
@@ -1533,10 +1728,9 @@ function NeedsCard({
                     e={e}
                     groupId={g.id}
                     first={i === 0}
+                    onOpen={() => setDetail({ e, groupId: g.id })}
                     onMark={(how) => post(e.members?.length ? e.members : [e.key], how, `${g.id}:${e.key}`)}
-                    onWhy={() => onWhy(e)}
                     onDispatch={g.id === 'decide' && e.handoff_title ? () => fixer.dispatch(e.key) : undefined}
-                    onSend={g.id === 'decide' ? (text, edited) => sendReply(e.key, text, edited, `${g.id}:${e.key}`) : undefined}
                     busy={fixer.busyKey === e.key}
                   />
                 )}
@@ -1654,6 +1848,19 @@ function NeedsCard({
             ))}
           </ul>
         </details>
+      )}
+      {detail && (
+        <NeedDetail
+          key={`${detail.groupId}:${detail.e.key}`}
+          e={detail.e}
+          groupId={detail.groupId}
+          onClose={() => setDetail(null)}
+          onSend={(text, edited) => sendReply(detail.e.key, text, edited, `${detail.groupId}:${detail.e.key}`)}
+          onMark={(how) => post(detail.e.members?.length ? detail.e.members : [detail.e.key], how, `${detail.groupId}:${detail.e.key}`)}
+          onWhy={() => onWhy(detail.e)}
+          onDispatch={detail.groupId === 'decide' && detail.e.handoff_title ? () => fixer.dispatch(detail.e.key) : undefined}
+          busy={fixer.busyKey === detail.e.key}
+        />
       )}
       {fixer.ui}
     </Card>
