@@ -2,10 +2,12 @@
  * Stub of `@kirocrew/app-sdk` for README screenshots. Every response is FAKE demo
  * data defined in this file: no request leaves the page, and nothing is read from
  * a gateway, a ledger or Slack. Scenario comes from the query string:
- *   ?source=ok | needs_login, plus &today=empty and &digest=empty
+ *   ?source=ok | needs_login, plus &today=empty, &digest=empty and &dispatch=fail_once
  */
 const TODAY_EMPTY = new URLSearchParams(location.search).get('today') === 'empty'
 const DIGEST_EMPTY = new URLSearchParams(location.search).get('digest') === 'empty'
+// ?dispatch=fail_once: the first Dispatch fix is refused, the retry goes through.
+const DISPATCH_FAIL_ONCE = new URLSearchParams(location.search).get('dispatch') === 'fail_once'
 const SCENARIO = new URLSearchParams(location.search).get('source') === 'needs_login' ? 'needs_login' : 'ok'
 
 const T0 = 1758700800 // 2025-09-24T08:00:00Z, fixed so frames are reproducible
@@ -303,7 +305,7 @@ const api = {
     return respond(path)
   },
   post: async (path: string, body?: unknown) => {
-    const w = window as unknown as { __posts?: unknown[] }
+    const w = window as unknown as { __posts?: unknown[]; __failedOnce?: boolean }
     w.__posts = [...(w.__posts || []), { path, body }]
     if (path.endsWith('/items/handoff/dispatch-batch')) {
       const keys = (body as { keys?: string[] })?.keys || []
@@ -314,6 +316,10 @@ const api = {
       return { ok: true, item: { key: (body as { key?: string })?.key, replied: { ts: `${T0 + 7200}.000400`, at: T0 + 7200, text: REPLY_DRAFT, permalink: REPLY_SENT_LINK } } }
     }
     if (path.endsWith('/items/handoff/dispatch')) {
+      if (DISPATCH_FAIL_ONCE && !w.__failedOnce) {
+        ;(w as { __failedOnce?: boolean }).__failedOnce = true
+        throw Object.assign(new Error('502'), { body: JSON.stringify({ ok: false, code: 'dispatch_failed', error: 'the session store is busy' }) })
+      }
       return { ok: true, mode: 'server', session_key: 'chat-99-1', title: `Fix: ${HANDOFF.title}`, agent: 'kirocrew-conductor', at: T0 + 7000 }
     }
     return respond(path)

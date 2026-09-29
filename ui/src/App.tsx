@@ -374,7 +374,9 @@ function doingLine(m: Member, s: State): string {
 // One stylesheet for the pulsing dot; still when the reader asks for less motion.
 const PULSE_CSS = `@keyframes slack-radar-pulse { 0%, 100% { opacity: 1; transform: scale(1) } 50% { opacity: .35; transform: scale(.7) } }
 .sr-pulse { animation: slack-radar-pulse 1.4s ease-in-out infinite }
-@media (prefers-reduced-motion: reduce) { .sr-pulse { animation: none } }`
+@keyframes slack-radar-spin { to { transform: rotate(360deg) } }
+.sr-spin { display: inline-block; width: 10px; height: 10px; border-radius: 50%; border: 2px solid currentColor; border-right-color: transparent; animation: slack-radar-spin .8s linear infinite; vertical-align: -1px; margin-right: 6px }
+@media (prefers-reduced-motion: reduce) { .sr-pulse, .sr-spin { animation: none } }`
 
 function Dot({ tone, pulse }: { tone: StatusLabel['tone']; pulse: boolean }) {
   return (
@@ -986,8 +988,8 @@ type Primary = 'Open' | 'Reply' | 'Dispatch fix' | 'Decide' | 'Done'
 // A row whose Lead-written reply waits for the owner's Send (in the detail view).
 const isReplyRow = (groupId: NeedGroup['id'], e: NeedEntry) => groupId === 'decide' && !!e.reply_draft && !e.handoff_title
 
-function primaryOf(groupId: NeedGroup['id'], e: NeedEntry): Primary {
-  if (groupId === 'decide' && e.dispatch) return 'Done'
+function primaryOf(groupId: NeedGroup['id'], e: NeedEntry, sent = false): Primary {
+  if (groupId === 'decide' && (e.dispatch || sent)) return 'Done'
   if (groupId === 'decide' && e.handoff_title) return 'Dispatch fix'
   if (isReplyRow(groupId, e)) return 'Open'
   if (groupId === 'decide' && e.reason.startsWith('Looks resolved')) return 'Done'
@@ -1015,9 +1017,40 @@ const hhmm = (t: number) => new Date(t * 1000).toLocaleTimeString([], { hour: '2
 // Thread replies older than this read as "replies as of HH:MM".
 const REPLIES_STALE_SECS = 3600
 
+// What a row shows once its fix went out: from `/needs` (`dispatch`, with the live
+// session state) or, until the next refresh, from the dispatch reply itself.
+type RowSent = {
+  session_key: string
+  title: string
+  // Members of a batch dispatch; 0 for a single fix.
+  batch: number
+  state: FixDispatch['state'] | ''
+  pr_url: string
+  pr_number: number
+  // Client mode: the chat launcher opened the conductor chat; there is no session to track.
+  launched?: boolean
+}
+
+function sentOf(e: NeedEntry, local?: RowSent): RowSent | null {
+  const d = e.dispatch
+  if (d) {
+    return {
+      session_key: d.session_key, title: d.title, batch: d.batch ? d.batch_keys?.length || 0 : 0,
+      state: d.state, pr_url: d.pr_url, pr_number: d.pr_number,
+    }
+  }
+  return local || null
+}
+
+// The row's fix, read-only, for the ▾ preview: what one click on Dispatch fix sends.
+type RowFix = { title: string; prompt: string; repo: string }
+
 // One Needs-you row: priority, what the message is, who/why and when, ONE button naming
 // the next step. A reply row shows the ORIGINAL message's first line and "Reply ready";
 // the draft and Send to thread live in the detail view. A click on the row opens it.
+// A fix row dispatches on one click of Dispatch fix and keeps the result on the row:
+// `Dispatched · <session> · <state>`, Open session and the PR once there is one. Its ▾
+// shows the fix title and task, and, when it can go in a batch, Exclude from batch.
 function NeedRow({
   e,
   groupId,
@@ -1026,6 +1059,11 @@ function NeedRow({
   onMark,
   onDispatch,
   busy,
+  fix,
+  sentHere,
+  failed,
+  excluded,
+  onExclude,
 }: {
   e: NeedEntry
   groupId: NeedGroup['id']
@@ -1034,16 +1072,24 @@ function NeedRow({
   onMark: (how: HandleHow) => void
   onDispatch?: () => void
   busy?: boolean
+  fix?: RowFix
+  sentHere?: RowSent
+  failed?: string
+  excluded?: boolean
+  onExclude?: (on: boolean) => void
 }) {
-  const primary = primaryOf(groupId, e)
+  const sent = groupId === 'decide' ? sentOf(e, sentHere) : null
+  const primary = primaryOf(groupId, e, !!sent)
   const reply = isReplyRow(groupId, e)
-  const sent = e.dispatch
+  const [open, setOpen] = useState(false)
+  const previewId = `sr-fix-${e.key.replace(/[^A-Za-z0-9]/g, '-')}`
   const onPrimary = () => {
     if (primary === 'Dispatch fix') onDispatch?.()
     else if (primary === 'Done') onMark('done')
     else if (primary === 'Reply' && e.permalink) window.open(e.permalink, '_blank', 'noopener,noreferrer')
     else onOpen()
   }
+  const state = sent ? FIX_STATE[sent.state] || '' : ''
   return (
     <li
       className="text-sm"
@@ -1082,8 +1128,17 @@ function NeedRow({
             )}
           </button>
           {sent && (
-            <div className="text-xs" style={{ marginTop: 2 }} data-testid="fix-in-progress">
-              <SessionLink d={sent} /> · {FIX_STATE[sent.state] || sent.state}
+            <div className="text-xs" role="status" style={{ marginTop: 2 }} data-testid="fix-dispatched">
+              <span style={{ color: 'var(--text-strong)' }}>Dispatched</span>
+              {' · '}
+              {sent.launched ? 'opened in a new conductor chat' : sent.batch ? `batch of ${sent.batch}` : sent.title || 'Fix session'}
+              {state && <> · {state}</>}
+              {sent.session_key && (
+                <>
+                  {' · '}
+                  <SessionLink d={sent} label="Open session" />
+                </>
+              )}
               {sent.pr_url && (
                 <>
                   {' · '}
@@ -1094,12 +1149,59 @@ function NeedRow({
               )}
             </div>
           )}
+          {failed && !sent && (
+            <ErrorNotice message={`Could not dispatch that fix: ${failed}. Nothing was sent.`} onRetry={() => onDispatch?.()} />
+          )}
+          {fix && open && (
+            <div
+              id={previewId}
+              data-testid="fix-preview"
+              className="text-xs"
+              style={{ marginTop: 6, padding: '6px 8px', border: '1px solid var(--border)', borderRadius: 6 }}
+            >
+              <div style={{ fontWeight: 600, color: 'var(--text-strong)' }}>
+                {fix.title} {fix.repo && <span className="text-muted font-mono" style={{ fontWeight: 400 }}>{fix.repo}</span>}
+              </div>
+              <pre
+                aria-label="Fix task"
+                style={{ margin: '4px 0 0', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 160, overflowY: 'auto', fontFamily: 'var(--font-mono, monospace)' }}
+              >
+                {fix.prompt}
+              </pre>
+              {onExclude && (
+                <label className="flex items-center gap-1" style={{ marginTop: 6, cursor: 'pointer' }}>
+                  <input type="checkbox" checked={!!excluded} onChange={(ev) => onExclude(ev.target.checked)} />
+                  Exclude from batch
+                </label>
+              )}
+            </div>
+          )}
         </div>
         <div className="flex items-center gap-1" style={{ flex: 'none' }} data-testid="need-actions">
-          <Btn primary style={small} onClick={onPrimary} disabled={primary === 'Dispatch fix' && busy}>
-            {primary === 'Dispatch fix' && busy ? 'Dispatching…' : primary}
+          <Btn primary style={small} onClick={onPrimary} disabled={busy}>
+            {primary === 'Dispatch fix' && busy ? (
+              <>
+                <span className="sr-spin" aria-hidden />
+                Dispatching…
+              </>
+            ) : (
+              primary
+            )}
           </Btn>
         </div>
+        {fix && (
+          <button
+            type="button"
+            data-testid="fix-toggle"
+            aria-expanded={open}
+            aria-controls={previewId}
+            aria-label={open ? 'Hide the fix' : 'Show the fix'}
+            onClick={() => setOpen(!open)}
+            style={{ flex: 'none', border: 0, background: 'transparent', cursor: 'pointer', padding: '2px 4px', color: 'var(--muted)' }}
+          >
+            {open ? '▴' : '▾'}
+          </button>
+        )}
       </div>
     </li>
   )
@@ -1119,9 +1221,11 @@ function NeedDetail({
   onWhy,
   onDispatch,
   busy,
+  sentHere,
 }: {
   e: NeedEntry
   groupId: NeedGroup['id']
+  sentHere?: boolean
   onClose: () => void
   onSend: (text: string, edited: boolean) => Promise<SendResult>
   onMark: (how: HandleHow) => void
@@ -1130,7 +1234,7 @@ function NeedDetail({
   busy?: boolean
 }) {
   const reply = isReplyRow(groupId, e)
-  const primary = primaryOf(groupId, e)
+  const primary = primaryOf(groupId, e, sentHere)
   const [text, setText] = useState(e.reply_draft || '')
   const [sending, setSending] = useState(false)
   const [sentLink, setSentLink] = useState<string | null>(null)
@@ -1278,7 +1382,7 @@ function NeedDetail({
             {e.category && <> · {e.category}</>}
             {e.words && e.words.length > 0 && <> · shared words: {e.words.join(', ')}</>}
             {e.members && e.members.length > 0 && <> · Done and Ignore apply to all {e.members.length}</>}
-            {e.handoff_title && !e.dispatch && <div style={{ marginTop: 4, color: 'var(--text)' }}>Fix: {e.handoff_title}</div>}
+            {e.handoff_title && !e.dispatch && !sentHere && <div style={{ marginTop: 4, color: 'var(--text)' }}>Fix: {e.handoff_title}</div>}
           </section>
         )}
 
@@ -1380,10 +1484,10 @@ const useLauncher: () => Launcher | null =
     ? (sdk as unknown as { useChatLauncher: () => Launcher }).useChatLauncher
     : () => null
 
-const FIX_STATE: Record<string, string> = { running: 'working', idle: 'waiting', closed: 'session closed', unknown: '' }
+const FIX_STATE: Record<string, string> = { running: 'working', idle: 'idle', closed: 'done', unknown: '' }
 
 // A link to a dispatched session. Inside the dashboard it opens the session in place.
-function SessionLink({ d }: { d: { session_key: string; title: string } }) {
+function SessionLink({ d, label }: { d: { session_key: string; title: string }; label?: string }) {
   const launcher = useLauncher()
   const href = `/chat?sid=${encodeURIComponent(d.session_key)}`
   return (
@@ -1396,7 +1500,7 @@ function SessionLink({ d }: { d: { session_key: string; title: string } }) {
         launcher.openChat({ slotKey: d.session_key })
       }}
     >
-      {d.title || 'Fix session'}
+      {label || d.title || 'Fix session'}
     </a>
   )
 }
@@ -1414,71 +1518,84 @@ function errorBody(err: unknown): { code?: string; error?: string; session_key?:
 }
 
 // Dispatch fix: ONE click is the owner's consent. The server opens a kirocrew-conductor
-// session with the hand-off and its Slack context and sends it; a toast links to it.
+// session with the hand-off and its Slack context and sends it; the row then shows it.
 // When the gateway cannot create sessions for the app, the seed comes back and the
 // SDK launcher sends it in a new conductor chat; with no launcher, a copy dialog.
 function useDispatchFix(onChanged: () => void): {
   dispatch: (key: string) => void
-  dispatchBatch: (keys: string[]) => Promise<boolean>
-  busyKey: string
+  dispatchBatch: (keys: string[]) => void
+  busy: Set<string>
+  sent: Record<string, RowSent>
+  failed: Record<string, string>
+  batchFailed: { keys: string[]; why: string } | null
   ui: ReactNode
 } {
   const api = useAppApi()
   const launcher = useLauncher()
-  const [busyKey, setBusyKey] = useState('')
-  const [toast, setToast] = useState<{ session_key: string; title: string; again?: boolean; batch?: boolean } | null>(null)
-  const [failed, setFailed] = useState<{ key: string; why: string } | null>(null)
+  const [busy, setBusy] = useState<Set<string>>(new Set())
+  const [sent, setSent] = useState<Record<string, RowSent>>({})
+  const [failed, setFailed] = useState<Record<string, string>>({})
   const [batchFailed, setBatchFailed] = useState<{ keys: string[]; why: string } | null>(null)
   const [shown, setShown] = useState<{ title: string; seed: string } | null>(null)
   const [copied, setCopied] = useState(false)
-  const dispatch = async (key: string) => {
-    if (busyKey) return
-    setBusyKey(key)
-    setFailed(null)
-    try {
-      const r = await api.post<DispatchReply>(`${BASE}/items/handoff/dispatch`, { key })
-      if (r.mode === 'server') setToast({ session_key: r.session_key, title: r.title })
-      else if (launcher) launcher.openChat({ agent: r.agent, message: r.seed, autoSend: true })
-      else {
-        setCopied(false)
-        setShown({ title: r.title, seed: r.seed })
-      }
-      onChanged()
-    } catch (err) {
-      const b = errorBody(err)
-      if (b.code === 'already_dispatched' && b.session_key) setToast({ session_key: b.session_key, title: b.title || '', again: true })
-      else setFailed({ key, why: b.error || 'the gateway refused it' })
-    } finally {
-      setBusyKey('')
+  const record = (keys: string[], row: RowSent) =>
+    setSent((prev) => Object.fromEntries([...Object.entries(prev), ...keys.map((k) => [k, row] as const)]))
+  const fail = (keys: string[], why: string) =>
+    setFailed((prev) => Object.fromEntries([...Object.entries(prev), ...keys.map((k) => [k, why] as const)]))
+  const clearFailed = (keys: string[]) =>
+    setFailed((prev) => Object.fromEntries(Object.entries(prev).filter(([k]) => !keys.includes(k))))
+  const client = (r: { agent: string; title: string; seed: string }, keys: string[], batch: number) => {
+    if (launcher) {
+      launcher.openChat({ agent: r.agent, message: r.seed, autoSend: true })
+      record(keys, { session_key: '', title: r.title, batch, state: '', pr_url: '', pr_number: 0, launched: true })
+    } else {
+      setCopied(false)
+      setShown({ title: r.title, seed: r.seed })
     }
   }
-  // Batch: the reviewed list is the owner's consent for all of it. ONE conductor
-  // session gets every checked hand-off. True when it went out.
-  const dispatchBatch = async (keys: string[]): Promise<boolean> => {
-    if (busyKey || keys.length === 0) return false
-    setBusyKey('batch')
-    setBatchFailed(null)
+  const run = async (keys: string[], go: () => Promise<void>) => {
+    if (busy.size || keys.length === 0) return
+    setBusy(new Set(keys))
     try {
-      const r = await api.post<DispatchReply>(`${BASE}/items/handoff/dispatch-batch`, { keys })
-      if (r.mode === 'server') setToast({ session_key: r.session_key, title: r.title, batch: true })
-      else if (launcher) launcher.openChat({ agent: r.agent, message: r.seed, autoSend: true })
-      else {
-        setCopied(false)
-        setShown({ title: r.title, seed: r.seed })
-      }
-      onChanged()
-      return true
-    } catch (err) {
-      const b = errorBody(err) as { error?: string; dispatched?: { key: string }[] }
-      const why = b.dispatched?.length
-        ? `${b.dispatched.length} of them already have a session`
-        : b.error || 'the gateway refused it'
-      setBatchFailed({ keys, why })
-      return false
+      await go()
     } finally {
-      setBusyKey('')
+      setBusy(new Set())
     }
   }
+  const dispatch = (key: string) =>
+    run([key], async () => {
+      clearFailed([key])
+      try {
+        const r = await api.post<DispatchReply>(`${BASE}/items/handoff/dispatch`, { key })
+        if (r.mode === 'server') record([key], { session_key: r.session_key, title: r.title, batch: 0, state: 'running', pr_url: '', pr_number: 0 })
+        else client(r, [key], 0)
+        onChanged()
+      } catch (err) {
+        const b = errorBody(err)
+        if (b.code === 'already_dispatched' && b.session_key) {
+          record([key], { session_key: b.session_key, title: b.title || '', batch: 0, state: '', pr_url: '', pr_number: 0 })
+        } else fail([key], b.error || 'the gateway refused it')
+      }
+    })
+  // Batch: one click on the group header is the owner's consent for every fix it names.
+  // ONE conductor session gets them all.
+  const dispatchBatch = (keys: string[]) =>
+    run(keys, async () => {
+      setBatchFailed(null)
+      try {
+        const r = await api.post<DispatchReply>(`${BASE}/items/handoff/dispatch-batch`, { keys })
+        if (r.mode === 'server') {
+          record(keys, { session_key: r.session_key, title: r.title, batch: keys.length, state: 'running', pr_url: '', pr_number: 0 })
+        } else client(r, keys, keys.length)
+        onChanged()
+      } catch (err) {
+        const b = errorBody(err) as { error?: string; dispatched?: { key: string }[] }
+        const why = b.dispatched?.length
+          ? `${b.dispatched.length} of them already have a session`
+          : b.error || 'the gateway refused it'
+        setBatchFailed({ keys, why })
+      }
+    })
   const copy = async () => {
     if (!shown) return
     try {
@@ -1488,122 +1605,39 @@ function useDispatchFix(onChanged: () => void): {
       setCopied(false)
     }
   }
-  const ui = (
-    <>
-      {failed && (
-        <ErrorNotice message={`Could not dispatch that fix: ${failed.why}. Nothing was sent.`} onRetry={() => dispatch(failed.key)} />
-      )}
-      {batchFailed && (
-        <ErrorNotice
-          message={`Could not dispatch those fixes: ${batchFailed.why}. Nothing was sent.`}
-          onRetry={() => dispatchBatch(batchFailed.keys)}
+  const ui = shown && (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="sr-fix-title"
+      style={{ position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(0,0,0,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+      onKeyDown={(ev) => ev.key === 'Escape' && setShown(null)}
+    >
+      <div style={{ width: 'min(720px, 92vw)', background: 'var(--card)', border: '1px solid var(--border-strong)', borderRadius: 10, padding: 16 }}>
+        <h3 id="sr-fix-title" className="text-sm" style={{ margin: '0 0 6px', fontWeight: 600 }}>{shown.title}</h3>
+        <p className="text-xs text-muted" style={{ margin: '0 0 8px' }}>
+          This Kiro Crew cannot open the session for you. Copy this task into a new kirocrew-conductor chat.
+        </p>
+        <textarea
+          readOnly
+          aria-label="Fix task"
+          value={shown.seed}
+          style={{ width: '100%', height: 260, fontSize: 12, fontFamily: 'var(--font-mono, monospace)' }}
         />
-      )}
-      {toast && (
-        <div
-          role="status"
-          data-testid="dispatch-toast"
-          className="text-sm flex items-center gap-2"
-          style={{ position: 'fixed', right: 16, bottom: 16, zIndex: 40, background: 'var(--card)', border: '1px solid var(--border-strong)', borderRadius: 8, padding: '8px 12px', maxWidth: 480 }}
-        >
-          <span style={{ flex: 1, minWidth: 0 }}>
-            {toast.again ? 'Already dispatched: ' : toast.batch ? 'Fixes dispatched to one conductor: ' : 'Fix dispatched to a conductor: '}
-            <SessionLink d={toast} />
-          </span>
-          <Btn style={small} onClick={() => setToast(null)}>Close</Btn>
+        <div className="flex items-center gap-2" style={{ marginTop: 8 }}>
+          <Btn onClick={copy}>{copied ? 'Copied' : 'Copy task'}</Btn>
+          <a className="underline text-sm" href="/chat?new=1">New chat</a>
+          <div className="flex-1" />
+          <Btn onClick={() => setShown(null)}>Close</Btn>
         </div>
-      )}
-      {shown && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="sr-fix-title"
-          style={{ position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(0,0,0,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-          onKeyDown={(ev) => ev.key === 'Escape' && setShown(null)}
-        >
-          <div style={{ width: 'min(720px, 92vw)', background: 'var(--card)', border: '1px solid var(--border-strong)', borderRadius: 10, padding: 16 }}>
-            <h3 id="sr-fix-title" className="text-sm" style={{ margin: '0 0 6px', fontWeight: 600 }}>{shown.title}</h3>
-            <p className="text-xs text-muted" style={{ margin: '0 0 8px' }}>
-              This Kiro Crew cannot open the session for you. Copy this task into a new kirocrew-conductor chat.
-            </p>
-            <textarea
-              readOnly
-              aria-label="Fix task"
-              value={shown.seed}
-              style={{ width: '100%', height: 260, fontSize: 12, fontFamily: 'var(--font-mono, monospace)' }}
-            />
-            <div className="flex items-center gap-2" style={{ marginTop: 8 }}>
-              <Btn onClick={copy}>{copied ? 'Copied' : 'Copy task'}</Btn>
-              <a className="underline text-sm" href="/chat?new=1">New chat</a>
-              <div className="flex-1" />
-              <Btn onClick={() => setShown(null)}>Close</Btn>
-            </div>
-          </div>
-        </div>
-      )}
-    </>
+      </div>
+    </div>
   )
-  return { dispatch, dispatchBatch, busyKey, ui }
+  return { dispatch, dispatchBatch, busy, sent, failed, batchFailed, ui }
 }
 
-// Batch review panel (inline, not a modal): every undispatched hand-off, all checked.
-// Unchecking drops one. The primary button sends the checked ones to ONE conductor.
-function BatchPanel({
-  rows,
-  busy,
-  onSend,
-  onCancel,
-}: {
-  rows: { key: string; title: string; repo: string; prompt: string }[]
-  busy: boolean
-  onSend: (keys: string[]) => void
-  onCancel: () => void
-}) {
-  const [picked, setPicked] = useState<Set<string>>(() => new Set(rows.map((r) => r.key)))
-  const chosen = rows.filter((r) => picked.has(r.key))
-  const repos = new Set(chosen.map((r) => r.repo.toLowerCase()))
-  const mixed = repos.size > 1
-  const toggle = (key: string) =>
-    setPicked((prev) => {
-      const next = new Set(prev)
-      if (next.has(key)) next.delete(key)
-      else next.add(key)
-      return next
-    })
-  return (
-    <section
-      aria-label="Dispatch fixes together"
-      data-testid="batch-panel"
-      style={{ margin: '8px 0', padding: 10, border: '1px solid var(--border-strong)', borderRadius: 8 }}
-    >
-      <p className="text-xs text-muted" style={{ margin: '0 0 6px' }}>
-        One conductor gets every checked fix and splits the work. Uncheck any you want to leave out.
-      </p>
-      <ul className="flex flex-col" style={{ margin: 0, padding: 0, listStyle: 'none' }}>
-        {rows.map((r, i) => (
-          <li key={r.key} style={{ padding: '6px 0', borderTop: i === 0 ? 0 : '1px solid var(--border)' }}>
-            <label className="text-sm flex gap-2" style={{ alignItems: 'flex-start', cursor: 'pointer' }}>
-              <input type="checkbox" checked={picked.has(r.key)} onChange={() => toggle(r.key)} style={{ marginTop: 3 }} />
-              <span style={{ flex: 1, minWidth: 0 }}>
-                {r.title} <span className="text-xs text-muted font-mono">{r.repo}</span>
-                <span className="text-xs text-muted" style={{ display: 'block' }}>
-                  {r.prompt.length > 120 ? `${r.prompt.slice(0, 120)}…` : r.prompt}
-                </span>
-              </span>
-            </label>
-          </li>
-        ))}
-      </ul>
-      <div className="flex items-center gap-2" style={{ marginTop: 8 }}>
-        <Btn primary style={small} disabled={busy || chosen.length === 0 || mixed} onClick={() => onSend(chosen.map((r) => r.key))}>
-          {busy ? 'Dispatching…' : `Dispatch ${chosen.length} to one conductor`}
-        </Btn>
-        <Btn style={small} onClick={onCancel} disabled={busy}>Cancel</Btn>
-        {mixed && <span className="text-xs text-muted" role="status">one repo per batch</span>}
-      </div>
-    </section>
-  )
-}
+// Fixes one batch may carry (backend/handoff.py `MAX_BATCH`).
+const MAX_BATCH = 10
 
 function NeedsCard({
   needs,
@@ -1623,13 +1657,19 @@ function NeedsCard({
   const batchOf = new Map(batches.map((b) => [b.session_key, b]))
   // Hand-offs the owner can send together: undispatched rows in "decide".
   const prompts = new Map((needs?.handoffs || []).map((h) => [h.key, h.handoff]))
+  const fixOf = (e: NeedEntry): RowFix | undefined => {
+    const h = prompts.get(e.key)
+    return e.handoff_title ? { title: e.handoff_title || h?.title || '', prompt: h?.prompt || '', repo: h?.repo || '' } : undefined
+  }
   const batchable = ((needs?.groups || []).find((g) => g.id === 'decide')?.entries || [])
-    .filter((e) => e.handoff_title && !e.dispatch && prompts.has(e.key))
-    .map((e) => {
-      const h = prompts.get(e.key)!
-      return { key: e.key, title: e.handoff_title || h.title, repo: h.repo || '', prompt: h.prompt || '' }
-    })
-  const [batchOpen, setBatchOpen] = useState(false)
+    .filter((e) => e.handoff_title && !e.dispatch && !fixer.sent[e.key] && prompts.has(e.key))
+    .map((e) => ({ key: e.key, repo: prompts.get(e.key)!.repo || '' }))
+  // Rows the owner left out of "Dispatch all fixes" from their ▾.
+  const [excluded, setExcluded] = useState<Set<string>>(new Set())
+  const chosen = batchable.filter((r) => !excluded.has(r.key))
+  const mixed = new Set(chosen.map((r) => r.repo.toLowerCase())).size > 1
+  const batchBlock = mixed ? 'one repo per batch: exclude the others from their ▾'
+    : chosen.length > MAX_BATCH ? `at most ${MAX_BATCH} per batch: exclude some from their ▾` : ''
   // The row whose detail view is open, kept whole so it stays open while the list refreshes.
   const [detail, setDetail] = useState<{ e: NeedEntry; groupId: NeedGroup['id'] } | null>(null)
   const sendReply = async (key: string, text: string, edited: boolean, rowId: string): Promise<SendResult> => {
@@ -1686,23 +1726,7 @@ function NeedsCard({
     <Card className="mb-4">
       <div className="flex items-center gap-2">
         <CardTitle>Needs you</CardTitle>
-        <div className="flex-1" />
-        {batchable.length >= 2 && !batchOpen && (
-          <Btn style={small} onClick={() => setBatchOpen(true)} disabled={!!fixer.busyKey}>
-            Dispatch all fixes ({batchable.length})
-          </Btn>
-        )}
       </div>
-      {batchOpen && batchable.length > 0 && (
-        <BatchPanel
-          rows={batchable}
-          busy={fixer.busyKey === 'batch'}
-          onCancel={() => setBatchOpen(false)}
-          onSend={async (keys) => {
-            if (await fixer.dispatchBatch(keys)) setBatchOpen(false)
-          }}
-        />
-      )}
       {failed && (
         <ErrorNotice
           message={`Could not ${verb} that message. Nothing changed.`}
@@ -1717,9 +1741,37 @@ function NeedsCard({
         groups.map((g) =>
           g.shown.length === 0 ? null : (
             <section key={g.id} aria-label={GROUP_TITLE[g.id]} style={{ marginTop: 10 }}>
-              <h4 className="text-sm" style={{ margin: 0, fontWeight: 600, color: 'var(--text-strong)' }}>
-                {GROUP_TITLE[g.id]} <span className="text-muted" style={{ fontWeight: 400 }}>({g.total - (g.entries.length - g.shown.length)})</span>
-              </h4>
+              <div className="flex flex-wrap items-center gap-2">
+                <h4 className="text-sm" style={{ margin: 0, fontWeight: 600, color: 'var(--text-strong)' }}>
+                  {GROUP_TITLE[g.id]} <span className="text-muted" style={{ fontWeight: 400 }}>({g.total - (g.entries.length - g.shown.length)})</span>
+                </h4>
+                <div className="flex-1" />
+                {g.id === 'decide' && batchable.length >= 2 && (
+                  <>
+                    {batchBlock && <span className="text-xs text-muted" role="status">{batchBlock}</span>}
+                    <Btn
+                      style={small}
+                      onClick={() => fixer.dispatchBatch(chosen.map((r) => r.key))}
+                      disabled={fixer.busy.size > 0 || chosen.length === 0 || !!batchBlock}
+                    >
+                      {chosen.length > 0 && fixer.busy.has(chosen[0].key) && fixer.busy.size > 1 ? (
+                        <>
+                          <span className="sr-spin" aria-hidden />
+                          Dispatching…
+                        </>
+                      ) : (
+                        `Dispatch all fixes (${chosen.length})`
+                      )}
+                    </Btn>
+                  </>
+                )}
+              </div>
+              {g.id === 'decide' && fixer.batchFailed && (
+                <ErrorNotice
+                  message={`Could not dispatch those fixes: ${fixer.batchFailed.why}. Nothing was sent.`}
+                  onRetry={() => fixer.dispatchBatch(fixer.batchFailed!.keys)}
+                />
+              )}
               <NeedGroupList
                 g={g}
                 render={(e, i) => (
@@ -1731,7 +1783,22 @@ function NeedsCard({
                     onOpen={() => setDetail({ e, groupId: g.id })}
                     onMark={(how) => post(e.members?.length ? e.members : [e.key], how, `${g.id}:${e.key}`)}
                     onDispatch={g.id === 'decide' && e.handoff_title ? () => fixer.dispatch(e.key) : undefined}
-                    busy={fixer.busyKey === e.key}
+                    busy={fixer.busy.has(e.key)}
+                    fix={g.id === 'decide' ? fixOf(e) : undefined}
+                    sentHere={fixer.sent[e.key]}
+                    failed={g.id === 'decide' ? fixer.failed[e.key] : undefined}
+                    excluded={excluded.has(e.key)}
+                    onExclude={
+                      g.id === 'decide' && batchable.length >= 2 && batchable.some((r) => r.key === e.key)
+                        ? (on) =>
+                            setExcluded((prev) => {
+                              const next = new Set(prev)
+                              if (on) next.add(e.key)
+                              else next.delete(e.key)
+                              return next
+                            })
+                        : undefined
+                    }
                   />
                 )}
               />
@@ -1854,12 +1921,13 @@ function NeedsCard({
           key={`${detail.groupId}:${detail.e.key}`}
           e={detail.e}
           groupId={detail.groupId}
+          sentHere={!!fixer.sent[detail.e.key]}
           onClose={() => setDetail(null)}
           onSend={(text, edited) => sendReply(detail.e.key, text, edited, `${detail.groupId}:${detail.e.key}`)}
           onMark={(how) => post(detail.e.members?.length ? detail.e.members : [detail.e.key], how, `${detail.groupId}:${detail.e.key}`)}
           onWhy={() => onWhy(detail.e)}
           onDispatch={detail.groupId === 'decide' && detail.e.handoff_title ? () => fixer.dispatch(detail.e.key) : undefined}
-          busy={fixer.busyKey === detail.e.key}
+          busy={fixer.busy.has(detail.e.key)}
         />
       )}
       {fixer.ui}
