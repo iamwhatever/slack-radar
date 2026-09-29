@@ -45,6 +45,8 @@ EVENTS_FILENAME = "events.jsonl"
 CREW_FILENAME = "crew.json"
 #: Child runs of the crew session seen on the last observation (``member`` events).
 RUNS_SEEN_FILENAME = "member_runs.json"
+#: Each member's last run: ``{member: {started_at, finished_at, spawn_id}}`` (``GET /now``).
+MEMBER_LAST_FILENAME = "member_last.json"
 #: Written by the ledger MCP server on start: which app version that process loaded.
 TOOL_VERSION_FILENAME = "kv/tool_version.json"
 #: Written by the gateway: which app version the current crew session was started under.
@@ -797,6 +799,37 @@ def swap_seen_runs(data_dir: Path, current: dict[str, dict[str, str]]) -> dict[s
             prev = None
         _atomic_write_text(path, json.dumps(current, sort_keys=True))
     return prev if isinstance(prev, dict) else {}
+
+
+def read_member_last(data_dir: Path) -> dict[str, dict[str, Any]]:
+    """Each member's last run as :func:`note_member_run` stored it; ``{}`` before any."""
+    try:
+        data = _read_json(Path(data_dir) / MEMBER_LAST_FILENAME)
+    except StoreError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, dict)}
+
+
+def note_member_run(data_dir: Path, member: str, **fields: Any) -> dict[str, Any]:
+    """Merge ``fields`` (``started_at``, ``finished_at``, ``spawn_id``) into one member's
+    last-run record and return it. A new ``started_at`` clears ``finished_at`` unless
+    the same call sets it."""
+    path = Path(data_dir) / MEMBER_LAST_FILENAME
+    with _file_lock(path):
+        try:
+            data = _read_json(path)
+        except StoreError:
+            data = None
+        data = data if isinstance(data, dict) else {}
+        row = data.get(member) if isinstance(data.get(member), dict) else {}
+        if "started_at" in fields and "finished_at" not in fields:
+            row["finished_at"] = 0.0
+        row.update(fields)
+        data[member] = row
+        _atomic_write_text(path, json.dumps(data, sort_keys=True))
+    return row
 
 
 # ── crew write path (used by the MCP server) ───────────────────────────────

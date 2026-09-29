@@ -212,8 +212,10 @@ async def _now(
     open_ids = _open_spawn_ids(ledger, ctx)
     try:
         await asyncio.to_thread(crew_runtime.observe_member_runs, _data_dir(ctx), runs)
+        await asyncio.to_thread(crew_runtime.settle_spawns, _data_dir(ctx), getattr(ctx, "spawn", None))
     except (OSError, store.StoreError):
         logger.debug("slack-radar: could not record member events", exc_info=True)
+    last_runs = await asyncio.to_thread(store.read_member_last, _data_dir(ctx))
     return org.now_view(
         crew=crew_view,
         ledger=ledger,
@@ -223,6 +225,8 @@ async def _now(
         open_spawn_since=_spawn_since(ledger, open_ids),
         poll_interval=int(settings.get("poll_interval_secs") or org.DEFAULT_POLL_INTERVAL),
         members=members,
+        last_runs=last_runs,
+        poll_times=watch.cycle_times(),
     )
 
 
@@ -639,6 +643,9 @@ async def _handle_investigate(request: web.Request, ctx: Any) -> web.Response:
                     led["items"][k]["status"] = "investigating"
 
     await asyncio.to_thread(store.mutate, _data_dir(ctx), _mark)
+    await asyncio.to_thread(
+        store.note_member_run, _data_dir(ctx), "investigator", started_at=started, spawn_id=str(spawn_id)
+    )
     store.append_event(_data_dir(ctx), "investigate", f"investigator spawned for {len(rows)} item(s)")
     return web.json_response({"ok": True, "spawn_id": spawn_id})
 

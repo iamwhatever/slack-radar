@@ -48,6 +48,8 @@ Two kinds of state, stored in two places on purpose.
 <data>/ledger.json.lock     # sidecar lock (ledger.json is replaced by rename)
 <data>/events.jsonl         # append-only work log, halved when it passes 2 MiB
 <data>/crew.json            # the crew record
+<data>/member_runs.json     # crew-session child runs in flight at the last look (§3 Event log)
+<data>/member_last.json     # each member's last run, for GET /now (§5)
 <data>/kv/tool_version.json # written by each ledger MCP server on start (see §4)
 <data>/kv/crew_session.json # written by the gateway: the version the crew session started under
 ```
@@ -92,7 +94,7 @@ One per top-level message. Thread replies are not items; they are signals on the
 | `replies` | poller | local | `[{ts, user, text}]`, the newest 5 thread replies, text redacted and ≤ 400 chars, oldest first. Refreshed by every thread re-check; `[]` at ingest. Emptied when the item leaves `new`/`triaged`/`investigating` or is older than 7 days, so reply text is bounded to 5 × 400 chars per open, recent item. UNTRUSTED. Never in `summary`, the digest, `crew.today` or any other public output; `slack_radar_record` has no field for it. `slack_radar_read` returns it on `thread_updates` items |
 | `needs_triage` | poller sets, crew clears | — | true on ingest |
 | `thread_changed` | poller sets, crew clears | — | a new reply since the crew last recorded this item |
-| `possibly_resolved` | poller sets, crew clears | — | `{reason, at}` — a QUESTION for the crew, never a verdict |
+| `possibly_resolved` | poller sets, crew clears | — | `{reason, at, watcher_at?}` — a QUESTION for the crew, never a verdict. `watcher_at` is set by the gateway when the flag is handed to a Thread Watcher run |
 | `last_thread_check_at` | poller | — | re-check at most every 30 min |
 | `status` | crew | — | `new` → `triaged` / `investigating` → `resolved` / `noise`. The poller writes only `new` |
 | `category` | crew | public | `feature-request` · `bug-report` · `question` · `already-answered` · `noise` |
@@ -119,7 +121,9 @@ Each cycle the poller re-reads up to `recheck_max_per_cycle` (default 20) open i
 - a new reply by someone OTHER than the poster contains a resolution word: `fixed`, `resolved`, `solved`, `merged`, `shipped`, `deployed`, `released in`, `works now`, `working now`, `that did it`. A word right after a negation (`not fixed`, `isn't resolved`) does not count. Gratitude (`thanks`, `thank you`, `ty`) and `done` are not resolution words; or
 - the parent was deleted.
 
-The flag is a keyword hint. The Lead or the Thread Watcher judges it from `replies`. The poller never changes `status`.
+The flag is a keyword hint. The poller never changes `status`.
+
+The Thread Watcher judges it from `replies`, dispatched for the Lead by `crew_runtime.dispatch_watcher` once per `watch.poll_once`: every open flagged item with no `watcher_at` (oldest first, at most `MAX_WATCHER_BATCH` = 20) goes into ONE spawn-SDK run of `slack-radar-watcher`, and each gets `watcher_at`. Nothing is started while the crew is not live, while the last Watcher run has not finished (`member_last.json` `watcher.spawn_id` with no `finished_at`), or with no spawn SDK. The Lead judges a flag itself only when `watcher_at` is set and the flag is still there, or when the nudge says the Watcher is unavailable.
 
 ### Source state (`ledger.source_state`, `ledger.source_error`)
 
@@ -151,7 +155,7 @@ The gateway renders the text itself (`watch.render_digest`) from counts and PUBL
 
 ### Event log (`events.jsonl`)
 
-`{at, kind, text, key}` per line. Kinds: `poll`, `source`, `settings`, `crew`, `digest`, `investigate`, `backlog`, `handled`, `member`, `handoff`, `dispatch`. A `dispatch` line is written when the owner dispatches a fix and once when its PR is found. A batch writes one line (`fix batch dispatched: N problems -> <title>`, no key) and one per PR found. A `member` line (`investigator started: <task line>`, `watcher finished`) is written when a child run of the crew session appears in or leaves the gateway's run list; the last list seen is kept in `<data>/member_runs.json`, and the comparison runs on every poll and every `/now`, `/state`, `/org` read. The crew adds one via `slack_radar_record.event`. Rendered in the dashboard's Activity tab only — local, but still keep paths and hosts out of it.
+`{at, kind, text, key}` per line. Kinds: `poll`, `source`, `settings`, `crew`, `digest`, `investigate`, `backlog`, `handled`, `member`, `handoff`, `dispatch`. A `dispatch` line is written when the owner dispatches a fix and once when its PR is found. A batch writes one line (`fix batch dispatched: N problems -> <title>`, no key) and one per PR found. A `member` line (`investigator started: <task line>`, `watcher finished`) is written when a child run of the crew session appears in or leaves the gateway's run list; the runs in flight at the last look are kept in `<data>/member_runs.json` (so it reads `{}` whenever nothing runs), and the comparison runs on every poll and every `/now`, `/state`, `/org` read. A run the app started through the spawn SDK (the Thread Watcher after a poll, the Board's Investigate button) writes `watcher started: judging N possibly-resolved thread(s)` when it starts and `<member> finished` once the SDK reports it done (checked on the same reads); such a run id is skipped in the child-run comparison. Every start and finish also updates `<data>/member_last.json`: `{lead|investigator|watcher: {started_at, finished_at, spawn_id}}` (the Lead's `started_at` is its last wake). The crew adds one via `slack_radar_record.event`. Rendered in the dashboard's Activity tab only — local, but still keep paths and hosts out of it.
 
 ### Waking the crew
 
@@ -160,7 +164,7 @@ With no Slack bot on the gateway the poller reads the http app's `state` (the on
 
 #### Brief injection — presence check
 
-The brief (`crew_brief.md`, first line `<!-- slack-radar-crew-brief v6 -->`) is prepended to the nudge whenever no message in the session both contains the sentinel and is at least as long as the brief. Session start, compaction and restart are all the same case.
+The brief (`crew_brief.md`, first line `<!-- slack-radar-crew-brief v7 -->`) is prepended to the nudge whenever no message in the session both contains the sentinel and is at least as long as the brief. Session start, compaction and restart are all the same case.
 
 ## 4. MCP tools (`backend/mcp_server.py`)
 
@@ -248,7 +252,7 @@ Errors are `{ok: false, code, error}` with an HTTP status.
 
 Every `live` block also carries `now`: that member's `/now` row. Both come from one `org.now_view` call per request, so the Team tab and the Board agree. A `members.json` that fails validation returns `500 members_invalid`.
 
-`GET /now` rows, in roster order — `{id, state, doing, since, count, source}`:
+`GET /now` rows, in roster order — `{id, state, doing, since, count, source, last, ran}`, plus `next_at` on the poller:
 
 | Field | Meaning |
 |---|---|
@@ -257,12 +261,15 @@ Every `live` block also carries `now`: that member's `/now` row. Both come from 
 | `since` | epoch seconds or `null` |
 | `count` | lead: 1 while its turn runs · investigator/watcher: runs in flight · poller: channels watched |
 | `source` | `gateway` (host facts) or `ledger` (the app's own record) |
+| `last` | `{started_at, finished_at}`, epoch seconds or `null`: lead = last wake · investigator/watcher = last run from `member_last.json` · poller = last cycle (`finished_at` always `null`) |
+| `ran` | `running` while `state` is `working` · `idle` after at least one run · `never` before the first |
+| `next_at` | poller only: when the loop starts its next cycle (`watch.cycle_times`), else `last_poll_at + poll_interval_secs`; `null` before the first poll |
 
 | Member | Built from |
 |---|---|
 | `lead` | `paused` when the crew is not live (`doing` = `paused_reason`); `working` while the slot runs, `doing` from `crew_memory.phase` (`triaging N new items`, `judging N possibly-resolved threads`, `writing the digest`, `following N investigations`), else from counts and `digest.requested_at`; `idle` otherwise. `since` = `crew_memory.updated_at`, else the crew record's `updated_at` (the host exposes no turn start). `source` is `gateway` when the slot is open |
-| `investigator`, `watcher` | the host's `state.subagents.running_agents_for("dashboard:<slot key>")`, filtered by agent `slack-radar-investigator` / `slack-radar-watcher` (or `<app>--<name>`); `doing` = the oldest run's task line, `(+N more)` beyond one; `since` = its start. The investigator also counts ledger `spawn <id>` ids the spawn SDK says are still running and that are not already listed (the Ledger tab's Investigate button spawns outside the crew session); the oldest such item's `investigation_at` (else its `updated_at`) is the investigator's `since` when it is older than every listed run or no run carries a start. With no run list from the host: the investigator's count is `/state` `investigations.running`, the watcher's 0, both `source: "ledger"`. An idle member whose `residency` is `planned` reads `planned` |
-| `poller` | `last poll Ns ago · next in Ms` from `ledger.last_poll_at` and `poll_interval_secs` (floor 60); `paused` with a prefix while `source_state` is not `ok`; `since` = `last_poll_at` |
+| `investigator`, `watcher` | the host's `state.subagents.running_agents_for("dashboard:<slot key>")`, filtered by agent `slack-radar-investigator` / `slack-radar-watcher` (or `<app>--<name>`); `doing` = the oldest run's task line, `(+N more)` beyond one; `since` = its start. The investigator also counts ledger `spawn <id>` ids the spawn SDK says are still running and that are not already listed (the Ledger tab's Investigate button spawns outside the crew session); the oldest such item's `investigation_at` (else its `updated_at`) is the investigator's `since` when it is older than every listed run or no run carries a start. With no run list from the host: the investigator's count is `/state` `investigations.running`, the watcher's 0, both `source: "ledger"`. An idle member whose `residency` is `planned` reads `planned`. The watcher likewise counts the Watcher run the gateway started after a poll while the spawn SDK says it runs, with its start as `since` |
+| `poller` | `last poll Ns ago · next in Ms` from the later of `ledger.last_poll_at` and the loop's last cycle start (a cycle that found nothing, or had no channels, counts), and the loop's real next cycle (else `poll_interval_secs`, floor 60); `paused` with a prefix while `source_state` is not `ok`; `since` = that last time. The loop runs by itself; `POST /poll` runs one extra cycle and does not move `next_at` |
 
 ## 6. Needs-you rules (`backend/needs.py`, `GET /needs`)
 
