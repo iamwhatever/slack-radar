@@ -52,6 +52,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "backfill_hours": 24,
     "recheck_days": 7,
     "recheck_max_per_cycle": 20,
+    # channels whose triaged reports GET /signals may export (read-only, harness-rsi)
+    "signal_channels": ["C0AGA4Y4NP7"],
 }
 
 _BOUNDS = {
@@ -77,6 +79,7 @@ def _vault() -> Any:
 
 def defaults() -> dict[str, Any]:
     out = dict(DEFAULT_SETTINGS)
+    out["signal_channels"] = list(DEFAULT_SETTINGS["signal_channels"])
     out["slack_login"] = _default_login()
     return out
 
@@ -111,6 +114,12 @@ def validate_settings(patch: dict[str, Any], current: dict[str, Any]) -> tuple[d
             if len(seen) > MAX_CHANNELS:
                 errors.append(f"at most {MAX_CHANNELS} channels")
             out["channels"] = seen[:MAX_CHANNELS]
+    if "signal_channels" in patch:
+        raw = patch["signal_channels"]
+        if not isinstance(raw, list) or not all(is_channel_id(str(c).strip().upper()) for c in raw):
+            errors.append("signal_channels must be a list of Slack channel IDs")
+        else:
+            out["signal_channels"] = list(dict.fromkeys(str(c).strip().upper() for c in raw))[:MAX_CHANNELS]
     if "digest_destination" in patch:
         dest = patch["digest_destination"]
         if dest in DIGEST_DESTINATIONS:

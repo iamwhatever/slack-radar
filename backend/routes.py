@@ -27,7 +27,7 @@ from typing import Any, Awaitable, Callable
 
 from aiohttp import web
 
-from . import crew_runtime, dispatch, handoff, needs, org, settings as settings_mod, slack_mcp, store, watch
+from . import crew_runtime, dispatch, handoff, needs, org, settings as settings_mod, signals, slack_mcp, store, watch
 
 logger = logging.getLogger("kirocrew.app.slack-radar")
 
@@ -311,6 +311,20 @@ async def _handle_events(request: web.Request, ctx: Any) -> web.Response:
         limit = 100
     events = await asyncio.to_thread(store.read_events, _data_dir(ctx), limit)
     return web.json_response({"ok": True, "events": events})
+
+
+async def _handle_signals(request: web.Request, ctx: Any) -> web.Response:
+    """Harness-rsi signal rows (``signals.build_signals``): read-only, allowlisted channels only."""
+    try:
+        settings = await asyncio.to_thread(settings_mod.read_settings)
+    except settings_mod.SettingsUnavailable:
+        return _err(503, "vault_unavailable", "settings are unreadable; no channel is allowlisted")
+    try:
+        ledger = await asyncio.to_thread(store.read_ledger, _data_dir(ctx))
+    except store.StoreError as exc:
+        return _err(500, "ledger_corrupt", str(exc))
+    rows = signals.build_signals(ledger, settings.get("signal_channels") or [])
+    return web.json_response({"ok": True, "signals": rows})
 
 
 # ── owner writes ───────────────────────────────────────────────────────────
@@ -791,6 +805,7 @@ def register_routes(ctx: Any) -> list[Any]:
         r("POST", "/items/handoff/dispatch-batch", _owner_only(_handle_handoff_dispatch_batch)),
         r("GET", "/fixes", _handle_fixes),
         r("GET", "/events", _handle_events),
+        r("GET", "/signals", _handle_signals),
         r("PUT", "/settings", _owner_only(_handle_put_settings)),
         r("GET", "/mcp/status", _owner_only(_handle_mcp_status)),
         r("POST", "/poll", _owner_only(_handle_poll)),
