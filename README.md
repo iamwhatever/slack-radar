@@ -24,8 +24,8 @@ KiroCrew's built-in Issue Radar app.
    new item, and decides which items form a cluster.
 4. **Investigator links issues and PRs.** For a cluster, the lead spawns the
    read-only Investigator, which runs `gh search` and records matching issue
-   and PR links on the items. You can also select items on the Ledger tab and
-   press **Investigate**.
+   and PR links on the items. You can also press **Investigate** on a Needs-you
+   row, or select items on the Ledger tab and press **Investigate** there.
 5. **Thread re-check.** Each cycle the poller re-reads a bounded window of open
    threads and flags *possibly resolved* ones (a ✅ reaction, a "fixed",
    "merged" or "thanks" reply, a deleted parent). Code never closes an item.
@@ -164,7 +164,7 @@ The page has five tabs. The header shows the tabs, a **Crew** switch (start or p
 
 | Tab | What it shows |
 |---|---|
-| Board | Top to bottom. Under the Now strip, one thin line: Slack connection, last poll and **Poll now**. Then **Today**: the Lead's one-line summary as the heading, the latest digest's top items under it (**Full digest** unfolds the whole text), the digest date and **Digest now** in the card header; with no digest yet it reads *No digest yet* plus the button. Then **Needs you**, built by fixed rules from the ledger, no model call: *Needs a decision* (a fix ready to hand off, open p0/p1, finished investigations with GitHub links, threads that look resolved), *Questions nobody answered* (no reply for over 2 days) and *Reported more than once* (similar messages in one channel). Each group is sorted by priority (p0 first), then newest first, and shows 5 rows; **Show N more** opens the rest. A row shows the priority, the summary, why it is there and how long ago it was posted, and ONE button that names the next step: **Dispatch fix** (a fix is ready), **Open** (a reply is ready: the row shows "Reply ready" and the first line of the original message, never the draft), **Reply** (the question is unanswered: it opens the thread in Slack), **Done** (it looks resolved, or its fix is in progress) or **Decide** (it opens the row). A fix row also has **▾**, which shows the fix title and its task, read-only. A click on a row opens its detail view on the Board: the original message in full (author, channel, time, text, Slack link), the thread replies so far, oldest first, then the row's actions (*Done*, *Ignore*, *Why? Ask the lead*, and the fix title or reply draft). **Esc** closes it. Done and Ignore only take a row off this list; its status is unchanged. **Fixes in flight (N)**, folded by default, lists every dispatched fix with its session, its state, its PR once there is one, and **Dismiss**. **Handled (N)** lists what you took off, each with **Reopen**. Last, pinned to the bottom of the Board: **Ask the lead…**, one line with three quick questions (*What needs me today?*, *Draft today's digest*, *Which threads look resolved?*); your first question opens it upward into the full Radar Lead chat, which stays open (also after a reload) until you press **Collapse**. The Lead's avatar dot shows when it is working |
+| Board | Top to bottom. Under the Now strip, one thin line: Slack connection, last poll and **Poll now**. Then **Today**: the Lead's one-line summary as the heading, the latest digest's top items under it (**Full digest** unfolds the whole text), the digest date and **Digest now** in the card header; with no digest yet it reads *No digest yet* plus the button. Then **Needs you**, built by fixed rules from the ledger, no model call: *Needs a decision* (a fix ready to hand off, open p0/p1, finished investigations with GitHub links, threads that look resolved), *Questions nobody answered* (no reply for over 2 days) and *Reported more than once* (similar messages in one channel). Each group is sorted by priority (p0 first), then newest first, and shows 5 rows; **Show N more** opens the rest. A row shows the priority, the summary, why it is there and how long ago it was posted, and ONE button that names the next step: **Dispatch fix** (a fix is ready), **Open** (a reply is ready: the row shows "Reply ready" and the first line of the original message, never the draft), **Reply** (the question is unanswered: it opens the thread in Slack), **Done** (it looks resolved, or its fix is in progress), **Investigate**, **Ask lead**, or no button at all; see the table below. Every row has **▾**: a fix row shows the fix title and its task, read-only; an investigated row shows its GitHub links; any other row shows the message. A click on a row opens its detail view on the Board: the original message in full (author, channel, time, text, Slack link), the thread replies so far, oldest first, then the row's actions (*Done*, *Ignore*, *Why? Ask the lead*, and the fix title or reply draft). **Esc** closes it. Done and Ignore only take a row off this list; its status is unchanged. **Fixes in flight (N)**, folded by default, lists every dispatched fix with its session, its state, its PR once there is one, and **Dismiss**. **Handled (N)** lists what you took off, each with **Reopen**. Last, pinned to the bottom of the Board: **Ask the lead…**, one line with three quick questions (*What needs me today?*, *Draft today's digest*, *Which threads look resolved?*); your first question opens it upward into the full Radar Lead chat, which stays open (also after a reload) until you press **Collapse**. The Lead's avatar dot shows when it is working |
 | Ledger | Every ledger item, newest first, with how long ago it was posted and at most two tags per row. Filters: **Status** (asks the server), **Priority**, **Category** and **Needs me** (a reply draft, a fix hand-off or a thread that looks resolved). Above it the counts; below it per-channel poll health. Tick items and press **Investigate** (optionally naming an `owner/name` repo) to spawn the Investigator on them |
 | Team | Who is on the crew: Radar Lead (*Resident*), Investigator (*Joins on demand*), Thread Watcher (*Joins after a poll*) and the Poller (code, no model), each with a live status and its last run (*idle since 15:54 · last run 15:49–15:54*, *never ran*). Agent ids are in a **Details** fold |
 | Activity | The work log: polls that moved something, login lost or restored, crew notes, digests, settings changes, crew session moves |
@@ -182,6 +182,23 @@ not exist yet. Either resume `daily-digest` in the Schedule view, or disable and
 re-enable the app (disabling removes the app's cron jobs, enabling adds them back
 with the new default).
 
+### Row buttons
+
+Each Needs-you row has at most one button. One click does the whole step; nothing runs without that click.
+
+| Button | When | What one click does |
+|---|---|---|
+| **Dispatch fix** | the Lead wrote a fix hand-off | starts a `kirocrew-conductor` session with the fix (see below) |
+| **Open** | a reply is ready, or a question has no draft yet | opens the detail view: the message, its thread, and the draft with **Send to thread** |
+| **Reply** | a question nobody answered | opens the thread in Slack |
+| **Investigate** | a cluster of similar messages, or a bug report or feature request nobody investigated yet | starts the read-only Investigator on those items (needs unattended mode, like the Ledger's **Investigate**); the row reads *Investigating…* and `Investigator · running · since 16:54`, then `Investigated · N links` with the links under **▾** |
+| **Ask lead** | an investigated bug report or feature request with no draft and no hand-off | gives the Lead one turn for that item: it writes a fix hand-off, a reply draft, or closes it, and notes why; the row reads *Lead thinking…* until it does |
+| **Done** | it looks resolved, or its fix is dispatched or merged | takes the row off the list; its status is unchanged |
+
+A PR state change never starts crew work by itself. A merged fix shows `PR #n merged ✓` on its row and waits for your **Re-analyze**.
+
+![A cluster row investigating, and an investigated bug with Ask lead](docs/screenshots/investigate-row.png)
+
 ### Getting a fix started
 
 When an investigation finds a concrete fix (a linked issue with a known cause, or a PR to backport), the Radar Lead writes one hand-off on the item: a self-contained task for a coding session with the repo, the item key, the links, the coverage verdict, what to change, how to verify, and "Do not merge; open a PR for review". The row shows up under *Needs a decision* as "Fix ready to hand off". Press **Dispatch fix**: that one click is your go-ahead, and there is no second dialog. Slack Radar opens a new `kirocrew-conductor` session in your sidebar (under *Slack Radar › fixes*, titled `Fix: <title>`) and sends it the task plus the Slack messages behind it (text, replies, links), marked as untrusted data. Its acceptance is "open a PR with CI green, do not merge, report the PR URL". The result stays on the row: while it goes out the button reads *Dispatching…*, then the same row reads `Dispatched · <session title> · working` (or `idle`, or `done` once the session is closed) with **Open session**, and `PR #n` once the conductor reports one. The state follows the Board's own refresh. If the dispatch fails, the row says why, with **Try again**. To see what will be sent before you press it, open the row's **▾**: the fix title and the task, read-only. Once the conductor reports a PR, the row leaves *Needs a decision* and **Fixes in flight (N)** shows `PR #n`. Under unattended mode the conductor session is trusted the way the crew is: it rides the crew's scoped grant from its first message, so its shell, git and file calls do not ask you, and every poll holds it in step; turning unattended off or pausing the crew revokes it within a poll. The workers the conductor opens are trusted the same way from the next poll, except ones opened before a gateway restart, which ask. With unattended mode off the session asks you for each tool, and the row says so under the Dispatched line. The session is yours: read it, steer it, close it. Slack Radar never dispatches on its own, the Lead never dispatches, and the app writes nothing to Slack or GitHub. If you ask the Lead to do dev work, it answers with a hand-off instead. On a Kiro Crew whose gateway gives apps no session create, the button starts the conductor chat through the SDK's chat launcher instead (not tracked); with no launcher, it shows the task with **Copy task** and a **New chat** link.
@@ -192,7 +209,7 @@ With two or more fixes waiting, press **Dispatch all fixes (N)** in the *Needs a
 
 ![Rows after Dispatch all fixes](docs/screenshots/batch-dispatch.png)
 
-Once a fix has a PR, the gateway reads that PR's state with your own `gh` login, read-only: `gh pr view <url> --json state,mergedAt,closedAt,isDraft`, after each poll, at most 10 PRs per poll, each PR at most every 30 minutes, and never again once it is merged or closed. Without `gh`, or when it is logged out or rate-limited, the state reads *unknown* and nothing is tried for an hour. The app never writes to GitHub. When the PR merges, the row comes back to *Needs a decision* as `Fix merged · PR #n` with **Done**, its line reads `Dispatched · <title> · PR #n merged ✓`, it leaves **Fixes in flight**, the work log says `PR #n merged`, the item is flagged *possibly resolved* for the Thread Watcher, and it joins **Re-analyze**. **Fixes in flight** shows the other PRs' state (`open`, `draft`, `closed, not merged`); the Ledger tab tags such items *fix merged* or *fix PR closed*.
+Once a fix has a PR, the gateway reads that PR's state with your own `gh` login, read-only: `gh pr view <url> --json state,mergedAt,closedAt,isDraft`, after each poll, at most 10 PRs per poll, each PR at most every 30 minutes, and never again once it is merged or closed. Without `gh`, or when it is logged out or rate-limited, the state reads *unknown* and nothing is tried for an hour. The app never writes to GitHub. When the PR merges, the row comes back to *Needs a decision* as `Fix merged · PR #n` with **Done**, its line reads `Dispatched · <title> · PR #n merged ✓`, it leaves **Fixes in flight**, the work log says `PR #n merged`, and it joins **Re-analyze**. Nothing else happens on a merge: no flag, no Thread Watcher run, no Lead turn. A merged fix reaches the Lead only when you press **Re-analyze**. **Fixes in flight** shows the other PRs' state (`open`, `draft`, `closed, not merged`); the Ledger tab tags such items *fix merged* or *fix PR closed*.
 
 ![A merged fix back in Needs a decision](docs/screenshots/fix-merged.png)
 
@@ -202,7 +219,7 @@ When a question has a clear answer in the ledger or its links, or a bug report d
 
 When replies arrive in the thread after the draft was written, the draft is stale. The row shows *N new replies since draft* next to "Reply ready" and sorts above the other rows of its priority. The detail view marks each newer reply **new** and says *N replies arrived after this draft — read them first* above **Send to thread**. Send still works with one click. The Lead does not rewrite a draft by itself: after its first look, a draft changes only when you ask.
 
-**Re-analyze N stale** at the top of *Needs you* is that ask. It counts the open items the Lead's last look is out of date for: a stale draft, a draft whose thread changed, a dispatched fix whose thread moved after the dispatch, or a dispatched fix whose PR was merged or closed since the Lead last re-analyzed it. One click hands the Lead one turn with those items (up to 20, oldest-checked first; the button then reads *Re-analyze 20 of N stale*), each with its original message, the replies newer than the draft, the draft and the fix's state, including its PR's (`PR <url> · merged 2026-09-30`, `· open`, `· closed, not merged`). The Lead rewrites the draft, withdraws it when the thread already answered it, or marks the item resolved when the thread shows the fix landed, and notes why. For a merged PR it leaves the *possibly resolved* flag to the Thread Watcher or marks the item resolved when the thread also confirms, and drafts a short "fixed in …" reply only when no maintainer has answered yet; for a PR closed without merging it notes that the fix did not land. Once sent, the item leaves the count until its PR state changes again. Nothing is sent to Slack. The button reads *Re-analyzing…* until every item it named moves, or 10 minutes pass; a second click meanwhile is refused. The detail view of a stale item has **Re-analyze this** for one item. A row with a dispatched fix shows *replies · last 16:54*, when its thread last moved.
+**Re-analyze N stale** at the top of *Needs you* is that ask. It counts the open items the Lead's last look is out of date for: a stale draft, a draft whose thread changed, a dispatched fix whose thread moved after the dispatch, or a dispatched fix whose PR was merged or closed since the Lead last re-analyzed it. One click hands the Lead one turn with those items (up to 20, oldest-checked first; the button then reads *Re-analyze 20 of N stale*), each with its original message, the replies newer than the draft, the draft and the fix's state, including its PR's (`PR <url> · merged 2026-09-30`, `· open`, `· closed, not merged`). The Lead rewrites the draft, withdraws it when the thread already answered it, or marks the item resolved when the thread shows the fix landed, and notes why. For a merged PR it marks the item resolved when the thread also confirms, and drafts a short "fixed in …" reply only when no maintainer has answered yet; for a PR closed without merging it notes that the fix did not land. Once sent, the item leaves the count until its PR state changes again. Nothing is sent to Slack. The button reads *Re-analyzing…* until every item it named moves, or 10 minutes pass; a second click meanwhile is refused. The detail view of a stale item has **Re-analyze this** for one item. A row with a dispatched fix shows *replies · last 16:54*, when its thread last moved.
 
 ![Reply detail view](docs/screenshots/reply-detail.png)
 
@@ -280,7 +297,7 @@ Disabling the app stops the loop and revokes the crew's auto-approve grant.
   Investigator shell command are approved without a prompt, each one SEL-audited.
   While it is off, the host asks you to approve the spawn and then each command,
   and an unanswered prompt is denied after two hours.
-- **The Ledger tab's Investigate button needs unattended mode.** It spawns through the
+- **Investigate (on a Board row or the Ledger tab) needs unattended mode.** It spawns through the
   app spawn SDK, which the host runs with every command auto-approved for the whole
   run. So the button is refused (`unattended_required`) while unattended mode is
   off.
@@ -385,7 +402,7 @@ Rendered from fake demo data (`docs/screenshots/capture/`); no real Slack conten
 | ![Sign in again state](docs/screenshots/needs-login.png) | ![Team tab](docs/screenshots/team.png) |
 | Sign-in expired: a banner says so and polling pauses, instead of an empty queue | Team: who is on the crew and what each one is doing |
 | ![Needs you card](docs/screenshots/needs-you.png) | ![Chat opened](docs/screenshots/chat-expanded.png) |
-| Needs you: one button per row (**Dispatch fix**, **Done**, **Open**), **Dispatch all fixes (2)** in the group header, a reply row showing the original message's first line, a dispatched fix in progress, **Show 2 more**, and the opened **Fixes in flight**, **Replied** and **Handled** folds | After the first question the lead chat opens upward from the bottom of the Board; **Collapse** folds it back to one line |
+| Needs you: one button per row (**Dispatch fix**, **Done**, **Open**, **Ask lead**, and **Investigate** on a cluster), **Dispatch all fixes (2)** in the group header, a reply row showing the original message's first line, a dispatched fix in progress, **Show 3 more**, and the opened **Fixes in flight**, **Replied** and **Handled** folds | After the first question the lead chat opens upward from the bottom of the Board; **Collapse** folds it back to one line |
 
 ## License
 
@@ -412,7 +429,7 @@ Slack Radar 是一个“有记性”的 Slack 分诊小组。它通过你自己�
 3. **雷达组长分类。** 只要有变化，轮询器就唤醒小组。雷达组长读取台账，为每条新条目定类别、
    优先级和摘要，并决定哪些条目归为一簇。
 4. **调查员关联 issue 和 PR。** 对于一簇报告，组长会派出只读的调查员，用 `gh search`
-   查找并把匹配的 issue、PR 链接记到条目上。你也可以在 Ledger（台账）标签页勾选条目后点 **Investigate**。
+   查找并把匹配的 issue、PR 链接记到条目上。你也可以在 *Needs you* 的一行上点 **Investigate**，或在 Ledger（台账）标签页勾选条目后点 **Investigate**。
 5. **线程复查。** 每一轮，轮询器会在有限的窗口内重读仍打开的线程，把“可能已解决”的标出来
    （✅ 表情、“fixed”“merged”“thanks”之类的回复、原消息被删除）。代码从不自行关闭条目。
    一次轮询留下新标记后，由一次线程观察员运行替组长统一判断，并记下是否已解决。
@@ -478,7 +495,7 @@ kirocrew app enable slack-radar
 
 | 标签页 | 内容 |
 |---|---|
-| Board（看板） | 从上到下。Now 条下面是细细的一行：Slack 连接、最近一次轮询和 **Poll now**。接着是 **Today（今天）**：组长的一句话总结做标题，下面是最近一份摘要的要点（**Full digest** 展开全文），卡片标题栏里是摘要日期和 **Digest now**；还没有摘要时只显示 *No digest yet* 和这个按钮。然后是 **Needs you（需要你处理）**，按固定规则从台账算出，不调用模型：*Needs a decision*（可以交接的修复、未关闭的 p0/p1、带 GitHub 链接且已查完的调查、看起来已解决的线程）、*Questions nobody answered*（超过 2 天没人回的问题）和 *Reported more than once*（同一频道里相似的消息）。每组先按优先级排（p0 在前），同一优先级里新的在前，只显示 5 行；**Show N more** 展开其余的。每行显示优先级、摘要、为什么在这里、发了多久，以及唯一一个写明下一步的按钮：**Dispatch fix**（修复已就绪）、**Open**（回复已就绪：这一行标着 "Reply ready"，显示原消息的第一行，从不显示草稿）、**Reply**（问题没人回，它打开 Slack 里的线程）、**Done**（看起来已解决，或修复正在进行）或 **Decide**（打开这一行）。修复行还有一个 **▾**，只读地显示修复标题和任务。点一行会在看板上打开它的详情：完整的原消息（作者、频道、时间、正文、Slack 链接），目前为止的线程回复（旧的在前），然后是这一行的操作（*Done*、*Ignore*、*Why? Ask the lead*，以及修复标题或回复草稿）。按 **Esc** 关闭。Done 和 Ignore 只是把它移出这个列表，状态不变。**Fixes in flight (N)** 默认折叠，列出所有已派发的修复，带会话、状态、有了之后的 PR，以及 **Dismiss**。**Handled (N)** 列出你移走的条目，每条可 **Reopen**。最后，固定在看板底部：**Ask the lead…**，一行输入框加三个快捷问题（*What needs me today?*、*Draft today's digest*、*Which threads look resolved?*）；问出第一个问题后，它向上展开成完整的雷达组长聊天，一直开着（刷新后也是），直到你点 **Collapse**。组长头像上的圆点显示它是否在工作 |
+| Board（看板） | 从上到下。Now 条下面是细细的一行：Slack 连接、最近一次轮询和 **Poll now**。接着是 **Today（今天）**：组长的一句话总结做标题，下面是最近一份摘要的要点（**Full digest** 展开全文），卡片标题栏里是摘要日期和 **Digest now**；还没有摘要时只显示 *No digest yet* 和这个按钮。然后是 **Needs you（需要你处理）**，按固定规则从台账算出，不调用模型：*Needs a decision*（可以交接的修复、未关闭的 p0/p1、带 GitHub 链接且已查完的调查、看起来已解决的线程）、*Questions nobody answered*（超过 2 天没人回的问题）和 *Reported more than once*（同一频道里相似的消息）。每组先按优先级排（p0 在前），同一优先级里新的在前，只显示 5 行；**Show N more** 展开其余的。每行显示优先级、摘要、为什么在这里、发了多久，以及唯一一个写明下一步的按钮：**Dispatch fix**（修复已就绪）、**Open**（回复已就绪：这一行标着 "Reply ready"，显示原消息的第一行，从不显示草稿）、**Reply**（问题没人回，它打开 Slack 里的线程）、**Done**（看起来已解决，或修复正在进行）、**Investigate**、**Ask lead**，或者没有按钮；见下表。每行都有 **▾**：修复行只读地显示修复标题和任务；查过的行显示它的 GitHub 链接；其他行显示消息本身。点一行会在看板上打开它的详情：完整的原消息（作者、频道、时间、正文、Slack 链接），目前为止的线程回复（旧的在前），然后是这一行的操作（*Done*、*Ignore*、*Why? Ask the lead*，以及修复标题或回复草稿）。按 **Esc** 关闭。Done 和 Ignore 只是把它移出这个列表，状态不变。**Fixes in flight (N)** 默认折叠，列出所有已派发的修复，带会话、状态、有了之后的 PR，以及 **Dismiss**。**Handled (N)** 列出你移走的条目，每条可 **Reopen**。最后，固定在看板底部：**Ask the lead…**，一行输入框加三个快捷问题（*What needs me today?*、*Draft today's digest*、*Which threads look resolved?*）；问出第一个问题后，它向上展开成完整的雷达组长聊天，一直开着（刷新后也是），直到你点 **Collapse**。组长头像上的圆点显示它是否在工作 |
 | Ledger（台账） | 台账里的所有条目，新的在前，显示发了多久，每行最多两个标签。筛选：**Status**（由服务器筛）、**Priority**、**Category** 和 **Needs me**（有回复草稿、修复交接，或线程看起来已解决）。上面是计数，下面是各频道轮询健康度。勾选条目后点 **Investigate**（可选填一个 `owner/name` 仓库）即可派调查员去查 |
 | Team（团队） | 小组成员：雷达组长（*Resident*，常驻）、调查员（*Joins on demand*，按需加入）、线程观察员（*Joins after a poll*，轮询后加入）和轮询器（代码，不用模型），各带实时状态和上次运行时间（*idle since 15:54 · last run 15:49–15:54*、*never ran*）。agent id 收在 **Details** 折叠里 |
 | Activity（动态） | 工作日志：有变化的轮询、登录失效与恢复、小组备注、摘要、设置变更、小组会话迁移 |
@@ -493,6 +510,23 @@ kirocrew app enable slack-radar
 因为网关只添加尚不存在的应用定时任务。要么在 Schedule 页面恢复 `daily-digest`，要么停用再启用应用
 （停用会删除应用的定时任务，启用时按新的默认值重新添加）。
 
+### 每行的按钮
+
+*Needs you* 的每一行最多一个按钮。点一下就完成这一步；不点就什么都不会发生。
+
+| 按钮 | 什么时候出现 | 点一下做什么 |
+|---|---|---|
+| **Dispatch fix** | 组长写好了修复交接 | 用这个修复开一个 `kirocrew-conductor` 会话（见下文） |
+| **Open** | 回复已就绪，或问题还没有草稿 | 打开详情：消息、线程，以及带 **Send to thread** 的草稿 |
+| **Reply** | 没人回答的问题 | 在 Slack 里打开线程 |
+| **Investigate** | 一组相似消息，或还没人查过的 bug 报告或功能请求 | 让只读的调查员去查这些条目（和台账页的 **Investigate** 一样需要无人值守模式）；这一行显示 *Investigating…* 和 `Investigator · running · since 16:54`，查完后显示 `Investigated · N links`，链接在 **▾** 里 |
+| **Ask lead** | 已经查过、但没有草稿也没有交接的 bug 报告或功能请求 | 给组长一轮只处理这一条：写修复交接、写回复草稿，或者关掉它，并写下理由；它做完之前这一行显示 *Lead thinking…* |
+| **Done** | 看起来已解决，或修复已派发或已合并 | 把这一行移出列表，状态不变 |
+
+PR 状态变化本身从不启动小组的工作。合并的修复会在这一行显示 `PR #n merged ✓`，等你点 **Re-analyze**。
+
+![一组相似消息正在调查，一个查过的 bug 带 Ask lead](docs/screenshots/investigate-row.png)
+
 ### 开始一个修复
 
 调查找到明确的修复时（一个原因已知的关联 issue，或一个要回移的 PR），雷达组长会在条目上写一个交接：给编码会话的自包含任务，含仓库、条目 key、链接、覆盖结论、改什么、怎么验证，以及 "Do not merge; open a PR for review"。这一行会出现在 *Needs a decision* 里，原因是 "Fix ready to hand off"。点 **Dispatch fix**：这一下就是你的同意，不会再弹第二个对话框。Slack Radar 会在侧边栏开一个新的 `kirocrew-conductor` 会话（在 *Slack Radar › fixes* 下，标题 `Fix: <标题>`），把任务和背后的 Slack 消息（原文、回复、链接）作为不可信数据发给它。验收条件是“开一个 CI 全绿的 PR，不合并，报告 PR 链接”。结果留在这一行上：发送时按钮显示 *Dispatching…*，之后同一行显示 `Dispatched · <会话标题> · working`（或 `idle`，会话关闭后是 `done`），带 **Open session**，conductor 报告 PR 后还有 `PR #n`。状态随看板自己的刷新更新。派发失败时，这一行会说明原因，带 **Try again**。想在点之前看看会发出什么，打开这一行的 **▾**：只读的修复标题和任务。conductor 报告 PR 后，这一行离开 *Needs a decision*，**Fixes in flight (N)** 里显示 `PR #n`。无人值守模式下，conductor 会话和小组一样被信任：从第一条消息起它就用小组的限定范围授权，所以它的 shell、git 和文件操作不会来问你，每次轮询都会同步；关闭无人值守或暂停小组，一次轮询之内就会撤销。conductor 自己开的 worker 从下一次轮询起也一样被信任，但网关重启前开的 worker 会询问。无人值守模式关闭时，这个会话每个工具都会问你，这一行在 Dispatched 下面会注明。这个会话是你的：可以读、引导、关闭。Slack Radar 从不自己派发，组长也从不派发，应用不向 Slack 或 GitHub 写任何东西。你让组长做开发工作时，它会用一个交接来回答。如果网关不允许应用创建会话，按钮会改用 SDK 聊天启动器开 conductor 聊天（不跟踪）；没有启动器时，会显示任务，带 **Copy task** 和 **New chat** 链接。
@@ -504,7 +538,7 @@ kirocrew app enable slack-radar
 ![Dispatch all fixes 之后的各行](docs/screenshots/batch-dispatch.png)
 
 
-修复有了 PR 之后，网关会用你自己的 `gh` 登录只读地读取这个 PR 的状态：`gh pr view <url> --json state,mergedAt,closedAt,isDraft`，每次轮询之后进行，每次最多 10 个 PR，同一个 PR 至少隔 30 分钟，合并或关闭之后不再读。没有 `gh`、未登录或被限流时，状态显示 *unknown*，一小时内不再尝试。应用从不向 GitHub 写任何东西。PR 合并后，这一行回到 *Needs a decision*，原因是 `Fix merged · PR #n`，按钮是 **Done**，那一行写着 `Dispatched · <标题> · PR #n merged ✓`；它离开 **Fixes in flight**，工作日志记一条 `PR #n merged`，条目被标成 *possibly resolved* 交给线程观察员，并加入 **Re-analyze**。**Fixes in flight** 显示其余 PR 的状态（`open`、`draft`、`closed, not merged`）；台账页给这类条目打上 *fix merged* 或 *fix PR closed* 标签。
+修复有了 PR 之后，网关会用你自己的 `gh` 登录只读地读取这个 PR 的状态：`gh pr view <url> --json state,mergedAt,closedAt,isDraft`，每次轮询之后进行，每次最多 10 个 PR，同一个 PR 至少隔 30 分钟，合并或关闭之后不再读。没有 `gh`、未登录或被限流时，状态显示 *unknown*，一小时内不再尝试。应用从不向 GitHub 写任何东西。PR 合并后，这一行回到 *Needs a decision*，原因是 `Fix merged · PR #n`，按钮是 **Done**，那一行写着 `Dispatched · <标题> · PR #n merged ✓`；它离开 **Fixes in flight**，工作日志记一条 `PR #n merged`，并加入 **Re-analyze**。合并时不会发生别的事：不打标记，不派线程观察员，组长也不会被叫醒。合并的修复只有在你点 **Re-analyze** 时才交给组长。**Fixes in flight** 显示其余 PR 的状态（`open`、`draft`、`closed, not merged`）；台账页给这类条目打上 *fix merged* 或 *fix PR closed* 标签。
 
 ![合并后回到 Needs a decision 的修复](docs/screenshots/fix-merged.png)
 ### 一键回复
@@ -513,7 +547,7 @@ kirocrew app enable slack-radar
 
 草稿写好之后线程里又来了新回复，草稿就过时了。这一行会在 "Reply ready" 旁边显示 *N new replies since draft*，并排在同一优先级的其他行前面。详情里每条更新的回复标着 **new**，**Send to thread** 上方写着 *N replies arrived after this draft — read them first*。发送仍然是一次点击。组长不会自己重写草稿：第一次看过之后，只有你开口，草稿才会变。
 
-*Needs you* 顶部的 **Re-analyze N stale** 就是开口的方式。它数的是组长上次看过之后已经过时的未关闭条目：过时的草稿、线程有变化的草稿、派发之后线程又动了的修复，以及组长上次重新分析之后 PR 被合并或关闭的修复。点一次，组长得到一轮，只处理这些条目（最多 20 个，最久没复查的在前；超过时按钮写 *Re-analyze 20 of N stale*），每个都带原消息、草稿之后的回复、草稿和修复状态，包括 PR 的状态（`PR <url> · merged 2026-09-30`、`· open`、`· closed, not merged`）。组长会重写草稿，线程已经回答了就撤回草稿，线程显示修复已上线就标为已解决，并写下理由。PR 已合并时，它把 *possibly resolved* 标记留给线程观察员，线程也确认时就标为已解决，只有还没有维护者回答时才起草一句简短的“已在……修复”回复；PR 未合并就关闭时，它在 note 里写明修复没有上线。发出之后，这个条目不再计数，直到它的 PR 状态再次变化。什么都不会发到 Slack。在它点名的每个条目都有变化之前（最多 10 分钟），按钮显示 *Re-analyzing…*，这期间再点会被拒绝。过时条目的详情里有 **Re-analyze this**，只处理这一条。有已派发修复的行会显示 *replies · last 16:54*，即线程最近一次变化的时间。
+*Needs you* 顶部的 **Re-analyze N stale** 就是开口的方式。它数的是组长上次看过之后已经过时的未关闭条目：过时的草稿、线程有变化的草稿、派发之后线程又动了的修复，以及组长上次重新分析之后 PR 被合并或关闭的修复。点一次，组长得到一轮，只处理这些条目（最多 20 个，最久没复查的在前；超过时按钮写 *Re-analyze 20 of N stale*），每个都带原消息、草稿之后的回复、草稿和修复状态，包括 PR 的状态（`PR <url> · merged 2026-09-30`、`· open`、`· closed, not merged`）。组长会重写草稿，线程已经回答了就撤回草稿，线程显示修复已上线就标为已解决，并写下理由。PR 已合并时，线程也确认就标为已解决，只有还没有维护者回答时才起草一句简短的“已在……修复”回复；PR 未合并就关闭时，它在 note 里写明修复没有上线。发出之后，这个条目不再计数，直到它的 PR 状态再次变化。什么都不会发到 Slack。在它点名的每个条目都有变化之前（最多 10 分钟），按钮显示 *Re-analyzing…*，这期间再点会被拒绝。过时条目的详情里有 **Re-analyze this**，只处理这一条。有已派发修复的行会显示 *replies · last 16:54*，即线程最近一次变化的时间。
 
 ![回复详情](docs/screenshots/reply-detail.png)
 
@@ -577,7 +611,7 @@ kirocrew app enable slack-radar
   小组的限定范围授权会传到子 agent（Kiro Crew 核心自 kirodotdev/KiroCrew#14497 起）。无人值守模式打开时，
   这次派出和调查员的每条 shell 命令都会自动批准，每条都记入 SEL 审计。模式关闭时，网关会先请你批准派出，
   再逐条批准命令，无人应答的确认两小时后自动拒绝。
-- **Ledger 标签页的 Investigate 按钮需要无人值守模式。** 它通过应用的 spawn SDK 派出调查员，
+- **Investigate（看板上的一行或 Ledger 标签页）需要无人值守模式。** 它通过应用的 spawn SDK 派出调查员，
   网关对这类派出在整个运行期间自动批准每条命令。所以无人值守模式关闭时，这个按钮会被拒绝
   （`unattended_required`）。
 - **线程观察员在两种模式下都不询问。** 轮询标出“可能已解决”的线程后，网关通过应用的 spawn SDK
@@ -660,7 +694,7 @@ slack-radar/
 | ![需要重新登录](docs/screenshots/needs-login.png) | ![团队](docs/screenshots/team.png) |
 | 登录过期：顶部横幅直接说明，轮询暂停，而不是显示一个空队列 | 团队：小组有哪些成员、各自在做什么 |
 | ![需要你处理](docs/screenshots/needs-you.png) | ![展开的聊天](docs/screenshots/chat-expanded.png) |
-| Needs you：每行一个按钮（**Dispatch fix**、**Done**、**Open**），组标题上的 **Dispatch all fixes (2)**，一个显示原消息第一行的回复行，一个进行中的已派发修复，**Show 2 more**，以及展开的 **Fixes in flight**、**Replied** 和 **Handled** 折叠 | 问出第一个问题后，组长聊天从看板底部向上展开；**Collapse** 收回成一行 |
+| Needs you：每行一个按钮（**Dispatch fix**、**Done**、**Open**、**Ask lead**，相似消息那一组是 **Investigate**），组标题上的 **Dispatch all fixes (2)**，一个显示原消息第一行的回复行，一个进行中的已派发修复，**Show 3 more**，以及展开的 **Fixes in flight**、**Replied** 和 **Handled** 折叠 | 问出第一个问题后，组长聊天从看板底部向上展开；**Collapse** 收回成一行 |
 
 ## 许可
 

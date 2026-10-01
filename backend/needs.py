@@ -151,10 +151,25 @@ def _entry(item: dict[str, Any], now: float, reason: str,
         "latest_reply": str(item.get("latest_reply") or ""),
         "needs_reanalysis": store.needs_reanalysis(item),
         "reanalyze_requested_at": _float(item.get("reanalyze_requested_at")),
+        "reanalyze_in_flight": store.reanalyze_in_flight(item, now),
+        "status": str(item.get("status") or ""),
+        # The Investigator's run on this item (``spawn <id>``, "" before one) and what it found.
+        "investigation": str(item.get("investigation") or ""),
+        "investigation_at": _float(item.get("investigation_at")),
+        "links_count": len(_links(item)),
+        "links": _links(item)[:LINKS_SHOWN],
         **({"handoff_title": item["fix_handoff"].get("title") or ""} if has_handoff(item) else {}),
         **(_draft_meta(item) if store.has_reply_draft(item) else {}),
         **({"dispatch": fix_view(item, fix_live)} if dispatch_of(item) else {}),
     }
+
+
+#: Investigation links a row carries for its ▾ (``links_count`` counts them all).
+LINKS_SHOWN = 8
+
+
+def _links(item: dict[str, Any]) -> list[str]:
+    return [u for u in item.get("links") or [] if isinstance(u, str) and u]
 
 
 def handoff_entry(item: dict[str, Any]) -> dict[str, Any]:
