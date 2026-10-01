@@ -288,7 +288,9 @@ try {
     await row.waitFor({ timeout: 30000 })
     const rowText = await row.textContent()
     const first = await row.getByTestId('need-first-line').textContent()
+    const chip = await row.getByTestId('draft-stale').textContent()
     const rowOk = first === REPLY_FIRST && rowText.includes('Reply ready') && rowText.includes('hana')
+      && chip === '1 new reply since draft'
       && !rowText.includes('Yes. The export uses') && !rowText.includes('Send')
       && JSON.stringify(await rowButtons(row)) === JSON.stringify(['Open'])
       && (await page.getByRole('textbox', { name: 'Reply to the thread, sent as you' }).count()) === 0
@@ -305,6 +307,7 @@ try {
         d.querySelector('[data-testid="detail-original"]'),
         d.querySelector('[data-testid="detail-replies"]'),
         d.querySelector('[data-testid="detail-draft"]'),
+        d.querySelector('[data-testid="draft-stale-warning"]'),
         [...d.querySelectorAll('button')].find((b) => b.textContent === 'Send to thread'),
       ]
       if (nodes.some((n) => !n)) return false
@@ -313,6 +316,12 @@ try {
     const original = await dialog.getByTestId('detail-text').textContent()
     const replies = await dialog.getByTestId('detail-replies').textContent()
     const actions = await dialog.getByTestId('detail-actions').locator('button').allTextContents()
+    const warning = await dialog.getByTestId('draft-stale-warning').textContent()
+    const newReplies = await dialog.getByTestId('reply-new').allTextContents()
+    const oldReplies = await dialog.getByTestId('reply-old').count()
+    const thisBtn = await dialog.getByRole('button', { name: 'Re-analyze this' }).count()
+    const staleOk = warning === '1 reply arrived after this draft — read it first' && newReplies.length === 1
+      && newReplies[0].startsWith('new') && newReplies[0].includes('two hidden columns') && oldReplies === 1 && thisBtn === 1
     await page.keyboard.press('Escape')
     const escClosed = (await page.getByRole('dialog').count()) === 0
     const back = await openBtn.evaluate((el) => el === document.activeElement)
@@ -326,14 +335,38 @@ try {
     await dialog.getByRole('button', { name: 'Close', exact: true }).last().click()
     const closed = (await page.getByRole('dialog').count()) === 0
     const left = await decideRow(page, REPLY_FIRST).count()
-    const ok = rowOk && focused && order && draft.startsWith('Yes. The export uses')
+    const ok = rowOk && staleOk && focused && order && draft.startsWith('Yes. The export uses')
       && original.includes('the file goes to #finance') && replies.includes('ivan') && replies.includes('not sure about hidden columns')
       && replies.includes('replies as of')
       && JSON.stringify(actions) === JSON.stringify(['Send to thread', 'Done without sending', 'Ignore', 'Why? Ask the lead'])
       && escClosed && back && sends.length === 1 && sends[0].body.key.startsWith('C0DEMO2:')
       && !posts.some((p) => p.path.endsWith('/items/reply/draft')) && link.includes('thread_ts=') && closed && left === 0
-    if (!ok) errors.push(`[reply] row ${rowOk} ${JSON.stringify(rowText)} focused ${focused} order ${order} actions ${JSON.stringify(actions)} esc ${escClosed} back ${back} posts ${JSON.stringify(posts)} link ${link} closed ${closed} left ${left}`)
+    if (!ok) errors.push(`[reply] row ${rowOk} ${JSON.stringify(rowText)} stale ${staleOk} ${warning} ${JSON.stringify(newReplies)} ${oldReplies} ${thisBtn} focused ${focused} order ${order} actions ${JSON.stringify(actions)} esc ${escClosed} back ${back} posts ${JSON.stringify(posts)} link ${link} closed ${closed} left ${left}`)
     else console.log('check reply: ok', first, JSON.stringify(actions), JSON.stringify(sends))
+    await ctx.close()
+  }
+  // DOM check: the Needs-you header reads "Re-analyze 2 stale"; ONE click posts the
+  // re-analyze route once with both stale keys and the button then reads Re-analyzing…,
+  // disabled. The dispatched row shows when its thread last moved.
+  {
+    const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, timezoneId: 'UTC', locale: 'en-US' })
+    const page = await ctx.newPage()
+    page.on('pageerror', (e) => errors.push(`[reanalyze] ${e.message}`))
+    await page.goto('http://127.0.0.1:5287/index.html?source=ok')
+    const btn = page.getByTestId('reanalyze')
+    await btn.waitFor({ timeout: 30000 })
+    const label = (await btn.textContent()).trim()
+    const last = await decideRow(page, 'Dashboard renders blank after the latest update').getByTestId('last-reply').textContent()
+    await btn.click()
+    await page.getByTestId('reanalyze').filter({ hasText: 'Re-analyzing…' }).waitFor({ timeout: 5000 })
+    const after = (await btn.textContent()).trim()
+    const disabled = await btn.isDisabled()
+    const posts = await page.evaluate(() => (window.__posts || []).filter((p) => p.path.endsWith('/items/reanalyze')))
+    const others = await page.evaluate(() => (window.__posts || []).filter((p) => !p.path.endsWith('/items/reanalyze')).length)
+    const ok = label === 'Re-analyze 2 stale' && after === 'Re-analyzing…' && disabled && posts.length === 1
+      && posts[0].body.keys.length === 2 && others === 0 && last === ' · replies · last Sep 24 09:55'
+    if (!ok) errors.push(`[reanalyze] label ${label} after ${after} disabled ${disabled} posts ${JSON.stringify(posts)} others ${others} last ${JSON.stringify(last)}`)
+    else console.log('check reanalyze: ok', label, JSON.stringify(posts[0].body.keys), last)
     await ctx.close()
   }
   // DOM check: a row without a draft opens the same view with the original message and
@@ -464,18 +497,22 @@ try {
     const moreShown = (await more.count()) === 1
     await more.click()
     const rows = await decide.getByTestId('need-row').evaluateAll((els) =>
-      els.map((e) => [e.dataset.priority, Number(e.dataset.ageHours)]))
+      els.map((e) => [e.dataset.priority, Number(e.dataset.ageHours), e.dataset.stale]))
     const rank = (p) => ({ p0: 0, p1: 1, p2: 2, p3: 3 })[p] ?? 4
+    // Priority, then a stale draft first, then newest first.
+    const key = ([p, age, stale]) => [rank(p), stale === '1' ? 0 : 1, age]
     let sorted = true
     for (let i = 1; i < rows.length; i++) {
-      const [pa, aa] = rows[i - 1]
-      const [pb, ab] = rows[i]
-      if (rank(pa) > rank(pb) || (rank(pa) === rank(pb) && aa > ab)) sorted = false
+      const a = key(rows[i - 1])
+      const b = key(rows[i])
+      const cmp = a[0] - b[0] || a[1] - b[1] || a[2] - b[2]
+      if (cmp > 0) sorted = false
     }
     const primaries = await decide.getByTestId('need-actions').locator('button:first-child').allTextContents()
     const ages = await decide.getByTestId('need-age').allTextContents()
     const ok = noLedger && before === 5 && moreShown && rows.length === 7 && sorted
-      && JSON.stringify(primaries) === JSON.stringify(['Dispatch fix', 'Done', 'Done', 'Open', 'Dispatch fix', 'Done', 'Decide'])
+      && JSON.stringify(primaries) === JSON.stringify(['Dispatch fix', 'Done', 'Open', 'Done', 'Dispatch fix', 'Done', 'Decide'])
+      && rows.filter((r) => r[2] === '1').length === 1
       && ages.every((a) => / ago$/.test(a))
     if (!ok) errors.push(`[board] ledger words ${ledgerWords} noLedger ${noLedger} before ${before} more ${moreShown} rows ${JSON.stringify(rows)} sorted ${sorted} primaries ${JSON.stringify(primaries)} ages ${JSON.stringify(ages)}`)
     else console.log('check board: ok', JSON.stringify(rows), JSON.stringify(primaries))

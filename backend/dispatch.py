@@ -156,6 +156,44 @@ def slot_state(state: Any, session_key: str) -> tuple[str, Any]:
     return ("running" if getattr(slot, "running", False) else "idle"), slot
 
 
+async def record_states(state: Any, data_dir: Path, ledger: dict[str, Any],
+                        states: dict[str, str] | None = None) -> list[str]:
+    """Store each dispatched session's observed state on ``fix_handoff.dispatch.state``.
+
+    The poller reads it to keep an open fix's thread in the re-check window
+    (``store.dispatch_open``). ``states`` (``{key: state}``) is what the caller already
+    observed; without it each slot is read here. ``unknown`` is never stored. Returns
+    the keys whose stored state changed.
+    """
+    if states is None:
+        states = {}
+        for key, it in (ledger.get("items") or {}).items():
+            h = it.get("fix_handoff") if isinstance(it, dict) else None
+            d = h.get("dispatch") if isinstance(h, dict) else None
+            if isinstance(d, dict) and d.get("session_key"):
+                states[key] = slot_state(state, str(d["session_key"]))[0]
+    items = ledger.get("items") or {}
+    wanted = {
+        k: v for k, v in states.items()
+        if v in store.DISPATCH_STATES and k in items
+        and ((items[k].get("fix_handoff") or {}).get("dispatch") or {}).get("state") != v
+    }
+    if not wanted:
+        return []
+
+    def _store(led: dict[str, Any]) -> list[str]:
+        return [k for k, v in wanted.items() if store.apply_dispatch_state(led, k, v)]
+
+    try:
+        changed = await asyncio.to_thread(store.mutate, data_dir, _store)
+    except (OSError, store.StoreError):
+        logger.debug("slack-radar: could not store a dispatch state", exc_info=True)
+        return []
+    for k in changed:
+        items[k]["fix_handoff"]["dispatch"]["state"] = wanted[k]
+    return changed
+
+
 def _batch_scan(ledger: dict[str, Any], batches: dict[str, list[str]], slots: dict[str, Any]
                 ) -> tuple[dict[str, str], dict[str, list[str]]]:
     """Per batch session: ``({key: pr_url}, {key: [unmatched pr urls]})`` read from its messages."""
@@ -251,4 +289,5 @@ async def observe(state: Any, data_dir: Path, ledger: dict[str, Any]) -> dict[st
                 if u not in logged:
                     logged.add(u)
                     await asyncio.to_thread(store.append_event, data_dir, "dispatch", f"fix batch PR opened: {u}", k)
+    await record_states(state, data_dir, ledger, {k: v["state"] for k, v in out.items()})
     return out

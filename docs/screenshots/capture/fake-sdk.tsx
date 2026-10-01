@@ -70,6 +70,7 @@ const HANDLED = [
 ]
 
 const need = (it: (typeof ITEMS)[number], reason: string, extra: Record<string, unknown> = {}) => ({
+  latest_reply: (it as { latest_reply?: string }).latest_reply || '', needs_reanalysis: false,
   key: it.key, channel: it.channel, permalink: it.permalink, summary: it.summary || it.text.slice(0, 200),
   priority: it.priority, category: it.category, age_hours: Math.round((T0 + 7200 - it.ts_float) / 360) / 10,
   reason, text: it.text, user: it.user, ts_float: it.ts_float,
@@ -111,7 +112,10 @@ const REPLY_ITEM = item(4, 'C0DEMO2', 'hana',
     reply_draft: { text: REPLY_DRAFT, at: T0 + 6200, by: 'lead' },
     replies: [
       { ts: `${T0 + 2700}.000300`, user: 'ivan', text: 'I think filters stay, not sure about hidden columns.' },
+      // Arrived after the Lead's draft: the draft is stale.
+      { ts: `${T0 + 6500}.000500`, user: 'hana', text: 'Just tried it: two hidden columns came through in the file.' },
     ],
+    latest_reply: `${T0 + 6500}.000500`,
   })
 export const REPLY_SENT_LINK = `https://example.slack.com/archives/C0DEMO2/p${T0 + 7200}000400?thread_ts=${REPLY_ITEM.ts_float}.000100`
 // Two more decide rows (no priority, older), so the group shows "Show 2 more".
@@ -125,6 +129,9 @@ const EXTRA_LINKED = item(-1, 'C0DEMO1', 'lee', 'Where do I export the audit log
 })
 ITEMS.push(REPLY_ITEM, EXTRA_RESOLVED, EXTRA_LINKED)
 ITEMS[0].fix_handoff = HANDOFF
+// The dispatched fix's thread moved after the dispatch: one of the two stale items.
+;(ITEMS[3] as { latest_reply?: string }).latest_reply = `${T0 + 6900}.000600`
+;(ITEMS[1] as { latest_reply?: string }).latest_reply = `${T0 + 4200}.000700`
 ITEMS[4].fix_handoff = HANDOFF2
 const dispatched = (it: (typeof ITEMS)[number], title: string, extra: Record<string, unknown>) => ({
   session_key: `chat-${it.ts_float}-1`, title: `Fix: ${title}`, agent: 'kirocrew-conductor',
@@ -135,6 +142,7 @@ const WITH_PR = dispatched(ITEMS[1], 'Add dark mode to the reports view', {
   at: T0 + 3000, state: 'idle', pr_url: 'https://github.com/example-org/example-app/pull/418', pr_number: 418,
 })
 const fixRow = (it: (typeof ITEMS)[number], d: typeof IN_PROGRESS, title = d.title.slice(5)) => ({
+  latest_reply: (it as { latest_reply?: string }).latest_reply || '',
   key: it.key, channel: it.channel, permalink: it.permalink, summary: it.summary, status: it.status,
   handled_how: '', handoff_title: title, repo: 'example-org/example-app', dispatch: d,
 })
@@ -178,12 +186,18 @@ const NEEDS = {
     key: ITEMS[4].key, channel: ITEMS[4].channel, permalink: ITEMS[4].permalink,
     summary: ITEMS[4].text, status: ITEMS[4].status, handled_how: '', handoff: HANDOFF2,
   }],
+  // The stale draft and the dispatched fix whose thread moved: oldest-checked first.
+  reanalyze: { keys: [ITEMS[3].key, REPLY_ITEM.key], total: 2, in_flight: false },
   groups: [
+    // Within p3 the stale draft sorts first; otherwise priority, then newest.
     { id: 'decide', total: 7, entries: [
       need(ITEMS[0], 'Fix ready to hand off', { handoff_title: HANDOFF.title }),
-      need(ITEMS[3], `Fix in progress · ${IN_PROGRESS.title}`, { handoff_title: IN_PROGRESS.title.slice(5), dispatch: IN_PROGRESS }),
+      need(ITEMS[3], `Fix in progress · ${IN_PROGRESS.title}`, { handoff_title: IN_PROGRESS.title.slice(5), dispatch: IN_PROGRESS, needs_reanalysis: true }),
+      need(REPLY_ITEM, 'Reply ready to send', {
+        reply_draft: REPLY_DRAFT, needs_reanalysis: true,
+        reply_draft_stale: { since: `${T0 + 6500}.000500`, new_replies: 1 },
+      }),
       need(ITEMS[2], 'Looks resolved: reply says “thanks”'),
-      need(REPLY_ITEM, 'Reply ready to send', { reply_draft: REPLY_DRAFT }),
       need(ITEMS[4], 'Fix ready to hand off', { handoff_title: HANDOFF2.title }),
       need(EXTRA_RESOLVED, 'Looks resolved: reply says “working again”'),
       need(EXTRA_LINKED, 'Matching GitHub work found'),
@@ -311,6 +325,9 @@ const api = {
       const keys = (body as { keys?: string[] })?.keys || []
       return { ok: true, mode: 'server', session_key: 'chat-88-1', title: `Fix batch: ${keys.length} problems (example-org/example-app)`,
         agent: 'kirocrew-conductor', at: T0 + 7000, trusted: false, why: 'unattended mode is off', batch: true, batch_keys: keys }
+    }
+    if (path.endsWith('/items/reanalyze')) {
+      return { ok: true, keys: (body as { keys?: string[] })?.keys || [], requested_at: T0 + 7100, started: true }
     }
     if (path.endsWith('/items/reply/send')) {
       return { ok: true, item: { key: (body as { key?: string })?.key, replied: { ts: `${T0 + 7200}.000400`, at: T0 + 7200, text: REPLY_DRAFT, permalink: REPLY_SENT_LINK } } }

@@ -1,6 +1,6 @@
 {
   "name": "slack-radar",
-  "version": "0.9.5",
+  "version": "0.9.6",
   "displayName": "Slack Radar",
   "description": "A Slack triage crew that remembers, reading with your own Slack identity through your Slack MCP — no bot, no invite. Watches the channels you choose, classifies every new message as a bug report, feature request, question, already-answered or noise with a priority, links clusters to existing GitHub issues and PRs, notices when a thread looks resolved, and sends you a daily digest — keeping everything in a local ledger so nothing is triaged twice.",
   "author": "iamwhatever",
@@ -27,7 +27,8 @@
     "Today at the top of the Board: the Lead's line and the latest digest in one card with Digest now; the Lead chat bar waits at the bottom",
     "A reply ready to send opens a detail view first: the original message and its thread replies, then the Lead's draft and Send to thread",
     "Dispatch fix is one click on the row, and the result stays there: Dispatched, the session's state, Open session and the PR; Dispatch all fixes sends the whole group in one click",
-    "Under unattended mode a dispatched conductor session, and the workers it opens, are trusted the way the crew is; pausing the crew or turning unattended off takes it away within a poll"
+    "Under unattended mode a dispatched conductor session, and the workers it opens, are trusted the way the crew is; pausing the crew or turning unattended off takes it away within a poll",
+    "Drafts and fixes stay watched: a draft overtaken by new thread replies is marked stale on its row and above Send, and Re-analyze N stale asks the Lead to rewrite them; nothing regenerates on its own"
   ],
   "defaultEnabled": false,
   "platform": {

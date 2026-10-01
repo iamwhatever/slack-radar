@@ -73,7 +73,8 @@ MAX_ITEMS = 2000
 #: Thread replies kept on an item (LOCAL, poller-owned): the newest N, each clipped.
 MAX_REPLIES = 5
 MAX_REPLY_TEXT = 400
-#: Replies are dropped from an item older than this, or one that left OPEN_STATUSES.
+#: Replies are dropped from an item older than this, or one that left OPEN_STATUSES,
+#: unless the item is pinned (:func:`is_pinned`).
 REPLIES_MAX_AGE_DAYS = 7
 MAX_EVENTS_BYTES = 2 * 1024 * 1024
 #: ``fix_handoff`` (LOCAL, Lead-written): a task for a coding session the owner starts.
@@ -88,6 +89,10 @@ HANDOFF_NO_MERGE = "Do not merge; open a PR for review"
 MAX_REPLY_DRAFT = 1500
 #: One send attempt per item per this many seconds.
 REPLY_SEND_GAP_SECS = 60.0
+#: Items one owner Re-analyze click hands the Lead.
+REANALYZE_MAX_KEYS = 20
+#: A re-analysis counts as in flight until each item moves, or for this long.
+REANALYZE_INFLIGHT_SECS = 600.0
 
 _KEY_RE = re.compile(r"^[CGD][A-Z0-9]{2,20}:\d{9,11}\.\d{6}$")
 _CHANNEL_RE = re.compile(r"^[CGD][A-Z0-9]{2,20}$")
@@ -314,6 +319,12 @@ def _coerce_ledger(raw: Any) -> dict[str, Any]:
         base["crew_memory"]["today"] = {"text": "", "at": 0.0}
     for key, default in empty_ledger()["digest"].items():
         base["digest"].setdefault(key, default)
+    items = base["items"] if isinstance(base["items"], dict) else {}
+    for it in items.values():
+        # A draft written before staleness was tracked is judged once, from what the
+        # item already holds; from then on the thread re-check keeps it current.
+        if isinstance(it, dict) and has_reply_draft(it) and "stale" not in it["reply_draft"]:
+            refresh_draft_stale(it)
     return base
 
 
@@ -336,12 +347,13 @@ def _prune(ledger: dict[str, Any], retention_days: int = 30) -> None:
     """Drop closed items past retention, then cap the total (oldest closed first).
 
     Also drops the kept thread ``replies`` from every item that is closed or older than
-    :data:`REPLIES_MAX_AGE_DAYS`, so reply text is bounded to open, recent items.
+    :data:`REPLIES_MAX_AGE_DAYS` and not pinned, so reply text is bounded to open, recent
+    items and to the ones the owner still has work on.
     """
     items: dict[str, dict[str, Any]] = ledger.get("items") or {}
     replies_horizon = now() - REPLIES_MAX_AGE_DAYS * 86400
     for it in items.values():
-        if it.get("replies") and (
+        if it.get("replies") and not is_pinned(it) and (
             it.get("status") not in OPEN_STATUSES or float(it.get("ts_float") or 0) < replies_horizon
         ):
             it["replies"] = []
@@ -468,6 +480,104 @@ def normalize_replies(replies: list[dict[str, Any]]) -> list[dict[str, Any]]:
         }
         for r in rows[-MAX_REPLIES:]
     ]
+
+
+# ── the re-check window: pinned items ──────────────────────────────────────
+
+
+def dispatch_open(item: dict[str, Any]) -> bool:
+    """A fix the owner dispatched whose session was not last seen closed.
+
+    ``fix_handoff.dispatch.state`` is the session state the gateway last observed
+    (``dispatch.record_states``); a dispatch never observed counts as open.
+    """
+    h = item.get("fix_handoff")
+    d = h.get("dispatch") if isinstance(h, dict) else None
+    return isinstance(d, dict) and bool(d.get("session_key")) and d.get("state") != "closed"
+
+
+def is_pinned(item: dict[str, Any]) -> bool:
+    """The owner still has work on this item, so its thread stays watched.
+
+    Pinned while it has an unsent ``reply_draft``, an open dispatched fix, or status
+    ``investigating``. A pinned item is re-checked whatever its status and age, and
+    keeps its ``replies``.
+    """
+    return has_reply_draft(item) or dispatch_open(item) or item.get("status") == "investigating"
+
+
+def _ts(value: Any) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def refresh_draft_stale(item: dict[str, Any], reply_ts: list[str] | None = None) -> None:
+    """Set or clear ``reply_draft.stale`` from the thread replies newer than the draft.
+
+    ``reply_ts`` is every reply ts the re-check just read; without it the item's kept
+    ``replies`` and ``latest_reply`` stand in. ``stale`` is ``{since, new_replies}``:
+    the first newer reply's ts and how many replies are newer than ``reply_draft.at``.
+    """
+    if not has_reply_draft(item):
+        return
+    draft = item["reply_draft"]
+    at = _ts(draft.get("at"))
+    if reply_ts is None:
+        reply_ts = [str(r.get("ts") or "") for r in item.get("replies") or [] if isinstance(r, dict)]
+        latest = str(item.get("latest_reply") or "")
+        if latest and latest not in reply_ts:
+            reply_ts.append(latest)
+    newer = sorted({t for t in reply_ts if t and _ts(t) > at}, key=_ts)
+    draft["stale"] = {"since": newer[0], "new_replies": len(newer)} if newer else None
+
+
+def draft_stale(item: dict[str, Any]) -> dict[str, Any] | None:
+    """``reply_draft.stale`` when the draft is stale, else None."""
+    if not has_reply_draft(item):
+        return None
+    stale = item["reply_draft"].get("stale")
+    return stale if isinstance(stale, dict) and stale.get("new_replies") else None
+
+
+def needs_reanalysis(item: dict[str, Any]) -> bool:
+    """An open item the Lead's last view of is out of date (the Re-analyze button counts these).
+
+    A stale draft; a draft whose thread moved since the Lead last recorded the item; or
+    a dispatched fix whose thread moved after the dispatch.
+    """
+    if item.get("status") not in OPEN_STATUSES:
+        return False
+    if draft_stale(item):
+        return True
+    if not item.get("thread_changed"):
+        return False
+    if has_reply_draft(item):
+        return True
+    h = item.get("fix_handoff")
+    d = h.get("dispatch") if isinstance(h, dict) else None
+    return isinstance(d, dict) and bool(d.get("session_key")) and _ts(item.get("latest_reply")) > _ts(d.get("at"))
+
+
+def reanalyze_in_flight(item: dict[str, Any], now_: float) -> bool:
+    """The owner asked for a re-analysis and the item has not moved since, within the window."""
+    at = _ts(item.get("reanalyze_requested_at"))
+    return bool(at) and _ts(item.get("updated_at")) <= at and now_ - at < REANALYZE_INFLIGHT_SECS
+
+
+def apply_reanalyze_requested(ledger: dict[str, Any], keys: list[str], at: float | None) -> list[str]:
+    """Stamp (or, with ``at=None``, clear) ``reanalyze_requested_at``. Returns the keys found.
+
+    ``updated_at`` is left alone: the stamp is what it is compared against.
+    """
+    found: list[str] = []
+    for key in keys:
+        item = (ledger.get("items") or {}).get(key)
+        if isinstance(item, dict):
+            item["reanalyze_requested_at"] = float(at or 0.0)
+            found.append(key)
+    return found
 
 
 # ── crew record ────────────────────────────────────────────────────────────
@@ -761,6 +871,21 @@ def apply_dispatch(ledger: dict[str, Any], key: str, dispatch: dict[str, Any]) -
     return item
 
 
+#: Session states ``fix_handoff.dispatch.state`` may hold.
+DISPATCH_STATES = frozenset({"running", "idle", "closed"})
+
+
+def apply_dispatch_state(ledger: dict[str, Any], key: str, state: str) -> bool:
+    """Store the dispatched session's observed state. True when it changed."""
+    item = (ledger.get("items") or {}).get(key)
+    h = item.get("fix_handoff") if isinstance(item, dict) else None
+    d = h.get("dispatch") if isinstance(h, dict) else None
+    if not isinstance(d, dict) or state not in DISPATCH_STATES or d.get("state") == state:
+        return False
+    d["state"] = state
+    return True
+
+
 def apply_fix_pr(ledger: dict[str, Any], key: str, url: str) -> bool:
     """Store the PR a dispatched session reported, once. True when it was new."""
     item = (ledger.get("items") or {}).get(key)
@@ -909,7 +1034,9 @@ def apply_crew_record(ledger: dict[str, Any], payload: dict[str, Any]) -> dict[s
         if "links" in row:
             links = [str(u) for u in (row["links"] or []) if isinstance(u, str) and _URL_RE.match(u)]
             item["links"] = links[:MAX_LINKS]
-        if "reply_draft" in row:
+        if isinstance(row.get("reply_draft"), dict) and "stale" in row["reply_draft"]:
+            problems.append("reply_draft.stale is set by the app, never by the record tool")
+        elif "reply_draft" in row:
             draft, why = reply_draft_value(ledger, item, row["reply_draft"], by="lead")
             if why:
                 problems.append(why)
@@ -1059,7 +1186,7 @@ def reply_draft_value(
             return None, f"reply_draft is sent to Slack and {why}"
         if _quotes_other_channel(ledger, item, text):
             return None, "reply_draft is sent to this item's thread and may not name or quote another channel"
-    return {"text": text, "at": now(), "by": "owner" if by == "owner" else "lead"}, ""
+    return {"text": text, "at": now(), "by": "owner" if by == "owner" else "lead", "stale": None}, ""
 
 
 def has_reply_draft(item: dict[str, Any]) -> bool:
@@ -1168,6 +1295,7 @@ def pending_view(ledger: dict[str, Any], limit: int = 40) -> dict[str, Any]:
         if with_text:
             out["text"] = it.get("text")
         out["reply_draft"] = (it.get("reply_draft") or {}).get("text") if has_reply_draft(it) else None
+        out["reply_draft_stale"] = draft_stale(it)
         out["replied"] = bool(it.get("replied"))
         if with_replies:
             out["replies"] = [

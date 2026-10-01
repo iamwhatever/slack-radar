@@ -30,7 +30,10 @@ KiroCrew's built-in Issue Radar app.
    threads and flags *possibly resolved* ones (a ✅ reaction, a "fixed",
    "merged" or "thanks" reply, a deleted parent). Code never closes an item.
    After a poll that leaves new flags, one Thread Watcher run judges them all
-   for the lead and records resolved or not.
+   for the lead and records resolved or not. An item you still have work on
+   stays in the window whatever its status or age, and goes first: one with an
+   unsent reply draft, a dispatched fix whose session is still open, or an
+   investigation.
 6. **Digest.** When a digest is requested, the lead picks the top items and
    writes a headline. The gateway renders the text from the ledger and delivers
    it as a DM to yourself or as a dashboard notification, and keeps the text as
@@ -193,6 +196,10 @@ With two or more fixes waiting, press **Dispatch all fixes (N)** in the *Needs a
 
 When a question has a clear answer in the ledger or its links, or a bug report deserves an acknowledgement with the linked issue or PR, the Radar Lead drafts a short reply in the poster's language. The row shows up under *Needs a decision* marked "Reply ready", with the first line of the original message and an **Open** button; the draft is not in the list. **Open** shows the detail view in this order: the original message in full, the thread replies so far ("No replies yet" when there are none; "replies as of HH:MM" when the last thread check is over an hour old), then the Lead's draft in an editable box with who wrote it and when. Read the question, then press **Send to thread**: it goes out in that message's thread under your own name, through your Slack MCP; the view shows a link to the sent reply, the row leaves the list and the item counts as done. The view also has *Done without sending*, *Ignore* and *Why? Ask the lead*.
 
+When replies arrive in the thread after the draft was written, the draft is stale. The row shows *N new replies since draft* next to "Reply ready" and sorts above the other rows of its priority. The detail view marks each newer reply **new** and says *N replies arrived after this draft — read them first* above **Send to thread**. Send still works with one click. The Lead does not rewrite a draft by itself: after its first look, a draft changes only when you ask.
+
+**Re-analyze N stale** at the top of *Needs you* is that ask. It counts the open items whose threads moved after the Lead's last look: a stale draft, a draft whose thread changed, or a dispatched fix whose thread moved after the dispatch. One click hands the Lead one turn with those items (up to 20, oldest-checked first; the button then reads *Re-analyze 20 of N stale*), each with its original message, the replies newer than the draft, the draft and the fix's state. The Lead rewrites the draft, withdraws it when the thread already answered it, or marks the item resolved when the thread shows the fix landed, and notes why. Nothing is sent to Slack. The button reads *Re-analyzing…* until every item it named moves, or 10 minutes pass; a second click meanwhile is refused. The detail view of a stale item has **Re-analyze this** for one item. A row with a dispatched fix shows *replies · last 16:54*, when its thread last moved.
+
 ![Reply detail view](docs/screenshots/reply-detail.png)
 
  **Replied (N)** under the list shows what you sent, with a link to each reply. The Lead never posts: nothing reaches Slack without your click, one send per item per minute, and sending waits while Slack needs you to sign in again.
@@ -224,7 +231,7 @@ are written only through the owner-gated Settings page.
 | `workspace_url` | empty | `https://yourteam.slack.com`, used only to build permalinks |
 | `poll_interval_secs` | `300` | Seconds between polls, 60–3600 |
 | `backfill_hours` | `24` | How far back the first poll reads, 0–168 |
-| `recheck_days` | `7` | How old a thread can be and still be re-checked, 1–30. No UI field |
+| `recheck_days` | `7` | How old a thread can be and still be re-checked, 1–30. An item with an unsent draft, an open dispatched fix or an investigation is re-checked past it. No UI field |
 | `recheck_max_per_cycle` | `20` | Threads re-checked per cycle, 0–50. No UI field |
 
 The Crew part of **Settings → Advanced** writes the crew record (`crew.json` in the app data dir), not the
@@ -405,6 +412,8 @@ Slack Radar 是一个“有记性”的 Slack 分诊小组。它通过你自己�
 5. **线程复查。** 每一轮，轮询器会在有限的窗口内重读仍打开的线程，把“可能已解决”的标出来
    （✅ 表情、“fixed”“merged”“thanks”之类的回复、原消息被删除）。代码从不自行关闭条目。
    一次轮询留下新标记后，由一次线程观察员运行替组长统一判断，并记下是否已解决。
+   你手上还有事的条目不论状态和发帖时间，都留在窗口里，并且排在前面：有未发送回复草稿的、
+   有会话仍开着的已派发修复的、正在调查的。
 6. **摘要。** 请求摘要时，组长挑出最重要的条目并写一句标题；网关从台账渲染出正文，
    以私信发给你自己，或作为仪表盘通知送达，并把正文留作看板上的“最近一次摘要”。
    `daily-digest` 定时任务每个工作日 UTC 16:00 请求一份。
@@ -494,6 +503,10 @@ kirocrew app enable slack-radar
 
 当一个问题在台账或链接里已有明确答案，或一个 bug 报告值得回一句并附上关联的 issue 或 PR 时，雷达组长会用发帖人的语言起草一条简短的回复。这一行会出现在 *Needs a decision* 里，标着 "Reply ready"，显示原消息的第一行和一个 **Open** 按钮；列表里不显示草稿。点 **Open** 打开详情，顺序是：完整的原消息，目前为止的线程回复（没有时写 "No replies yet"；最近一次线程检查超过一小时时写 "replies as of HH:MM"），然后是组长的草稿，放在可编辑的输入框里，写明是谁、什么时候写的。先读问题，再点 **Send to thread**：它就以你自己的名义、通过你的 Slack MCP 发到那条消息的线程里；详情里会显示发出的回复的链接，这一行离开列表，条目算作已完成。详情里还有 *Done without sending*、*Ignore* 和 *Why? Ask the lead*。
 
+草稿写好之后线程里又来了新回复，草稿就过时了。这一行会在 "Reply ready" 旁边显示 *N new replies since draft*，并排在同一优先级的其他行前面。详情里每条更新的回复标着 **new**，**Send to thread** 上方写着 *N replies arrived after this draft — read them first*。发送仍然是一次点击。组长不会自己重写草稿：第一次看过之后，只有你开口，草稿才会变。
+
+*Needs you* 顶部的 **Re-analyze N stale** 就是开口的方式。它数的是线程在组长上次看过之后又动了的未关闭条目：过时的草稿、线程有变化的草稿、派发之后线程又动了的修复。点一次，组长得到一轮，只处理这些条目（最多 20 个，最久没复查的在前；超过时按钮写 *Re-analyze 20 of N stale*），每个都带原消息、草稿之后的回复、草稿和修复状态。组长会重写草稿，线程已经回答了就撤回草稿，线程显示修复已上线就标为已解决，并写下理由。什么都不会发到 Slack。在它点名的每个条目都有变化之前（最多 10 分钟），按钮显示 *Re-analyzing…*，这期间再点会被拒绝。过时条目的详情里有 **Re-analyze this**，只处理这一条。有已派发修复的行会显示 *replies · last 16:54*，即线程最近一次变化的时间。
+
 ![回复详情](docs/screenshots/reply-detail.png)
 
 列表下面的 **Replied (N)** 显示你发过的回复，每条带链接。组长从不发消息：没有你的点击，什么都不会到达 Slack；每个条目每分钟最多发一次；Slack 需要重新登录时不能发送。
@@ -524,7 +537,7 @@ kirocrew app enable slack-radar
 | `workspace_url` | 空 | `https://yourteam.slack.com`，只用来生成消息链接 |
 | `poll_interval_secs` | `300` | 两次轮询间隔的秒数，60–3600 |
 | `backfill_hours` | `24` | 首次轮询回溯的小时数，0–168 |
-| `recheck_days` | `7` | 多久以内的线程仍会被复查（天），1–30。界面上没有对应字段 |
+| `recheck_days` | `7` | 多久以内的线程仍会被复查（天），1–30。有未发送草稿、开着的已派发修复或正在调查的条目超过这个时间也会复查。界面上没有对应字段 |
 | `recheck_max_per_cycle` | `20` | 每轮最多复查的线程数，0–50。界面上没有对应字段 |
 
 **Settings → Advanced** 里的 Crew 部分写入的是小组记录（应用数据目录下的 `crew.json`），而不是保险库：`agent`
