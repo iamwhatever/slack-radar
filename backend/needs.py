@@ -13,6 +13,10 @@ Three groups, in this order:
 * ``clusters``   — two or more open items in one channel that share at least two
   significant summary words, one entry per cluster.
 
+Within one priority, a row whose reply draft is stale (``reply_draft.stale``) comes
+first; otherwise newest first. ``reanalyze`` names the open items the Board's
+Re-analyze button sends the Lead (``store.needs_reanalysis``).
+
 An item the owner marked handled (``handled_at > 0``) is in none of them. An item lands
 in at most one of ``decide`` / ``unanswered`` (``decide`` wins); a cluster may name
 items that also appear above, because it answers a different question.
@@ -95,6 +99,12 @@ def _rank(item: dict[str, Any], now: float) -> tuple[int, float]:
     return (_PRIORITY_RANK.get(str(item.get("priority") or ""), 4), -posted_at(item))
 
 
+def _decide_rank(item: dict[str, Any], now: float) -> tuple[int, int, float]:
+    """``_rank`` with a stale draft ahead of the rest of its priority."""
+    p, newest = _rank(item, now)
+    return (p, 0 if store.draft_stale(item) else 1, newest)
+
+
 def _float(v: Any) -> float:
     try:
         return float(v or 0)
@@ -115,6 +125,7 @@ def _draft_meta(item: dict[str, Any]) -> dict[str, Any]:
         "reply_draft": str(d.get("text") or ""),
         "reply_draft_by": "owner" if d.get("by") == "owner" else "lead",
         "reply_draft_at": _float(d.get("at")),
+        "reply_draft_stale": store.draft_stale(item),
     }
 
 
@@ -135,6 +146,9 @@ def _entry(item: dict[str, Any], now: float, reason: str,
         "ts_float": posted_at(item),
         "replies": _thread_replies(item),
         "last_thread_check_at": _float(item.get("last_thread_check_at")),
+        "latest_reply": str(item.get("latest_reply") or ""),
+        "needs_reanalysis": store.needs_reanalysis(item),
+        "reanalyze_requested_at": _float(item.get("reanalyze_requested_at")),
         **({"handoff_title": item["fix_handoff"].get("title") or ""} if has_handoff(item) else {}),
         **(_draft_meta(item) if store.has_reply_draft(item) else {}),
         **({"dispatch": fix_view(item, fix_live)} if dispatch_of(item) else {}),
@@ -283,6 +297,7 @@ def fix_entry(item: dict[str, Any], fix_live: dict[str, dict[str, Any]] | None =
         "handled_how": item.get("handled_how") or "",
         "handoff_title": item["fix_handoff"].get("title") or "",
         "repo": item["fix_handoff"].get("repo") or "",
+        "latest_reply": str(item.get("latest_reply") or ""),
         "dispatch": fix_view(item, fix_live),
     }
 
@@ -416,7 +431,7 @@ def build_needs(
             decide.append((it, why))
         elif is_unanswered(it, t):
             unanswered.append(it)
-    decide.sort(key=lambda pair: _rank(pair[0], t))
+    decide.sort(key=lambda pair: _decide_rank(pair[0], t))
     unanswered.sort(key=lambda it: _rank(it, t))
     # Clusters: best member priority, then size, then the newest member first.
     ranked = sorted(
@@ -444,6 +459,10 @@ def build_needs(
         key=lambda it: (-float((dispatch_of(it) or {}).get("at") or 0), str((dispatch_of(it) or {}).get("session_key"))),
     )
     replied, replied_total = replied_rows(ledger)
+    stale = sorted(
+        (it for it in pool if store.needs_reanalysis(it)),
+        key=lambda it: (_float(it.get("last_thread_check_at")), str(it.get("key") or "")),
+    )
     fix_rows = [fix_entry(it, fix_live) for it in fixes[:FIXES_CAP]]
     return {
         "replied": replied,
@@ -455,4 +474,22 @@ def build_needs(
         "handled_total": handled,
         "handoffs": [handoff_entry(it) for it in handoffs[:HANDOFF_CAP]],
         "handoffs_total": len(handoffs),
+        "reanalyze": reanalyze_view(ledger, stale, t),
+    }
+
+
+def reanalyze_view(ledger: dict[str, Any], stale: list[dict[str, Any]], now: float) -> dict[str, Any]:
+    """The Re-analyze button: ``{keys, total, in_flight}``.
+
+    ``keys`` are the stale open items the button sends, the oldest-checked
+    :data:`store.REANALYZE_MAX_KEYS`; ``in_flight`` is true while any item the owner
+    asked about has not moved yet (``store.reanalyze_in_flight``).
+    """
+    in_flight = any(
+        isinstance(it, dict) and store.reanalyze_in_flight(it, now) for it in (ledger.get("items") or {}).values()
+    )
+    return {
+        "keys": [str(it.get("key") or "") for it in stale[: store.REANALYZE_MAX_KEYS]],
+        "total": len(stale),
+        "in_flight": in_flight,
     }

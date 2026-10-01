@@ -43,6 +43,11 @@ type NeedEntry = {
   reply_draft?: string
   reply_draft_by?: 'lead' | 'owner'
   reply_draft_at?: number
+  // Set by the thread re-check when replies arrived after the draft (store.py `reply_draft.stale`).
+  reply_draft_stale?: DraftStale | null
+  // The thread's newest reply ts, and whether the Lead's view of the item is out of date.
+  latest_reply?: string
+  needs_reanalysis?: boolean
   dispatch?: FixDispatch
   // The original Slack message and its kept thread replies (oldest first).
   text?: string
@@ -52,6 +57,9 @@ type NeedEntry = {
   last_thread_check_at?: number
 }
 type ThreadReply = { ts: string; user: string; text: string }
+type DraftStale = { since: string; new_replies: number }
+// The Re-analyze button (needs.py `reanalyze_view`): the keys it sends, of how many.
+type Reanalyze = { keys: string[]; total: number; in_flight: boolean }
 type NeedGroup = { id: 'decide' | 'unanswered' | 'clusters'; total: number; entries: NeedEntry[] }
 // A fix task the Lead wrote for a coding session (store.py `fix_handoff`, LOCAL).
 type FixHandoff = { title: string; prompt: string; repo: string; links: string[]; at: number }
@@ -101,6 +109,7 @@ type FixRow = {
   handled_how: string
   handoff_title: string
   repo: string
+  latest_reply?: string
   dispatch: FixDispatch
 }
 type Needs = {
@@ -113,6 +122,7 @@ type Needs = {
   fix_batches?: FixBatch[]
   replied?: RepliedRow[]
   replied_total?: number
+  reanalyze?: Reanalyze
 }
 // A reply the owner sent to a thread (store.py `replied`).
 type RepliedRow = { key: string; channel: string; summary: string; text: string; at: number; permalink: string }
@@ -1019,6 +1029,15 @@ const hhmm = (t: number) => new Date(t * 1000).toLocaleTimeString([], { hour: '2
 // Thread replies older than this read as "replies as of HH:MM".
 const REPLIES_STALE_SECS = 3600
 
+const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`
+
+// "replies · last 16:54" (an older day adds its date): when the thread of a dispatched fix last moved.
+function LastReply({ ts }: { ts?: string }) {
+  const t = Number(ts || 0)
+  if (!t) return null
+  return <span data-testid="last-reply"> · replies · last {hm(t)}</span>
+}
+
 // What a row shows once its fix went out: from `/needs` (`dispatch`, with the live
 // session state) or, until the next refresh, from the dispatch reply itself.
 type RowSent = {
@@ -1100,6 +1119,7 @@ function NeedRow({
       data-testid="need-row"
       data-priority={e.priority || ''}
       data-age-hours={e.age_hours}
+      data-stale={e.reply_draft_stale ? '1' : '0'}
       style={{ padding: '8px 0', borderTop: first ? 0 : '1px solid var(--border)' }}
     >
       <div className="flex items-start gap-2">
@@ -1116,6 +1136,13 @@ function NeedRow({
               <>
                 <div style={{ color: 'var(--text-strong)' }}>
                   <span data-testid="reply-ready"><Badge variant="aim">Reply ready</Badge></span>{' '}
+                  {e.reply_draft_stale && (
+                    <>
+                      <span data-testid="draft-stale">
+                        <Badge variant="warn">{plural(e.reply_draft_stale.new_replies, 'new reply', 'new replies')} since draft</Badge>
+                      </span>{' '}
+                    </>
+                  )}
                   <span data-testid="need-first-line">{firstLine(e.text || e.summary) || '(no text)'}</span>
                 </div>
                 <div className="text-xs text-muted" style={{ marginTop: 2 }}>
@@ -1151,6 +1178,7 @@ function NeedRow({
                   </a>
                 </>
               )}
+              <LastReply ts={e.latest_reply} />
             </div>
           )}
           {sent && sent.trusted === false && (sent.state === 'running' || sent.state === 'idle') && (
@@ -1231,10 +1259,12 @@ function NeedDetail({
   onDispatch,
   busy,
   sentHere,
+  reanalyze,
 }: {
   e: NeedEntry
   groupId: NeedGroup['id']
   sentHere?: boolean
+  reanalyze?: ReanalyzeCtl
   onClose: () => void
   onSend: (text: string, edited: boolean) => Promise<SendResult>
   onMark: (how: HandleHow) => void
@@ -1255,6 +1285,9 @@ function NeedDetail({
   const headId = `sr-detail-${safe}`
   const boxId = `sr-reply-${safe}`
   const replies = e.replies || []
+  const draftAt = e.reply_draft_at || 0
+  const isNew = (r: ThreadReply) => !!e.reply_draft && draftAt > 0 && Number(r.ts) > draftAt
+  const newCount = e.reply_draft_stale?.new_replies || 0
   const checked = e.last_thread_check_at || 0
   const stale = checked > 0 && Date.now() / 1000 - checked > REPLIES_STALE_SECS
 
@@ -1374,8 +1407,21 @@ function NeedDetail({
           ) : (
             <ol className="flex flex-col" style={{ margin: 0, padding: 0, listStyle: 'none' }}>
               {replies.map((r, i) => (
-                <li key={`${r.ts}-${i}`} style={{ padding: '4px 0', borderTop: i === 0 ? 0 : '1px solid var(--border)' }}>
+                <li
+                  key={`${r.ts}-${i}`}
+                  data-testid={isNew(r) ? 'reply-new' : 'reply-old'}
+                  style={{
+                    padding: isNew(r) ? '4px 0 4px 8px' : '4px 0',
+                    borderTop: i === 0 ? 0 : '1px solid var(--border)',
+                    ...(isNew(r) ? { borderLeft: '3px solid var(--warn, #d97706)' } : {}),
+                  }}
+                >
                   <div className="text-xs text-muted">
+                    {isNew(r) && (
+                      <>
+                        <Badge variant="warn">new</Badge>{' '}
+                      </>
+                    )}
                     {r.user || 'someone'} · {fmtTime(Number(r.ts))}
                   </div>
                   <div style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{slackPlain(r.text)}</div>
@@ -1421,6 +1467,22 @@ function NeedDetail({
         )}
 
         {failed && <ErrorNotice message={`Could not send that reply: ${failed}`} onRetry={send} />}
+
+        {reply && newCount > 0 && sentLink === null && (
+          <p role="status" data-testid="draft-stale-warning" className="text-sm" style={{ ...section, marginBottom: 0, color: 'var(--text-strong)' }}>
+            {newCount === 1 ? '1 reply arrived after this draft — read it first' : `${newCount} replies arrived after this draft — read them first`}
+          </p>
+        )}
+        {e.needs_reanalysis && reanalyze && sentLink === null && (
+          <div style={section} data-testid="detail-reanalyze">
+            <Btn style={small} disabled={reanalyze.busy || reanalyze.inFlight} onClick={() => reanalyze.run([e.key], e.key)}>
+              {reanalyze.inFlight || reanalyze.busy ? 'Re-analyzing…' : 'Re-analyze this'}
+            </Btn>
+            {reanalyze.failed && reanalyze.failed.from === e.key && (
+              <ErrorNotice message={reanalyze.failed.why} onRetry={() => reanalyze.run(reanalyze.failed!.keys, e.key)} />
+            )}
+          </div>
+        )}
 
         {sentLink !== null ? (
           <div style={section} className="flex flex-wrap items-center gap-2">
@@ -1648,6 +1710,44 @@ function useDispatchFix(onChanged: () => void): {
 // Fixes one batch may carry (backend/handoff.py `MAX_BATCH`).
 const MAX_BATCH = 10
 
+// Re-analyze: ONE click hands the Radar Lead the named items for one turn, in which it
+// rewrites or withdraws each draft against the thread. It is the only way a draft
+// changes after the Lead's first look; nothing runs it on a timer.
+type ReanalyzeCtl = {
+  run: (keys: string[], from: string) => void
+  busy: boolean
+  inFlight: boolean
+  failed: { keys: string[]; from: string; why: string } | null
+}
+
+function useReanalyze(needs: Needs | null, onChanged: () => void): ReanalyzeCtl {
+  const api = useAppApi()
+  const [busy, setBusy] = useState(false)
+  // Sent here, until the next /needs says whether it is still in flight.
+  const [asked, setAsked] = useState(false)
+  const [failed, setFailed] = useState<ReanalyzeCtl['failed']>(null)
+  useEffect(() => setAsked(false), [needs])
+  const run = async (keys: string[], from: string) => {
+    if (busy || keys.length === 0) return
+    setFailed(null)
+    setBusy(true)
+    try {
+      await api.post(`${BASE}/items/reanalyze`, { keys })
+      setAsked(true)
+      onChanged()
+    } catch (err) {
+      const b = errorBody(err)
+      const why = b.code === 'reanalyze_in_flight'
+        ? 'The Radar Lead is still re-analyzing the last request. Nothing new was sent.'
+        : `Could not ask the Radar Lead to re-analyze: ${b.error || 'the gateway refused it'}. Nothing was sent.`
+      setFailed({ keys, from, why })
+    } finally {
+      setBusy(false)
+    }
+  }
+  return { run, busy, inFlight: asked || !!needs?.reanalyze?.in_flight, failed }
+}
+
 function NeedsCard({
   needs,
   handled,
@@ -1661,6 +1761,9 @@ function NeedsCard({
 }) {
   const api = useAppApi()
   const fixer = useDispatchFix(onChanged)
+  const reanalyze = useReanalyze(needs, onChanged)
+  const ra = needs?.reanalyze
+  const raLabel = !ra ? '' : ra.total > ra.keys.length ? `Re-analyze ${ra.keys.length} of ${ra.total} stale` : `Re-analyze ${ra.total} stale`
   const fixes = needs?.fixes || []
   const batches = needs?.fix_batches || []
   const batchOf = new Map(batches.map((b) => [b.session_key, b]))
@@ -1735,7 +1838,30 @@ function NeedsCard({
     <Card className="mb-4">
       <div className="flex items-center gap-2">
         <CardTitle>Needs you</CardTitle>
+        <div className="flex-1" />
+        {ra && (ra.total > 0 || reanalyze.inFlight) && (
+          <Btn
+            primary
+            style={small}
+            data-testid="reanalyze"
+            title="Ask the Radar Lead to re-read these threads and rewrite or withdraw each draft. Nothing is sent to Slack."
+            disabled={reanalyze.busy || reanalyze.inFlight || ra.keys.length === 0}
+            onClick={() => reanalyze.run(ra.keys, 'card')}
+          >
+            {reanalyze.busy || reanalyze.inFlight ? (
+              <>
+                <span className="sr-spin" aria-hidden />
+                Re-analyzing…
+              </>
+            ) : (
+              raLabel
+            )}
+          </Btn>
+        )}
       </div>
+      {reanalyze.failed && reanalyze.failed.from === 'card' && (
+        <ErrorNotice message={reanalyze.failed.why} onRetry={() => reanalyze.run(reanalyze.failed!.keys, 'card')} />
+      )}
       {failed && (
         <ErrorNotice
           message={`Could not ${verb} that message. Nothing changed.`}
@@ -1865,6 +1991,7 @@ function NeedsCard({
                         </>
                       )}
                       {pr}
+                      <span className="text-xs text-muted"><LastReply ts={f.latest_reply} /></span>
                     </span>
                     <Btn style={small} onClick={() => dismiss(f.key)}>Dismiss</Btn>
                   </div>
@@ -1937,6 +2064,7 @@ function NeedsCard({
           onWhy={() => onWhy(detail.e)}
           onDispatch={detail.groupId === 'decide' && detail.e.handoff_title ? () => fixer.dispatch(detail.e.key) : undefined}
           busy={fixer.busy.has(detail.e.key)}
+          reanalyze={reanalyze}
         />
       )}
       {fixer.ui}

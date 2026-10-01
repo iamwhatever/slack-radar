@@ -628,6 +628,46 @@ async def _handle_digest_request(request: web.Request, ctx: Any) -> web.Response
     return web.json_response({"ok": True, "woke": woke})
 
 
+async def _handle_reanalyze(request: web.Request, ctx: Any) -> web.Response:
+    """Owner asks the Lead to re-read the named items' threads: ONE prompt, one turn.
+
+    The only way a draft gets rewritten after the Lead's first look; no poll and no
+    timer calls this. Refused while an earlier re-analysis has not finished
+    (``store.reanalyze_in_flight``).
+    """
+    body = await _json_body(request)
+    if body is None:
+        return _err(400, "body_not_object", "request body must be a JSON object")
+    raw = body.get("keys")
+    if not isinstance(raw, list):
+        return _err(400, "missing_required_field", f"keys must name 1-{store.REANALYZE_MAX_KEYS} ledger items")
+    keys = list(dict.fromkeys(k for k in raw if store.is_item_key(k)))[: store.REANALYZE_MAX_KEYS]
+    if not keys:
+        return _err(400, "missing_required_field", f"keys must name 1-{store.REANALYZE_MAX_KEYS} ledger items")
+    data_dir = _data_dir(ctx)
+    try:
+        ledger = await asyncio.to_thread(store.read_ledger, data_dir)
+    except store.StoreError as exc:
+        return _err(500, "ledger_corrupt", str(exc))
+    rows = [ledger["items"][k] for k in keys if k in ledger["items"]]
+    if not rows:
+        return _err(404, "unknown_items", "none of those items are in the ledger")
+    t = store.now()
+    if any(store.reanalyze_in_flight(it, t) for it in ledger["items"].values() if isinstance(it, dict)):
+        return _err(409, "reanalyze_in_flight", "the Radar Lead is still re-analyzing the last request")
+    state = _state(request)
+    if state is None:
+        return _err(503, "no_gateway_state", "the dashboard is not running on this gateway")
+    found = [str(r["key"]) for r in rows]
+    await asyncio.to_thread(store.mutate, data_dir, lambda led: store.apply_reanalyze_requested(led, found, t))
+    result = await crew_runtime.send_reanalyze(state, data_dir, rows)
+    if not result.get("ok"):
+        await asyncio.to_thread(store.mutate, data_dir, lambda led: store.apply_reanalyze_requested(led, found, None))
+        return _err(409, result.get("code") or "refused", "start the crew before asking it to re-analyze")
+    store.append_event(data_dir, "crew", f"re-analyze requested ({len(found)} items)")
+    return web.json_response({"ok": True, "keys": found, "requested_at": t, **result})
+
+
 async def _handle_investigate(request: web.Request, ctx: Any) -> web.Response:
     """Spawn the restricted investigator agent on a cluster of items (SpawnSDK)."""
     if getattr(ctx, "spawn", None) is None:
@@ -817,4 +857,5 @@ def register_routes(ctx: Any) -> list[Any]:
         r("POST", "/investigate", _owner_only(_handle_investigate)),
         r("POST", "/items/reply/draft", _owner_only(_handle_reply_draft)),
         r("POST", "/items/reply/send", _owner_only(_handle_reply_send)),
+        r("POST", "/items/reanalyze", _owner_only(_handle_reanalyze)),
     ]

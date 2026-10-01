@@ -13,6 +13,8 @@ Per cycle:
    Slack read marker, so reading a channel in Slack never hides a message from the radar.
 2. One ``batch_get_thread_replies`` call for a BOUNDED window of open items, flagging
    "possibly resolved" candidates. A flag is a question for the crew, never a verdict.
+   Pinned items (``store.is_pinned``: an unsent draft, an open dispatched fix, or an
+   investigation) are in the window whatever their status and age, and go first.
 3. The pending digest, if the crew submitted one: a self-DM (``self_dm``) or a dashboard
    notification, per the owner's setting. Nothing is ever posted to a channel.
 4. Hand every new possibly-resolved flag to ONE Thread Watcher run
@@ -316,19 +318,21 @@ def _run_cycle_body(
                 "the rest are read on the next cycle",
             )
 
-    # 2. bounded thread re-check of open items, one batched call
+    # 2. bounded thread re-check of open and pinned items, one batched call
     ledger = store.read_ledger(data_dir)
     horizon = t0 - float(settings.get("recheck_days") or 7) * 86400
     watched = set(channels)
     due = [
         it
         for it in (ledger.get("items") or {}).values()
-        if it.get("status") in store.OPEN_STATUSES
-        and it.get("channel") in watched
-        and float(it.get("ts_float") or 0) >= horizon
+        if it.get("channel") in watched
+        and (
+            store.is_pinned(it)
+            or (it.get("status") in store.OPEN_STATUSES and float(it.get("ts_float") or 0) >= horizon)
+        )
         and t0 - float(it.get("last_thread_check_at") or 0) >= RECHECK_MIN_GAP_SECS
     ]
-    due.sort(key=lambda it: float(it.get("last_thread_check_at") or 0))
+    due.sort(key=lambda it: (not store.is_pinned(it), float(it.get("last_thread_check_at") or 0)))
     due = due[: int(settings.get("recheck_max_per_cycle") or 0)]
     answers = fetch_replies(client, [(it["channel"], it["ts"]) for it in due])
 
@@ -359,6 +363,7 @@ def _run_cycle_body(
                 item["reply_count"] = len(replies)
                 item["replies"] = store.normalize_replies(replies)
                 item["latest_reply"] = latest or item.get("latest_reply", "")
+                store.refresh_draft_stale(item, [str(r.get("ts") or "") for r in replies])
                 if parent:
                     item["reactions"] = sorted(
                         {str(r.get("name")) for r in parent.get("reactions") or [] if r.get("name")}

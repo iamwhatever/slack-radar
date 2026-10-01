@@ -33,6 +33,7 @@ The rules the crew works by. The exact names, fields and routes are in [CONTRACT
 
 - The app posts to Slack only when the owner clicks **Send to thread** on a draft in the detail view, one click per reply; it posts as the owner, in that item's own thread; the crew cannot post.
 - The Lead may write a `reply_draft` on an open item. It is text on this machine until the owner clicks Send. The owner can edit it first, ignore it, or mark the item done without sending. Nothing is posted without that click.
+- A draft is never regenerated on its own. The Lead drafts on its first look at an item; when later replies make the draft stale, the Board marks it stale and the draft stays as it is. It is rewritten (or withdrawn) only when the owner presses **Re-analyze N stale** or **Re-analyze this**, which hands the Lead one turn for those items. No poll and no timer sends that turn, and the turn never posts: the owner still sends.
 - The other Slack write is the digest DM to the owner themselves (`self_dm`), sent by the Poller, never by an agent. The owner may choose a dashboard notification instead.
 - The app never reacts, edits, deletes or posts a new top-level message in a channel.
 - No agent has a Slack tool. The Slack MCP client's `call` admits only the five read tools; any other name, `post_message` included, is refused before it reaches the process. `post_message` is reachable only through a separate method that only the owner-only send route calls; the Poller never calls it, and the crew's ledger MCP server has no path to it.
@@ -102,6 +103,7 @@ See [docs/unattended-mode.md](../docs/unattended-mode.md) for the full approval 
 
 - 只有所有者在详情里的草稿上点 **Send to thread** 时，应用才会向 Slack 发消息，每条回复一次点击；以所有者本人的身份，发在该条目自己的线程里；小组无法发消息。
 - 组长可以在未关闭的条目上写一个 `reply_draft`。在所有者点发送之前，它只是本机上的文字。所有者可以先改、忽略它，或者不发送直接标记完成。没有这一下点击，什么都不会发出去。
+- 草稿从不自己重新生成。组长第一次看一个条目时起草；之后的回复让草稿过时，看板会标出来，草稿保持原样。只有所有者点 **Re-analyze N stale** 或 **Re-analyze this**，组长才会为这些条目得到一轮去重写（或撤回）草稿。没有轮询或定时器会发起这一轮，这一轮也从不发消息：仍由所有者发送。
 - 另一个 Slack 写操作是发给所有者本人的摘要私信（`self_dm`），由轮询器发送，从不由 agent 发送。所有者也可以改成仪表盘通知。
 - 应用从不加表情、编辑、删除，也从不在频道里发新的顶层消息。
 - 没有任何 agent 拥有 Slack 工具。Slack MCP 客户端的 `call` 只放行五个只读工具，其他工具名（包括 `post_message`）在到达进程前就被拒绝。`post_message` 只能经由一个单独的方法调用，而只有仅限所有者的发送接口会调用它；轮询器从不调用，小组的台账 MCP 服务器也没有通往它的路径。
