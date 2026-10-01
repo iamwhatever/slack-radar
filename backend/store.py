@@ -541,15 +541,37 @@ def draft_stale(item: dict[str, Any]) -> dict[str, Any] | None:
     return stale if isinstance(stale, dict) and stale.get("new_replies") else None
 
 
+#: PR states that end a fix: the Lead is asked to look once after one is read.
+PR_ENDED_STATES = frozenset({"merged", "closed"})
+
+
+def fix_pr_state(item: dict[str, Any]) -> dict[str, Any] | None:
+    """``fix_handoff.pr_state`` of a dispatched fix (``github_state`` writes it), else None."""
+    h = item.get("fix_handoff")
+    if not isinstance(h, dict) or not isinstance(h.get("dispatch"), dict):
+        return None
+    ps = h.get("pr_state")
+    return ps if isinstance(ps, dict) and ps.get("state") else None
+
+
+def pr_state_unseen(item: dict[str, Any]) -> bool:
+    """The fix's PR was merged or closed after the Lead last re-analyzed the item."""
+    ps = fix_pr_state(item)
+    if ps is None or ps.get("state") not in PR_ENDED_STATES:
+        return False
+    return _ts(item["fix_handoff"].get("pr_state_seen_at")) < _ts(ps.get("at"))
+
+
 def needs_reanalysis(item: dict[str, Any]) -> bool:
     """An open item the Lead's last view of is out of date (the Re-analyze button counts these).
 
-    A stale draft; a draft whose thread moved since the Lead last recorded the item; or
-    a dispatched fix whose thread moved after the dispatch.
+    A stale draft; a dispatched fix whose PR was merged or closed since the Lead last
+    re-analyzed it (:func:`pr_state_unseen`); a draft whose thread moved since the Lead
+    last recorded the item; or a dispatched fix whose thread moved after the dispatch.
     """
     if item.get("status") not in OPEN_STATUSES:
         return False
-    if draft_stale(item):
+    if draft_stale(item) or pr_state_unseen(item):
         return True
     if not item.get("thread_changed"):
         return False
@@ -564,6 +586,18 @@ def reanalyze_in_flight(item: dict[str, Any], now_: float) -> bool:
     """The owner asked for a re-analysis and the item has not moved since, within the window."""
     at = _ts(item.get("reanalyze_requested_at"))
     return bool(at) and _ts(item.get("updated_at")) <= at and now_ - at < REANALYZE_INFLIGHT_SECS
+
+
+def apply_pr_state_seen(ledger: dict[str, Any], keys: list[str], at: float) -> list[str]:
+    """Stamp ``fix_handoff.pr_state_seen_at`` on the dispatched fixes in ``keys``."""
+    found: list[str] = []
+    for key in keys:
+        item = (ledger.get("items") or {}).get(key)
+        h = item.get("fix_handoff") if isinstance(item, dict) else None
+        if isinstance(h, dict) and isinstance(h.get("dispatch"), dict):
+            h["pr_state_seen_at"] = float(at)
+            found.append(key)
+    return found
 
 
 def apply_reanalyze_requested(ledger: dict[str, Any], keys: list[str], at: float | None) -> list[str]:
@@ -868,6 +902,8 @@ def apply_dispatch(ledger: dict[str, Any], key: str, dispatch: dict[str, Any]) -
     item["fix_handoff"]["dispatch"] = record
     item["fix_handoff"]["pr_url"] = ""
     item["fix_handoff"]["pr_urls"] = []
+    item["fix_handoff"].pop("pr_state", None)
+    item["fix_handoff"].pop("pr_state_seen_at", None)
     return item
 
 
@@ -969,6 +1005,8 @@ ITEM_RECORD_FIELDS = frozenset({
     "key", "category", "priority", "status", "summary", "note", "investigation", "links",
     "reply_draft", "fix_handoff", "clear_possibly_resolved",
 })
+#: ``fix_handoff`` fields only the app writes; a record row carrying one is refused.
+APP_HANDOFF_FIELDS = frozenset({"pr_state", "pr_state_seen_at"})
 #: Every field ``apply_crew_record`` reads on ``crew``; same rule.
 CREW_RECORD_FIELDS = frozenset({"phase", "next", "today", "tried_add", "rejected_add"})
 
@@ -1042,7 +1080,9 @@ def apply_crew_record(ledger: dict[str, Any], payload: dict[str, Any]) -> dict[s
                 problems.append(why)
             else:
                 item["reply_draft"] = draft
-        if "fix_handoff" in row:
+        if isinstance(row.get("fix_handoff"), dict) and APP_HANDOFF_FIELDS & set(row["fix_handoff"]):
+            problems.append("fix_handoff.pr_state and pr_state_seen_at are set by the app, never by the record tool")
+        elif "fix_handoff" in row:
             handoff, why = _handoff_value(item, row["fix_handoff"])
             if why:
                 problems.append(why)
@@ -1052,6 +1092,9 @@ def apply_crew_record(ledger: dict[str, Any], payload: dict[str, Any]) -> dict[s
                     # A rewrite keeps the owner's dispatch and the PR it produced.
                     handoff["dispatch"], handoff["pr_url"] = prev["dispatch"], str(prev.get("pr_url") or "")
                     handoff["pr_urls"] = [u for u in prev.get("pr_urls") or [] if isinstance(u, str)]
+                    for k in ("pr_state", "pr_state_seen_at"):
+                        if k in prev:
+                            handoff[k] = prev[k]
                 item["fix_handoff"] = handoff
         if problems:
             refused.append({"key": key, "why": "; ".join(problems)})

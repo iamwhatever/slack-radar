@@ -56,6 +56,7 @@ const shots = [
   { name: 'team', source: 'ok', tab: 'Team', wait: 'Only the Radar Lead has a session' },
   { name: 'needs-login', source: 'needs_login', tab: null },
   { name: 'now-strip', source: 'ok', tab: null, clip: 'now-strip' },
+  { name: 'fix-merged', source: 'ok', q: '&fix=merged', tab: null, clip: 'Needs you', openHandoffs: true },
 ]
 const errors = []
 // A row of the "Needs a decision" group, by its summary.
@@ -69,7 +70,7 @@ try {
     const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, reducedMotion: 'reduce', timezoneId: 'UTC', locale: 'en-US' })
     const page = await ctx.newPage()
     page.on('pageerror', (e) => errors.push(`[${s.name}] ${e.message}`))
-    await page.goto(`http://127.0.0.1:5287/index.html?source=${s.source}`)
+    await page.goto(`http://127.0.0.1:5287/index.html?source=${s.source}${s.q || ''}`)
     await page.getByText('Slack connection:').first().waitFor({ timeout: 30000 })
     if (s.tab) {
       await page.getByRole('tab', { name: s.tab, exact: true }).click()
@@ -367,6 +368,36 @@ try {
       && posts[0].body.keys.length === 2 && others === 0 && last === ' · replies · last Sep 24 09:55'
     if (!ok) errors.push(`[reanalyze] label ${label} after ${after} disabled ${disabled} posts ${JSON.stringify(posts)} others ${others} last ${JSON.stringify(last)}`)
     else console.log('check reanalyze: ok', label, JSON.stringify(posts[0].body.keys), last)
+    await ctx.close()
+  }
+  // DOM check (?fix=merged): a dispatched fix whose PR merged sits in "decide" as
+  // "Fix merged · PR #412" with Done, its row reads "PR #412 merged" with the link and
+  // no session state, the Re-analyze count includes it, "Fixes in flight" leaves it
+  // out and names the other PR's state, and the Ledger row carries "fix merged".
+  {
+    const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, timezoneId: 'UTC', locale: 'en-US' })
+    const page = await ctx.newPage()
+    page.on('pageerror', (e) => errors.push(`[fix-merged] ${e.message}`))
+    await page.goto('http://127.0.0.1:5287/index.html?source=ok&fix=merged')
+    const row = decideRow(page, 'Login loops back to sign-in after SSO')
+    await row.waitFor({ timeout: 30000 })
+    const reason = (await row.getByTestId('need-open').textContent()) || ''
+    const line = ((await row.getByTestId('fix-dispatched').textContent()) || '').replace(/\s+/g, ' ')
+    const href = await row.getByTestId('fix-pr-merged').getByRole('link').getAttribute('href')
+    const buttons = await rowButtons(row)
+    const label = ((await page.getByTestId('reanalyze').textContent()) || '').trim()
+    await page.getByText(/^Fixes in flight \(/).click()
+    const fold = (await page.getByTestId('fixes-in-flight').textContent()) || ''
+    await page.getByRole('tab', { name: 'Ledger', exact: true }).click()
+    const lrow = page.getByTestId('ledger-list').locator('li').filter({ hasText: 'Login loops back to sign-in after SSO' })
+    await lrow.waitFor({ timeout: 5000 })
+    const tag = await lrow.getByText('fix merged', { exact: true }).count()
+    const ok = reason.includes('Fix merged · PR #412') && line.includes('PR #412 merged')
+      && !line.includes('done') && href === 'https://github.com/example-org/example-app/pull/412'
+      && JSON.stringify(buttons) === JSON.stringify(['Done']) && label === 'Re-analyze 3 stale'
+      && !fold.includes('Stop the SSO login redirect loop') && fold.includes('PR #418 open') && tag === 1
+    if (!ok) errors.push(`[fix-merged] reason ${JSON.stringify(reason)} line ${JSON.stringify(line)} href ${href} buttons ${JSON.stringify(buttons)} label ${label} fold ${JSON.stringify(fold)} tag ${tag}`)
+    else console.log('check fix-merged: ok', JSON.stringify(line), label)
     await ctx.close()
   }
   // DOM check: a row without a draft opens the same view with the original message and

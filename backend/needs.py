@@ -63,6 +63,8 @@ REPLY_REASON = "Reply ready to send"
 REPLIED_CAP = 50
 #: The ``decide`` reason for a hand-off the owner dispatched, before its PR exists.
 DISPATCHED_REASON = "Fix in progress"
+#: The ``decide`` reason for a dispatched fix whose PR was merged (``Fix merged · PR #N``).
+MERGED_REASON = "Fix merged"
 
 _PRIORITY_RANK = {"p0": 0, "p1": 1, "p2": 2, "p3": 3}
 
@@ -235,8 +237,16 @@ def has_fix_pr(item: dict[str, Any], fix_live: dict[str, dict[str, Any]] | None 
     return bool(fix_pr(item) or live or fix_pr_urls(item, fix_live))
 
 
+def fix_merged(item: dict[str, Any]) -> bool:
+    """A dispatched fix whose PR the gateway read as merged (``fix_handoff.pr_state``)."""
+    return (store.fix_pr_state(item) or {}).get("state") == "merged"
+
+
 def fix_view(item: dict[str, Any], fix_live: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
-    """``{session_key, title, agent, at, state, pr_url, pr_number, batch, batch_keys, pr_urls, trusted}``.
+    """``{session_key, title, agent, at, state, pr_url, pr_number, batch, batch_keys, pr_urls, trusted, pr_state}``.
+
+    ``pr_state`` is ``{state, at, merged_at}`` from ``fix_handoff.pr_state``, or None
+    before the gateway read the PR.
 
     ``state`` comes from ``fix_live`` (the route reads the session's slot):
     running / idle / closed, or ``unknown`` when nobody asked the gateway.
@@ -250,6 +260,8 @@ def fix_view(item: dict[str, Any], fix_live: dict[str, dict[str, Any]] | None = 
     seen = (fix_live or {}).get(item.get("key") or "") or {}
     live = seen.get("state") or "unknown"
     trusted = seen["trusted"] if isinstance(seen.get("trusted"), bool) else d.get("trusted") is True
+    ps = store.fix_pr_state(item)
+    urls = fix_pr_urls(item, fix_live)
     return {
         "session_key": str(d.get("session_key") or ""),
         "title": str(d.get("title") or ""),
@@ -260,8 +272,10 @@ def fix_view(item: dict[str, Any], fix_live: dict[str, dict[str, Any]] | None = 
         "pr_number": pr_number(pr),
         "batch": bool(d.get("batch")),
         "batch_keys": [str(k) for k in d.get("batch_keys") or []] if d.get("batch") else [],
-        "pr_urls": fix_pr_urls(item, fix_live),
+        "pr_urls": urls,
         "trusted": trusted,
+        "pr_state": {"state": str(ps.get("state")), "at": _float(ps.get("at")), "merged_at": str(ps.get("merged_at") or "")}
+        if ps else None,
     }
 
 
@@ -326,6 +340,13 @@ def decide_reason(item: dict[str, Any], spawn_done: Callable[[str], bool] | None
     """Why an open, unhandled item needs a call, or ``""``. First match wins."""
     if has_handoff(item):
         d = dispatch_of(item)
+        if d and fix_merged(item):
+            from .handoff import pr_number
+
+            h = item["fix_handoff"]
+            url = str(h.get("pr_url") or "") or next((u for u in h.get("pr_urls") or [] if isinstance(u, str)), "")
+            n = pr_number(url)
+            return f"{MERGED_REASON} · PR #{n}" if n else MERGED_REASON
         if d:
             return f"{DISPATCHED_REASON} · {d.get('title') or ''}".rstrip(" ·")[:160]
         return HANDOFF_REASON
@@ -415,6 +436,8 @@ def build_needs(
 
     A dispatched fix whose PR is known (``fix_handoff.pr_url``, or one ``fix_live``
     just found) is in neither ``decide`` nor ``unanswered``: it lives in ``fixes``.
+    Once that PR is read as merged it moves back to ``decide`` (``Fix merged · PR #N``)
+    and leaves ``fixes``.
     """
     t = time.time() if now is None else now
     pool = [
@@ -424,7 +447,7 @@ def build_needs(
     decide: list[tuple[dict[str, Any], str]] = []
     unanswered: list[dict[str, Any]] = []
     for it in pool:
-        if has_fix_pr(it, fix_live):
+        if has_fix_pr(it, fix_live) and not fix_merged(it):
             continue
         why = decide_reason(it, spawn_done)
         if why:
@@ -454,7 +477,8 @@ def build_needs(
         key=lambda it: -float(it["fix_handoff"].get("at") or 0),
     )
     fixes = sorted(
-        (it for it in (ledger.get("items") or {}).values() if isinstance(it, dict) and dispatch_of(it)),
+        (it for it in (ledger.get("items") or {}).values()
+         if isinstance(it, dict) and dispatch_of(it) and not fix_merged(it)),
         # Batch members share one ``at``; the session key keeps them adjacent.
         key=lambda it: (-float((dispatch_of(it) or {}).get("at") or 0), str((dispatch_of(it) or {}).get("session_key"))),
     )

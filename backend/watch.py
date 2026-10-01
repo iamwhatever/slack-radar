@@ -17,7 +17,10 @@ Per cycle:
    investigation) are in the window whatever their status and age, and go first.
 3. The pending digest, if the crew submitted one: a self-DM (``self_dm``) or a dashboard
    notification, per the owner's setting. Nothing is ever posted to a channel.
-4. Hand every new possibly-resolved flag to ONE Thread Watcher run
+4. The state of each dispatched fix's PR, read with the owner's own ``gh`` CLI,
+   read-only and bounded (``github_state.refresh``). A merged or closed PR joins the
+   Re-analyze set; nothing regenerates on its own.
+5. Hand every new possibly-resolved flag to ONE Thread Watcher run
    (``crew_runtime.dispatch_watcher``), then wake the crew when something moved
    (``crew_runtime.after_poll``).
 
@@ -509,8 +512,8 @@ def _notify_dashboard(title: str, body: str) -> None:
 
 async def poll_once(data_dir: Path, *, reason: str = "timer",
                     client_factory: Callable[[dict[str, Any]], SlackMcpClient] | None = None) -> dict[str, Any]:
-    """One cycle end to end: poll, deliver digest, reconcile + wake the crew."""
-    from . import crew_runtime, settings as settings_mod, slack_mcp
+    """One cycle end to end: poll, deliver digest, read fix PR states, reconcile + wake the crew."""
+    from . import crew_runtime, github_state, settings as settings_mod, slack_mcp
 
     global _last_cycle_at
     async with _poll_lock:
@@ -535,6 +538,10 @@ async def poll_once(data_dir: Path, *, reason: str = "timer",
                 f"{summary.get('new', 0)} new, {summary.get('thread_changed', 0)} thread updates, "
                 f"{summary.get('possibly_resolved', 0)} possibly resolved",
             )
+        try:
+            summary["pr_states"] = await github_state.refresh(data_dir)
+        except Exception:  # noqa: BLE001 - a PR read must never stop the cycle
+            logger.debug("slack-radar: PR state read failed", exc_info=True)
         summary["watcher"] = await crew_runtime.dispatch_watcher(data_dir)
         summary["woke"] = await crew_runtime.after_poll(data_dir, summary, reason=reason)
         return summary

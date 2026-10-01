@@ -51,7 +51,7 @@ from . import store
 logger = logging.getLogger("kirocrew.app.slack-radar")
 
 APP_NAME = "slack-radar"
-BRIEF_SENTINEL = "<!-- slack-radar-crew-brief v8 -->"
+BRIEF_SENTINEL = "<!-- slack-radar-crew-brief v9 -->"
 _BRIEF_PATH = Path(__file__).with_name("crew_brief.md")
 _brief_cache: str | None = None
 
@@ -934,12 +934,31 @@ async def send_owner_message(state: Any, data_dir: Path, text: str) -> dict[str,
 REANALYZE_HEADER = "[owner request: re-analyze]"
 
 
+#: What a fix PR's state means for the Lead; the brief carries the same rule.
+REANALYZE_PR_RULE = (
+    "A merged PR means the fix landed: the gateway already flagged the item `possibly_resolved` "
+    "for the Thread Watcher, so leave that flag to it, or set `status: resolved` when the thread "
+    "also confirms; draft a short 'fixed in ...' reply ONLY if the thread has no maintainer answer "
+    "yet. A closed-unmerged PR means the fix did not land -- say so in `note`."
+)
+
+
+def pr_state_text(ps: dict[str, Any] | None) -> str:
+    """``merged 2026-09-30`` / ``open`` / ``open, draft`` / ``closed, not merged`` / ``state unknown``."""
+    state = str((ps or {}).get("state") or "")
+    if state == "merged":
+        day = str((ps or {}).get("merged_at") or "")[:10]
+        return f"merged {day}" if day else "merged"
+    return {"open": "open", "draft": "open, draft", "closed": "closed, not merged"}.get(state, "state unknown")
+
+
 def reanalyze_prompt(rows: list[dict[str, Any]]) -> str:
     """The ONE turn an owner Re-analyze click gives the Lead, for these items only.
 
     Each item carries its original text, the thread replies newer than its draft (all
-    kept replies when it has none), the current draft and the dispatch state. Message
-    and reply text is quoted as JSON and labelled data.
+    kept replies when it has none), the current draft, the dispatch state and its PR's
+    state (:func:`pr_state_text`). Message and reply text is quoted as JSON and labelled
+    data.
     """
     blocks: list[str] = []
     for it in rows:
@@ -962,18 +981,21 @@ def reanalyze_prompt(rows: list[dict[str, Any]]) -> str:
         ] or ["    (none kept)"]
         lines.append("  current draft: " + (json.dumps(str(draft.get("text") or ""), ensure_ascii=False) if draft else "none"))
         if d:
-            pr = str(h.get("pr_url") or "") or ", ".join(u for u in h.get("pr_urls") or [] if isinstance(u, str)) or "none yet"
-            lines.append(f"  dispatched fix: {d.get('title') or 'fix session'} · session {d.get('state') or 'unknown'} · PR {pr}")
+            pr = str(h.get("pr_url") or "") or ", ".join(u for u in h.get("pr_urls") or [] if isinstance(u, str))
+            ps = pr_state_text(store.fix_pr_state(it)) if pr else ""
+            pr_line = f"PR {pr} · {ps}" if pr else "PR none yet"
+            lines.append(f"  dispatched fix: {d.get('title') or 'fix session'} · session {d.get('state') or 'unknown'} · {pr_line}")
         blocks.append("\n".join(lines))
     return (
         f"{REANALYZE_HEADER} The owner pressed Re-analyze on the Board for {len(rows)} item(s). "
-        "Their threads moved after your last look. Call slack_radar_read, then for EACH item below "
-        "do exactly one of: rewrite `reply_draft` for what the thread says now (a draft that still fits "
-        "is recorded again unchanged, which marks it current); set `reply_draft: null` when the thread "
-        "already answered it; or set `status: resolved` (or leave `possibly_resolved` for the Thread "
-        "Watcher) when the thread shows the fix landed. Write one `note` line per item saying what "
-        "you decided and why. Record them with slack_radar_record in one call. Touch no item that is "
-        "not in this list. You never post: the owner sends every reply.\n\nItems:\n" + "\n".join(blocks)
+        "Their threads moved, or their fix PR was merged or closed, after your last look. Call "
+        "slack_radar_read, then for EACH item below do exactly one of: rewrite `reply_draft` for what "
+        "the thread says now (a draft that still fits is recorded again unchanged, which marks it "
+        "current); set `reply_draft: null` when the thread already answered it; or set `status: "
+        "resolved` (or leave `possibly_resolved` for the Thread Watcher) when the thread shows the fix "
+        "landed. " + REANALYZE_PR_RULE + " Write one `note` line per item saying what you decided and "
+        "why. Record them with slack_radar_record in one call. Touch no item that is not in this list. "
+        "You never post: the owner sends every reply.\n\nItems:\n" + "\n".join(blocks)
     )
 
 
@@ -995,6 +1017,9 @@ async def send_reanalyze(state: Any, data_dir: Path, rows: list[dict[str, Any]])
     body = reanalyze_prompt(rows)[:MAX_REANALYZE_PROMPT]
     prompt = body if brief_is_present(slot) else brief_text() + "\n\n---\n\n" + body
     started = bool(slot.enqueue_or_run_prompt(prompt, _owner_run_chat, state))
+    keys = [str(r.get("key") or "") for r in rows]
+    seen_at = store.now()
+    await asyncio.to_thread(store.mutate, data_dir, lambda led: store.apply_pr_state_seen(led, keys, seen_at))
     await asyncio.to_thread(store.note_member_run, data_dir, "lead", started_at=store.now())
     _call_if_present(state, "push_slots_update")
     return {"ok": True, "slot_key": slot.key, "started": started}

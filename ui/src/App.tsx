@@ -23,7 +23,7 @@ type Item = {
   ts_float: number
   handled_at?: number
   handled_how?: 'done' | 'ignored' | ''
-  fix_handoff?: { title?: string; prompt?: string } | null
+  fix_handoff?: { title?: string; prompt?: string; pr_url?: string; pr_state?: PrState | null } | null
   reply_draft?: { text?: string } | null
 }
 
@@ -72,6 +72,8 @@ type HandoffRow = {
   handled_how: string
   handoff: FixHandoff
 }
+// A fix PR's state, read by the gateway with the owner's own `gh` (github_state.py).
+type PrState = { state: 'open' | 'draft' | 'merged' | 'closed' | 'unknown'; at: number; merged_at?: string }
 // A hand-off the owner dispatched to a kirocrew-conductor session (needs.py `fix_view`).
 type FixDispatch = {
   session_key: string
@@ -87,6 +89,7 @@ type FixDispatch = {
   pr_urls?: string[]
   // On the crew's scoped grant (unattended mode); false: the session asks for each tool.
   trusted?: boolean
+  pr_state?: PrState | null
 }
 // One "Fixes in flight" header per batch session (needs.py `fix_batches`).
 type FixBatch = {
@@ -1052,6 +1055,16 @@ type RowSent = {
   launched?: boolean
   // False: the session is not on the crew's grant and asks for each tool.
   trusted?: boolean
+  pr_state?: PrState | null
+  pr_urls?: string[]
+}
+
+// The PR a fix row links: its own, else the batch's first unmatched one.
+function prOf(d: { pr_url: string; pr_number: number; pr_urls?: string[] }): { url: string; n: number } {
+  if (d.pr_url) return { url: d.pr_url, n: d.pr_number }
+  const url = d.pr_urls?.[0] || ''
+  const m = /\/pull\/(\d+)/.exec(url)
+  return { url, n: m ? Number(m[1]) : 0 }
 }
 
 function sentOf(e: NeedEntry, local?: RowSent): RowSent | null {
@@ -1060,6 +1073,7 @@ function sentOf(e: NeedEntry, local?: RowSent): RowSent | null {
     return {
       session_key: d.session_key, title: d.title, batch: d.batch ? d.batch_keys?.length || 0 : 0,
       state: d.state, pr_url: d.pr_url, pr_number: d.pr_number, trusted: d.trusted,
+      pr_state: d.pr_state, pr_urls: d.pr_urls,
     }
   }
   return local || null
@@ -1112,7 +1126,9 @@ function NeedRow({
     else if (primary === 'Reply' && e.permalink) window.open(e.permalink, '_blank', 'noopener,noreferrer')
     else onOpen()
   }
-  const state = sent ? FIX_STATE[sent.state] || '' : ''
+  const merged = sent?.pr_state?.state === 'merged'
+  const state = sent && !merged ? FIX_STATE[sent.state] || '' : ''
+  const pr = sent ? (merged ? prOf(sent) : { url: sent.pr_url, n: sent.pr_number }) : { url: '', n: 0 }
   return (
     <li
       className="text-sm"
@@ -1164,18 +1180,30 @@ function NeedRow({
               {' · '}
               {sent.launched ? 'opened in a new conductor chat' : sent.batch ? `batch of ${sent.batch}` : sent.title || 'Fix session'}
               {state && <> · {state}</>}
+              {merged && pr.url && (
+                <>
+                  {' · '}
+                  <span data-testid="fix-pr-merged">
+                    <a className="underline" href={pr.url} target="_blank" rel="noreferrer noopener">
+                      PR #{pr.n}
+                    </a>{' '}
+                    merged <span aria-hidden>✓</span>
+                  </span>
+                </>
+              )}
               {sent.session_key && (
                 <>
                   {' · '}
                   <SessionLink d={sent} label="Open session" />
                 </>
               )}
-              {sent.pr_url && (
+              {!merged && pr.url && (
                 <>
                   {' · '}
-                  <a className="underline" href={sent.pr_url} target="_blank" rel="noreferrer noopener">
-                    PR #{sent.pr_number}
+                  <a className="underline" href={pr.url} target="_blank" rel="noreferrer noopener">
+                    PR #{pr.n}
                   </a>
+                  <PrStateText ps={sent.pr_state} />
                 </>
               )}
               <LastReply ts={e.latest_reply} />
@@ -1556,6 +1584,13 @@ const useLauncher: () => Launcher | null =
     : () => null
 
 const FIX_STATE: Record<string, string> = { running: 'working', idle: 'idle', closed: 'done', unknown: '' }
+
+// After a PR link: " open", " draft" or " closed, not merged"; nothing before the gateway read it.
+const PR_STATE_TEXT: Record<string, string> = { open: 'open', draft: 'draft', closed: 'closed, not merged' }
+function PrStateText({ ps }: { ps?: PrState | null }) {
+  const t = ps ? PR_STATE_TEXT[ps.state] : ''
+  return t ? <span data-testid="fix-pr-state"> {t}</span> : null
+}
 
 // A link to a dispatched session. Inside the dashboard it opens the session in place.
 function SessionLink({ d, label }: { d: { session_key: string; title: string }; label?: string }) {
@@ -1960,6 +1995,7 @@ function NeedsCard({
                   <a className="underline" href={f.dispatch.pr_url} target="_blank" rel="noreferrer noopener">
                     PR #{f.dispatch.pr_number}
                   </a>
+                  <PrStateText ps={f.dispatch.pr_state} />
                 </>
               )
               return (
@@ -2072,15 +2108,21 @@ function NeedsCard({
   )
 }
 
-// At most two tags per row: the status, then one severity (priority, else "possibly
-// resolved"). Everything else goes into the "+N" tag's hover title.
+// At most two tags per row: the status, then one more: "fix merged" / "fix PR closed" once
+// the gateway read the dispatched fix's PR as ended, else the priority, else "possibly
+// resolved". Everything else goes into the "+N" tag's hover title.
 function LedgerRow({ it, first, checked, onToggle }: { it: Item; first: boolean; checked: boolean; onToggle: () => void }) {
-  const second = it.priority
-    ? { label: it.priority, variant: (it.priority === 'p0' || it.priority === 'p1' ? 'err' : 'muted') as 'err' | 'muted' }
-    : it.possibly_resolved
-      ? { label: 'possibly resolved', variant: 'warn' as const }
-      : null
+  const prState = it.fix_handoff?.pr_state?.state
+  const second = prState === 'merged' || prState === 'closed'
+    ? { label: prState === 'merged' ? 'fix merged' : 'fix PR closed', variant: (prState === 'merged' ? 'ok' : 'warn') as 'ok' | 'warn' }
+    : it.priority
+      ? { label: it.priority, variant: (it.priority === 'p0' || it.priority === 'p1' ? 'err' : 'muted') as 'err' | 'muted' }
+      : it.possibly_resolved
+        ? { label: 'possibly resolved', variant: 'warn' as const }
+        : null
   const extra = [
+    (prState === 'merged' || prState === 'closed') && it.priority && `priority: ${it.priority}`,
+    prState && prState !== 'merged' && prState !== 'closed' && `fix PR: ${prState}`,
     it.category && `category: ${it.category}`,
     it.possibly_resolved && `possibly resolved: ${it.possibly_resolved.reason}`,
   ].filter(Boolean) as string[]

@@ -2,12 +2,14 @@
  * Stub of `@kirocrew/app-sdk` for README screenshots. Every response is FAKE demo
  * data defined in this file: no request leaves the page, and nothing is read from
  * a gateway, a ledger or Slack. Scenario comes from the query string:
- *   ?source=ok | needs_login, plus &today=empty, &digest=empty and &dispatch=fail_once
+ *   ?source=ok | needs_login, plus &today=empty, &digest=empty, &dispatch=fail_once and &fix=merged
  */
 const TODAY_EMPTY = new URLSearchParams(location.search).get('today') === 'empty'
 const DIGEST_EMPTY = new URLSearchParams(location.search).get('digest') === 'empty'
 // ?dispatch=fail_once: the first Dispatch fix is refused, the retry goes through.
 const DISPATCH_FAIL_ONCE = new URLSearchParams(location.search).get('dispatch') === 'fail_once'
+// ?fix=merged: one dispatched fix whose PR the gateway read as merged joins "decide".
+const FIX_MERGED = new URLSearchParams(location.search).get('fix') === 'merged'
 const SCENARIO = new URLSearchParams(location.search).get('source') === 'needs_login' ? 'needs_login' : 'ok'
 
 const T0 = 1758700800 // 2025-09-24T08:00:00Z, fixed so frames are reproducible
@@ -211,6 +213,28 @@ const NEEDS = {
       need(ITEMS[0], '3 similar messages', { members: [ITEMS[0].key, 'C0DEMO1:1758701000.000100', 'C0DEMO1:1758701200.000100'], words: ['csv', 'export', 'rows'] }),
     ] },
   ],
+}
+
+// ?fix=merged: a dispatched fix whose PR #412 merged. It sits in "decide" with Done,
+// joins the Re-analyze set and carries the "fix merged" tag on the Ledger.
+if (FIX_MERGED) {
+  const MERGED_PR = 'https://github.com/example-org/example-app/pull/412'
+  const prState = { state: 'merged', at: T0 + 7000, merged_at: '2025-09-24T09:50:00Z' }
+  const mergedItem = item(10, 'C0DEMO1', 'omar', 'Login loops back to the sign-in page after SSO', {
+    category: 'bug-report', priority: 'p1', summary: 'Login loops back to sign-in after SSO', reply_count: 2,
+  })
+  const d = dispatched(mergedItem, 'Stop the SSO login redirect loop', {
+    at: T0 + 1000, state: 'closed', pr_url: MERGED_PR, pr_number: 412, pr_state: prState,
+  })
+  mergedItem.fix_handoff = { title: d.title.slice(5), prompt: 'p', pr_url: MERGED_PR, pr_state: prState, dispatch: d }
+  ITEMS.unshift(mergedItem)
+  ;(WITH_PR as Record<string, unknown>).pr_state = { state: 'open', at: T0 + 6000 }
+  const decide = NEEDS.groups[0]
+  decide.entries.unshift(need(mergedItem, 'Fix merged · PR #412', {
+    handoff_title: d.title.slice(5), dispatch: d, needs_reanalysis: true,
+  }) as (typeof decide.entries)[number])
+  decide.total += 1
+  NEEDS.reanalyze = { keys: [mergedItem.key, ...NEEDS.reanalyze.keys], total: NEEDS.reanalyze.total + 1, in_flight: false }
 }
 
 // Relative to the clock so "3m" reads the same on every run.

@@ -37,7 +37,7 @@ The rules the crew works by. The exact names, fields and routes are in [CONTRACT
 - The other Slack write is the digest DM to the owner themselves (`self_dm`), sent by the Poller, never by an agent. The owner may choose a dashboard notification instead.
 - The app never reacts, edits, deletes or posts a new top-level message in a channel.
 - No agent has a Slack tool. The Slack MCP client's `call` admits only the five read tools; any other name, `post_message` included, is refused before it reaches the process. `post_message` is reachable only through a separate method that only the owner-only send route calls; the Poller never calls it, and the crew's ledger MCP server has no path to it.
-- Nothing is written to GitHub either. Investigation is read-only.
+- Nothing is written to GitHub either. Investigation is read-only. The app itself reads GitHub in one place: after each poll the gateway reads a dispatched fix's PR state with the owner's own `gh` login (`gh pr view <url> --json state,mergedAt,closedAt,isDraft`, at most 10 PRs a poll, each at most every 30 minutes, never again once merged or closed). It never writes to GitHub, never runs that read from an agent, and a merged PR only flags the item `possibly_resolved` and puts it in the Re-analyze set; the Lead looks at it only when the owner presses Re-analyze.
 
 ### 4. Public vs local data
 
@@ -107,7 +107,7 @@ See [docs/unattended-mode.md](../docs/unattended-mode.md) for the full approval 
 - 另一个 Slack 写操作是发给所有者本人的摘要私信（`self_dm`），由轮询器发送，从不由 agent 发送。所有者也可以改成仪表盘通知。
 - 应用从不加表情、编辑、删除，也从不在频道里发新的顶层消息。
 - 没有任何 agent 拥有 Slack 工具。Slack MCP 客户端的 `call` 只放行五个只读工具，其他工具名（包括 `post_message`）在到达进程前就被拒绝。`post_message` 只能经由一个单独的方法调用，而只有仅限所有者的发送接口会调用它；轮询器从不调用，小组的台账 MCP 服务器也没有通往它的路径。
-- 也不写 GitHub。调查是只读的。
+- 也不写 GitHub。调查是只读的。应用自己只在一处读 GitHub：每次轮询之后，网关用所有者自己的 `gh` 登录读取已派发修复的 PR 状态（`gh pr view <url> --json state,mergedAt,closedAt,isDraft`，每次最多 10 个 PR，同一个至少隔 30 分钟，合并或关闭后不再读）。它从不写 GitHub，从不让 agent 去读，PR 合并只会把条目标成 `possibly_resolved` 并放进 Re-analyze 的范围；组长只在所有者点 Re-analyze 时才去看。
 
 ### 4. 公开数据与本地数据
 

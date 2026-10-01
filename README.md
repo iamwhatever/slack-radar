@@ -116,7 +116,7 @@ cursor moves.
   `batch_get_thread_replies`, `batch_get_channel_info`, `batch_get_user_info`,
   plus `self_dm` if you want the digest as a DM).
 - Python 3.10 or newer.
-- Optional: `gh`, logged in, for the Investigator's GitHub searches.
+- Optional: `gh`, logged in, for the Investigator's GitHub searches and for reading the state of a dispatched fix's PR.
 
 ## Install
 
@@ -192,13 +192,17 @@ With two or more fixes waiting, press **Dispatch all fixes (N)** in the *Needs a
 
 ![Rows after Dispatch all fixes](docs/screenshots/batch-dispatch.png)
 
+Once a fix has a PR, the gateway reads that PR's state with your own `gh` login, read-only: `gh pr view <url> --json state,mergedAt,closedAt,isDraft`, after each poll, at most 10 PRs per poll, each PR at most every 30 minutes, and never again once it is merged or closed. Without `gh`, or when it is logged out or rate-limited, the state reads *unknown* and nothing is tried for an hour. The app never writes to GitHub. When the PR merges, the row comes back to *Needs a decision* as `Fix merged · PR #n` with **Done**, its line reads `Dispatched · <title> · PR #n merged ✓`, it leaves **Fixes in flight**, the work log says `PR #n merged`, the item is flagged *possibly resolved* for the Thread Watcher, and it joins **Re-analyze**. **Fixes in flight** shows the other PRs' state (`open`, `draft`, `closed, not merged`); the Ledger tab tags such items *fix merged* or *fix PR closed*.
+
+![A merged fix back in Needs a decision](docs/screenshots/fix-merged.png)
+
 ### Reply in one click
 
 When a question has a clear answer in the ledger or its links, or a bug report deserves an acknowledgement with the linked issue or PR, the Radar Lead drafts a short reply in the poster's language. The row shows up under *Needs a decision* marked "Reply ready", with the first line of the original message and an **Open** button; the draft is not in the list. **Open** shows the detail view in this order: the original message in full, the thread replies so far ("No replies yet" when there are none; "replies as of HH:MM" when the last thread check is over an hour old), then the Lead's draft in an editable box with who wrote it and when. Read the question, then press **Send to thread**: it goes out in that message's thread under your own name, through your Slack MCP; the view shows a link to the sent reply, the row leaves the list and the item counts as done. The view also has *Done without sending*, *Ignore* and *Why? Ask the lead*.
 
 When replies arrive in the thread after the draft was written, the draft is stale. The row shows *N new replies since draft* next to "Reply ready" and sorts above the other rows of its priority. The detail view marks each newer reply **new** and says *N replies arrived after this draft — read them first* above **Send to thread**. Send still works with one click. The Lead does not rewrite a draft by itself: after its first look, a draft changes only when you ask.
 
-**Re-analyze N stale** at the top of *Needs you* is that ask. It counts the open items whose threads moved after the Lead's last look: a stale draft, a draft whose thread changed, or a dispatched fix whose thread moved after the dispatch. One click hands the Lead one turn with those items (up to 20, oldest-checked first; the button then reads *Re-analyze 20 of N stale*), each with its original message, the replies newer than the draft, the draft and the fix's state. The Lead rewrites the draft, withdraws it when the thread already answered it, or marks the item resolved when the thread shows the fix landed, and notes why. Nothing is sent to Slack. The button reads *Re-analyzing…* until every item it named moves, or 10 minutes pass; a second click meanwhile is refused. The detail view of a stale item has **Re-analyze this** for one item. A row with a dispatched fix shows *replies · last 16:54*, when its thread last moved.
+**Re-analyze N stale** at the top of *Needs you* is that ask. It counts the open items the Lead's last look is out of date for: a stale draft, a draft whose thread changed, a dispatched fix whose thread moved after the dispatch, or a dispatched fix whose PR was merged or closed since the Lead last re-analyzed it. One click hands the Lead one turn with those items (up to 20, oldest-checked first; the button then reads *Re-analyze 20 of N stale*), each with its original message, the replies newer than the draft, the draft and the fix's state, including its PR's (`PR <url> · merged 2026-09-30`, `· open`, `· closed, not merged`). The Lead rewrites the draft, withdraws it when the thread already answered it, or marks the item resolved when the thread shows the fix landed, and notes why. For a merged PR it leaves the *possibly resolved* flag to the Thread Watcher or marks the item resolved when the thread also confirms, and drafts a short "fixed in …" reply only when no maintainer has answered yet; for a PR closed without merging it notes that the fix did not land. Once sent, the item leaves the count until its PR state changes again. Nothing is sent to Slack. The button reads *Re-analyzing…* until every item it named moves, or 10 minutes pass; a second click meanwhile is refused. The detail view of a stale item has **Re-analyze this** for one item. A row with a dispatched fix shows *replies · last 16:54*, when its thread last moved.
 
 ![Reply detail view](docs/screenshots/reply-detail.png)
 
@@ -431,7 +435,7 @@ Slack Radar 是一个“有记性”的 Slack 分诊小组。它通过你自己�
   `batch_get_channel_info`、`batch_get_user_info`，想用私信收摘要还需要 `self_dm`），
   其他服务器也可以。
 - Python 3.10 或更新版本。
-- 可选：已登录的 `gh`，供调查员搜索 GitHub。
+- 可选：已登录的 `gh`，供调查员搜索 GitHub，以及读取已派发修复的 PR 状态。
 
 ## 安装
 
@@ -499,13 +503,17 @@ kirocrew app enable slack-radar
 
 ![Dispatch all fixes 之后的各行](docs/screenshots/batch-dispatch.png)
 
+
+修复有了 PR 之后，网关会用你自己的 `gh` 登录只读地读取这个 PR 的状态：`gh pr view <url> --json state,mergedAt,closedAt,isDraft`，每次轮询之后进行，每次最多 10 个 PR，同一个 PR 至少隔 30 分钟，合并或关闭之后不再读。没有 `gh`、未登录或被限流时，状态显示 *unknown*，一小时内不再尝试。应用从不向 GitHub 写任何东西。PR 合并后，这一行回到 *Needs a decision*，原因是 `Fix merged · PR #n`，按钮是 **Done**，那一行写着 `Dispatched · <标题> · PR #n merged ✓`；它离开 **Fixes in flight**，工作日志记一条 `PR #n merged`，条目被标成 *possibly resolved* 交给线程观察员，并加入 **Re-analyze**。**Fixes in flight** 显示其余 PR 的状态（`open`、`draft`、`closed, not merged`）；台账页给这类条目打上 *fix merged* 或 *fix PR closed* 标签。
+
+![合并后回到 Needs a decision 的修复](docs/screenshots/fix-merged.png)
 ### 一键回复
 
 当一个问题在台账或链接里已有明确答案，或一个 bug 报告值得回一句并附上关联的 issue 或 PR 时，雷达组长会用发帖人的语言起草一条简短的回复。这一行会出现在 *Needs a decision* 里，标着 "Reply ready"，显示原消息的第一行和一个 **Open** 按钮；列表里不显示草稿。点 **Open** 打开详情，顺序是：完整的原消息，目前为止的线程回复（没有时写 "No replies yet"；最近一次线程检查超过一小时时写 "replies as of HH:MM"），然后是组长的草稿，放在可编辑的输入框里，写明是谁、什么时候写的。先读问题，再点 **Send to thread**：它就以你自己的名义、通过你的 Slack MCP 发到那条消息的线程里；详情里会显示发出的回复的链接，这一行离开列表，条目算作已完成。详情里还有 *Done without sending*、*Ignore* 和 *Why? Ask the lead*。
 
 草稿写好之后线程里又来了新回复，草稿就过时了。这一行会在 "Reply ready" 旁边显示 *N new replies since draft*，并排在同一优先级的其他行前面。详情里每条更新的回复标着 **new**，**Send to thread** 上方写着 *N replies arrived after this draft — read them first*。发送仍然是一次点击。组长不会自己重写草稿：第一次看过之后，只有你开口，草稿才会变。
 
-*Needs you* 顶部的 **Re-analyze N stale** 就是开口的方式。它数的是线程在组长上次看过之后又动了的未关闭条目：过时的草稿、线程有变化的草稿、派发之后线程又动了的修复。点一次，组长得到一轮，只处理这些条目（最多 20 个，最久没复查的在前；超过时按钮写 *Re-analyze 20 of N stale*），每个都带原消息、草稿之后的回复、草稿和修复状态。组长会重写草稿，线程已经回答了就撤回草稿，线程显示修复已上线就标为已解决，并写下理由。什么都不会发到 Slack。在它点名的每个条目都有变化之前（最多 10 分钟），按钮显示 *Re-analyzing…*，这期间再点会被拒绝。过时条目的详情里有 **Re-analyze this**，只处理这一条。有已派发修复的行会显示 *replies · last 16:54*，即线程最近一次变化的时间。
+*Needs you* 顶部的 **Re-analyze N stale** 就是开口的方式。它数的是组长上次看过之后已经过时的未关闭条目：过时的草稿、线程有变化的草稿、派发之后线程又动了的修复，以及组长上次重新分析之后 PR 被合并或关闭的修复。点一次，组长得到一轮，只处理这些条目（最多 20 个，最久没复查的在前；超过时按钮写 *Re-analyze 20 of N stale*），每个都带原消息、草稿之后的回复、草稿和修复状态，包括 PR 的状态（`PR <url> · merged 2026-09-30`、`· open`、`· closed, not merged`）。组长会重写草稿，线程已经回答了就撤回草稿，线程显示修复已上线就标为已解决，并写下理由。PR 已合并时，它把 *possibly resolved* 标记留给线程观察员，线程也确认时就标为已解决，只有还没有维护者回答时才起草一句简短的“已在……修复”回复；PR 未合并就关闭时，它在 note 里写明修复没有上线。发出之后，这个条目不再计数，直到它的 PR 状态再次变化。什么都不会发到 Slack。在它点名的每个条目都有变化之前（最多 10 分钟），按钮显示 *Re-analyzing…*，这期间再点会被拒绝。过时条目的详情里有 **Re-analyze this**，只处理这一条。有已派发修复的行会显示 *replies · last 16:54*，即线程最近一次变化的时间。
 
 ![回复详情](docs/screenshots/reply-detail.png)
 
