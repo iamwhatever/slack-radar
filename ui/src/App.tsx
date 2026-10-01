@@ -55,6 +55,14 @@ type NeedEntry = {
   ts_float?: number
   replies?: ThreadReply[]
   last_thread_check_at?: number
+  status?: string
+  // The Investigator's run (`spawn <id>`, "" before one), when it started, and what it linked.
+  investigation?: string
+  investigation_at?: number
+  links_count?: number
+  links?: string[]
+  // The owner asked the Lead about this item and the Lead has not recorded it since.
+  reanalyze_in_flight?: boolean
 }
 type ThreadReply = { ts: string; user: string; text: string }
 type DraftStale = { since: string; new_replies: number }
@@ -922,7 +930,13 @@ function Board(props: {
 
       <TodayCard state={state} busy={props.busy} onDigest={props.onDigest} />
 
-      <NeedsCard needs={props.needs} handled={props.handled} onChanged={props.onChanged} onWhy={askWhy} />
+      <NeedsCard
+        needs={props.needs}
+        handled={props.handled}
+        onChanged={props.onChanged}
+        onWhy={askWhy}
+        investigator={nowRow(state, 'investigator')}
+      />
 
       {/* Last child of the Board: sticks to the bottom of the scrolling panel, so an
           opened chat grows upward from there. */}
@@ -997,8 +1011,13 @@ function ErrorNotice({ message, onRetry }: { message: string; onRetry: () => voi
 
 const small: CSSProperties = { fontSize: 12, padding: '2px 10px' }
 
-// What the owner should do with a row: the label of its one primary button.
-type Primary = 'Open' | 'Reply' | 'Dispatch fix' | 'Decide' | 'Done'
+// What the owner should do with a row: the label of its one primary button ('' for none).
+type Primary = 'Open' | 'Reply' | 'Dispatch fix' | 'Investigate' | 'Ask lead' | 'Done' | ''
+
+// Reports the Investigator can search GitHub for.
+const isFixable = (e: NeedEntry) => e.category === 'bug-report' || e.category === 'feature-request'
+// The Investigator ran and is done: it left links, or the crew moved the item on.
+const investigated = (e: NeedEntry) => (e.links_count || 0) > 0 || (!!e.investigation && e.status !== 'investigating')
 
 // A row whose Lead-written reply waits for the owner's Send (in the detail view).
 const isReplyRow = (groupId: NeedGroup['id'], e: NeedEntry) => groupId === 'decide' && !!e.reply_draft && !e.handoff_title
@@ -1009,8 +1028,19 @@ function primaryOf(groupId: NeedGroup['id'], e: NeedEntry, sent = false): Primar
   if (isReplyRow(groupId, e)) return 'Open'
   if (groupId === 'decide' && e.reason.startsWith('Looks resolved')) return 'Done'
   if (groupId === 'unanswered' && e.permalink) return 'Reply'
-  return 'Decide'
+  if (groupId === 'clusters') return investigated(e) && isFixable(e) && !e.handoff_title && !e.reply_draft ? 'Ask lead' : 'Investigate'
+  if (isFixable(e) && !investigated(e)) return 'Investigate'
+  if (isFixable(e) && !e.handoff_title && !e.reply_draft) return 'Ask lead'
+  if ((e.category === 'question' || e.category === 'already-answered') && !e.reply_draft) return 'Open'
+  return ''
 }
+
+// An Investigator run on this row is still going: the row says so, and `/now` says since when.
+const investigationRunning = (e: NeedEntry, investigator?: NowRow) =>
+  !!e.investigation && !(e.links_count || 0) && e.status === 'investigating' && investigator?.state === 'working'
+
+// The keys a row's Investigate or Ask lead sends: a cluster's members, else the row itself.
+const rowKeys = (e: NeedEntry) => (e.members?.length ? e.members : [e.key])
 
 // Slack message markup as plain text: <@U1> -> @U1, <url|label> -> label, entities decoded.
 function slackPlain(t: string): string {
@@ -1101,6 +1131,9 @@ function NeedRow({
   failed,
   excluded,
   onExclude,
+  investigator,
+  investigate,
+  ask,
 }: {
   e: NeedEntry
   groupId: NeedGroup['id']
@@ -1114,18 +1147,34 @@ function NeedRow({
   failed?: string
   excluded?: boolean
   onExclude?: (on: boolean) => void
+  investigator?: NowRow
+  investigate?: InvestigateCtl
+  ask?: ReanalyzeCtl
 }) {
   const sent = groupId === 'decide' ? sentOf(e, sentHere) : null
   const primary = primaryOf(groupId, e, !!sent)
   const reply = isReplyRow(groupId, e)
   const [open, setOpen] = useState(false)
   const previewId = `sr-fix-${e.key.replace(/[^A-Za-z0-9]/g, '-')}`
+  const rowId = `${groupId}:${e.key}`
+  const keys = rowKeys(e)
+  const running = investigationRunning(e, investigator)
+  const investigating = primary === 'Investigate' && (running || !!investigate?.busy.has(rowId) || !!investigate?.asked.has(rowId))
+  // "Lead thinking…" from this row's own ask until the Lead records the item.
+  const thinking = primary === 'Ask lead' && (!!e.reanalyze_in_flight || (!!ask?.inFlight && ask?.lastFrom === rowId))
+  const invFailed = investigate?.failed?.from === rowId ? investigate.failed : null
+  const askFailed = ask?.failed?.from === rowId ? ask.failed : null
+  const links = e.links || []
   const onPrimary = () => {
     if (primary === 'Dispatch fix') onDispatch?.()
     else if (primary === 'Done') onMark('done')
     else if (primary === 'Reply' && e.permalink) window.open(e.permalink, '_blank', 'noopener,noreferrer')
+    else if (primary === 'Investigate') investigate?.run(keys, rowId)
+    else if (primary === 'Ask lead') ask?.run(keys.slice(0, REANALYZE_MAX_KEYS), rowId)
     else onOpen()
   }
+  const primaryLabel = investigating ? 'Investigating…' : thinking ? 'Lead thinking…' : primary
+  const primaryOff = busy || investigating || (primary === 'Ask lead' && (thinking || !!ask?.busy || !!ask?.inFlight))
   const merged = sent?.pr_state?.state === 'merged'
   const state = sent && !merged ? FIX_STATE[sent.state] || '' : ''
   const pr = sent ? (merged ? prOf(sent) : { url: sent.pr_url, n: sent.pr_number }) : { url: '', n: 0 }
@@ -1174,6 +1223,20 @@ function NeedRow({
               </>
             )}
           </button>
+          {running && (
+            <div className="text-xs" role="status" style={{ marginTop: 2 }} data-testid="row-investigating">
+              <span style={{ color: 'var(--text-strong)' }}>Investigator</span> · running · since {hm(e.investigation_at || investigator?.since)}
+            </div>
+          )}
+          {!running && !sent && (e.links_count || 0) > 0 && (
+            <div className="text-xs" role="status" style={{ marginTop: 2 }} data-testid="row-investigated">
+              <span style={{ color: 'var(--text-strong)' }}>Investigated</span> · {plural(e.links_count || 0, 'link', 'links')}
+            </div>
+          )}
+          {invFailed && (
+            <ErrorNotice message={invFailed.why} onRetry={() => investigate?.run(invFailed.keys, rowId)} />
+          )}
+          {askFailed && <ErrorNotice message={askFailed.why} onRetry={() => ask?.run(askFailed.keys, rowId)} />}
           {sent && (
             <div className="text-xs" role="status" style={{ marginTop: 2 }} data-testid="fix-dispatched">
               <span style={{ color: 'var(--text-strong)' }}>Dispatched</span>
@@ -1217,6 +1280,30 @@ function NeedRow({
           {failed && !sent && (
             <ErrorNotice message={`Could not dispatch that fix: ${failed}. Nothing was sent.`} onRetry={() => onDispatch?.()} />
           )}
+          {!fix && open && (
+            <div
+              id={previewId}
+              data-testid="row-preview"
+              className="text-xs"
+              style={{ marginTop: 6, padding: '6px 8px', border: '1px solid var(--border)', borderRadius: 6 }}
+            >
+              {links.length > 0 ? (
+                <ul data-testid="row-links" style={{ margin: 0, padding: 0, listStyle: 'none' }}>
+                  {links.map((u) => (
+                    <li key={u} style={{ overflowWrap: 'anywhere' }}>
+                      <a className="underline" href={u} target="_blank" rel="noreferrer noopener">{u.replace(/^https:\/\/github\.com\//, '')}</a>
+                    </li>
+                  ))}
+                  {(e.links_count || 0) > links.length && <li className="text-muted">and {(e.links_count || 0) - links.length} more</li>}
+                </ul>
+              ) : (
+                <div style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 160, overflowY: 'auto' }}>
+                  {e.category && <span className="text-muted">{e.category} · </span>}
+                  {clip(slackPlain(e.text || e.summary), 400) || '(no text)'}
+                </div>
+              )}
+            </div>
+          )}
           {fix && open && (
             <div
               id={previewId}
@@ -1243,30 +1330,30 @@ function NeedRow({
           )}
         </div>
         <div className="flex items-center gap-1" style={{ flex: 'none' }} data-testid="need-actions">
-          <Btn primary style={small} onClick={onPrimary} disabled={busy}>
-            {primary === 'Dispatch fix' && busy ? (
-              <>
-                <span className="sr-spin" aria-hidden />
-                Dispatching…
-              </>
-            ) : (
-              primary
-            )}
-          </Btn>
+          {primary && (
+            <Btn primary style={small} onClick={onPrimary} disabled={primaryOff} data-primary={primary}>
+              {(primary === 'Dispatch fix' && busy) || investigating || thinking ? (
+                <>
+                  <span className="sr-spin" aria-hidden />
+                  {primary === 'Dispatch fix' ? 'Dispatching…' : primaryLabel}
+                </>
+              ) : (
+                primary
+              )}
+            </Btn>
+          )}
         </div>
-        {fix && (
-          <button
+        <button
             type="button"
-            data-testid="fix-toggle"
+            data-testid={fix ? 'fix-toggle' : 'row-toggle'}
             aria-expanded={open}
             aria-controls={previewId}
-            aria-label={open ? 'Hide the fix' : 'Show the fix'}
+            aria-label={fix ? (open ? 'Hide the fix' : 'Show the fix') : links.length ? (open ? 'Hide the links' : 'Show the links') : open ? 'Hide the message' : 'Show the message'}
             onClick={() => setOpen(!open)}
             style={{ flex: 'none', border: 0, background: 'transparent', cursor: 'pointer', padding: '2px 4px', color: 'var(--muted)' }}
           >
             {open ? '▴' : '▾'}
-          </button>
-        )}
+        </button>
       </div>
     </li>
   )
@@ -1752,8 +1839,13 @@ type ReanalyzeCtl = {
   run: (keys: string[], from: string) => void
   busy: boolean
   inFlight: boolean
+  // Where the last request that went through came from ('card', a row id, an item key).
+  lastFrom: string
   failed: { keys: string[]; from: string; why: string } | null
 }
+
+// Items one re-analyze request may name (store.py `REANALYZE_MAX_KEYS`).
+const REANALYZE_MAX_KEYS = 20
 
 function useReanalyze(needs: Needs | null, onChanged: () => void): ReanalyzeCtl {
   const api = useAppApi()
@@ -1761,11 +1853,13 @@ function useReanalyze(needs: Needs | null, onChanged: () => void): ReanalyzeCtl 
   // Sent here, until the next /needs says whether it is still in flight.
   const [asked, setAsked] = useState(false)
   const [failed, setFailed] = useState<ReanalyzeCtl['failed']>(null)
+  const [lastFrom, setLastFrom] = useState('')
   useEffect(() => setAsked(false), [needs])
   const run = async (keys: string[], from: string) => {
     if (busy || keys.length === 0) return
     setFailed(null)
     setBusy(true)
+    setLastFrom(from)
     try {
       await api.post(`${BASE}/items/reanalyze`, { keys })
       setAsked(true)
@@ -1780,7 +1874,49 @@ function useReanalyze(needs: Needs | null, onChanged: () => void): ReanalyzeCtl 
       setBusy(false)
     }
   }
-  return { run, busy, inFlight: asked || !!needs?.reanalyze?.in_flight, failed }
+  return { run, busy, inFlight: asked || !!needs?.reanalyze?.in_flight, lastFrom, failed }
+}
+
+// Investigate from a row: ONE click starts the read-only Investigator on the row's items,
+// through the same `POST /investigate` the Ledger tab uses. The row says "Investigating…"
+// until `/needs` shows the run, then follows it from `/now`.
+type InvestigateCtl = {
+  run: (keys: string[], from: string) => void
+  busy: Set<string>
+  // Rows whose request went through, until the next /needs shows the run.
+  asked: Set<string>
+  failed: { keys: string[]; from: string; why: string } | null
+}
+
+function useInvestigate(needs: Needs | null, onChanged: () => void): InvestigateCtl {
+  const api = useAppApi()
+  const [busy, setBusy] = useState<Set<string>>(new Set())
+  const [asked, setAsked] = useState<Set<string>>(new Set())
+  const [failed, setFailed] = useState<InvestigateCtl['failed']>(null)
+  useEffect(() => setAsked(new Set()), [needs])
+  const run = async (keys: string[], from: string) => {
+    if (busy.has(from) || keys.length === 0) return
+    setFailed(null)
+    setBusy((prev) => new Set(prev).add(from))
+    try {
+      await api.post(`${BASE}/investigate`, { keys: keys.slice(0, 10), repo: '' })
+      setAsked((prev) => new Set(prev).add(from))
+      onChanged()
+    } catch (err) {
+      const b = errorBody(err)
+      const why = b.code === 'unattended_required'
+        ? 'Investigate needs unattended mode: turn it on on the Crew card (Team tab), then try again. Nothing was started.'
+        : `Could not start the Investigator: ${b.error || (err as Error).message || 'the gateway refused it'}. Nothing was started.`
+      setFailed({ keys, from, why })
+    } finally {
+      setBusy((prev) => {
+        const next = new Set(prev)
+        next.delete(from)
+        return next
+      })
+    }
+  }
+  return { run, busy, asked, failed }
 }
 
 function NeedsCard({
@@ -1788,15 +1924,18 @@ function NeedsCard({
   handled,
   onChanged,
   onWhy,
+  investigator,
 }: {
   needs: Needs | null
   handled: Item[]
   onChanged: () => void
   onWhy: (e: NeedEntry) => void
+  investigator?: NowRow
 }) {
   const api = useAppApi()
   const fixer = useDispatchFix(onChanged)
   const reanalyze = useReanalyze(needs, onChanged)
+  const investigate = useInvestigate(needs, onChanged)
   const ra = needs?.reanalyze
   const raLabel = !ra ? '' : ra.total > ra.keys.length ? `Re-analyze ${ra.keys.length} of ${ra.total} stale` : `Re-analyze ${ra.total} stale`
   const fixes = needs?.fixes || []
@@ -1958,6 +2097,9 @@ function NeedsCard({
                     sentHere={fixer.sent[e.key]}
                     failed={g.id === 'decide' ? fixer.failed[e.key] : undefined}
                     excluded={excluded.has(e.key)}
+                    investigator={investigator}
+                    investigate={investigate}
+                    ask={reanalyze}
                     onExclude={
                       g.id === 'decide' && batchable.length >= 2 && batchable.some((r) => r.key === e.key)
                         ? (on) =>

@@ -57,6 +57,7 @@ const shots = [
   { name: 'needs-login', source: 'needs_login', tab: null },
   { name: 'now-strip', source: 'ok', tab: null, clip: 'now-strip' },
   { name: 'fix-merged', source: 'ok', q: '&fix=merged', tab: null, clip: 'Needs you', openHandoffs: true },
+  { name: 'investigate-row', source: 'ok', tab: null, clip: 'Needs you', investigateRow: true },
 ]
 const errors = []
 // A row of the "Needs a decision" group, by its summary.
@@ -87,6 +88,13 @@ try {
       await row.getByRole('button', { name: 'Dispatch fix' }).click()
       await row.getByTestId('fix-dispatched').waitFor({ timeout: 5000 })
       await row.getByTestId('fix-toggle').click()
+    }
+    if (s.investigateRow) {
+      const row = page.getByRole('region', { name: 'Reported more than once' }).getByTestId('need-row').first()
+      await row.getByRole('button', { name: 'Investigate', exact: true }).click()
+      await row.getByTestId('row-investigating').waitFor({ timeout: 5000 })
+      await page.getByRole('region', { name: 'Needs a decision' }).getByRole('button', { name: 'Show 3 more' }).click()
+      await decideRow(page, 'Charts flicker on window resize').getByTestId('row-toggle').click()
     }
     if (s.openDetail) await decideRow(page, REPLY_FIRST).getByRole('button', { name: 'Open', exact: true }).click()
     if (s.openHandled) await page.getByText(/^Handled \(/).click()
@@ -233,7 +241,7 @@ try {
     await lines.nth(2).waitFor({ timeout: 5000 })
     const posts = await page.evaluate(() => (window.__posts || []).filter((p) => p.path.includes('/items/handoff/dispatch')))
     const csv = (await decideRow(page, 'CSV export fails for files over ~50k rows').getByTestId('fix-dispatched').textContent()) || ''
-    await decide.getByRole('button', { name: 'Show 2 more' }).click()
+    await decide.getByRole('button', { name: 'Show 3 more' }).click()
     const search = (await decideRow(page, 'Search results take 10s+').getByTestId('fix-dispatched').textContent()) || ''
     const hrefs = await decide.getByTestId('fix-dispatched').getByRole('link', { name: 'Open session' }).evaluateAll((els) => els.map((e) => e.getAttribute('href')))
     const dialogs = await page.getByRole('dialog').count()
@@ -265,7 +273,7 @@ try {
     const all = decide.getByRole('button', { name: /^Dispatch all fixes \(/ })
     const label = (await all.textContent()).trim()
     await all.click()
-    await decide.getByRole('button', { name: 'Show 2 more' }).click()
+    await decide.getByRole('button', { name: 'Show 3 more' }).click()
     await decideRow(page, 'Search results take 10s+').getByTestId('fix-dispatched').waitFor({ timeout: 5000 })
     const posts = await page.evaluate(() => (window.__posts || []).filter((p) => p.path.includes('/items/handoff/dispatch')))
     const left = await rowButtons(row)
@@ -520,11 +528,11 @@ try {
     const tabOnly = ledgerWords === 1 && (await page.getByRole('tab', { name: 'Ledger', exact: true }).count()) === 1
     const noLedger = tabOnly && (await page.getByTestId('ledger-list').count()) === 0
       && (await page.locator('#sr-filter').count()) === 0
-      && (await page.getByRole('button', { name: /^Investigate/ }).count()) === 0
+      && (await page.getByRole('textbox', { name: /GitHub repository to search/ }).count()) === 0
       && (await page.getByText('Tracked items').count()) === 0
     const decide = page.getByRole('region', { name: 'Needs a decision' })
     const before = await decide.getByTestId('need-row').count()
-    const more = decide.getByRole('button', { name: 'Show 2 more' })
+    const more = decide.getByRole('button', { name: 'Show 3 more' })
     const moreShown = (await more.count()) === 1
     await more.click()
     const rows = await decide.getByTestId('need-row').evaluateAll((els) =>
@@ -541,12 +549,56 @@ try {
     }
     const primaries = await decide.getByTestId('need-actions').locator('button:first-child').allTextContents()
     const ages = await decide.getByTestId('need-age').allTextContents()
-    const ok = noLedger && before === 5 && moreShown && rows.length === 7 && sorted
-      && JSON.stringify(primaries) === JSON.stringify(['Dispatch fix', 'Done', 'Open', 'Done', 'Dispatch fix', 'Done', 'Decide'])
+    const noDecide = (await page.getByRole('button', { name: 'Decide', exact: true }).count()) === 0
+    const ok = noLedger && before === 5 && moreShown && rows.length === 8 && sorted && noDecide
+      && JSON.stringify(primaries) === JSON.stringify(['Dispatch fix', 'Done', 'Open', 'Done', 'Dispatch fix', 'Done', 'Open', 'Ask lead'])
       && rows.filter((r) => r[2] === '1').length === 1
       && ages.every((a) => / ago$/.test(a))
     if (!ok) errors.push(`[board] ledger words ${ledgerWords} noLedger ${noLedger} before ${before} more ${moreShown} rows ${JSON.stringify(rows)} sorted ${sorted} primaries ${JSON.stringify(primaries)} ages ${JSON.stringify(ages)}`)
     else console.log('check board: ok', JSON.stringify(rows), JSON.stringify(primaries))
+    await ctx.close()
+  }
+  // DOM check: row actions. A cluster row's Investigate posts /investigate ONCE with the
+  // cluster's keys and the row reads "Investigating…" and "Investigator · running";
+  // an investigated bug's Ask lead posts /items/reanalyze ONCE with its one key and reads
+  // "Lead thinking…"; a question with no draft shows Open; no row says Decide.
+  {
+    const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, timezoneId: 'UTC', locale: 'en-US' })
+    const page = await ctx.newPage()
+    page.on('pageerror', (e) => errors.push(`[row actions] ${e.message}`))
+    await page.goto('http://127.0.0.1:5287/index.html?source=ok')
+    await page.getByText('Needs you', { exact: true }).first().waitFor({ timeout: 30000 })
+    const posts = () => page.evaluate(() => window.__posts || [])
+    const cluster = page.getByRole('region', { name: 'Reported more than once' }).getByTestId('need-row').first()
+    const clusterBtn = await rowButtons(cluster)
+    await cluster.getByRole('button', { name: 'Investigate', exact: true }).click()
+    await cluster.getByTestId('row-investigating').waitFor({ timeout: 5000 })
+    const invBtn = cluster.getByTestId('need-actions').locator('button').first()
+    const invLabel = (await invBtn.textContent()).trim()
+    const invOff = await invBtn.isDisabled()
+    const invLine = (await cluster.getByTestId('row-investigating').textContent()).trim()
+    const inv = (await posts()).filter((p) => p.path.endsWith('/investigate'))
+    const decide = page.getByRole('region', { name: 'Needs a decision' })
+    await decide.getByRole('button', { name: 'Show 3 more' }).click()
+    const bug = decideRow(page, 'Charts flicker on window resize')
+    const bugBtn = await rowButtons(bug)
+    const bugLine = (await bug.getByTestId('row-investigated').textContent()).trim()
+    await bug.getByTestId('row-toggle').click()
+    const links = await bug.getByTestId('row-links').locator('a').count()
+    await bug.getByRole('button', { name: 'Ask lead', exact: true }).click()
+    await bug.getByText('Lead thinking…').waitFor({ timeout: 5000 })
+    const ra = (await posts()).filter((p) => p.path.endsWith('/items/reanalyze'))
+    const question = decideRow(page, 'Where to export the audit log')
+    const qBtn = await rowButtons(question)
+    const decideAnywhere = await page.getByText('Decide', { exact: true }).count()
+    const ok = JSON.stringify(clusterBtn) === JSON.stringify(['Investigate'])
+      && inv.length === 1 && inv[0].body.keys.length === 2 && invLabel === 'Investigating…' && invOff
+      && /^Investigator · running · since \d\d:\d\d$/.test(invLine)
+      && JSON.stringify(bugBtn) === JSON.stringify(['Ask lead']) && bugLine === 'Investigated · 2 links' && links === 2
+      && ra.length === 1 && ra[0].body.keys.length === 1
+      && JSON.stringify(qBtn) === JSON.stringify(['Open']) && decideAnywhere === 0
+    if (!ok) errors.push(`[row actions] cluster ${JSON.stringify(clusterBtn)} inv ${JSON.stringify(inv)} label ${invLabel} off ${invOff} line ${invLine} bug ${JSON.stringify(bugBtn)} ${bugLine} links ${links} ra ${JSON.stringify(ra)} q ${JSON.stringify(qBtn)} decide ${decideAnywhere}`)
+    else console.log('check row actions: ok', invLine, '|', bugLine)
     await ctx.close()
   }
   // DOM check: the Ledger tab lists every item newest first, with its filters and

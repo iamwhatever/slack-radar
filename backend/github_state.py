@@ -19,10 +19,9 @@ Per-URL readings live in ``pr_states.json`` beside the ledger. Each dispatched i
 gets ``fix_handoff.pr_state = {state, at, checked_at[, merged_at][, why]}`` (``at`` is
 when the state last changed), written only here; the record tool refuses it. The
 first time an item's state becomes ``merged`` one ``dispatch`` event
-``PR #N merged`` is logged and, unless it already carries one, the item is flagged
-``possibly_resolved`` (``fix PR #N merged``) for the Thread Watcher, the way the
-poller flags a thread. A flag is a question, never a verdict: nothing here sets
-``resolved``.
+``PR #N merged`` is logged. That is all a PR state change does: no flag, no wake, no
+Watcher run. A merged fix reaches the Lead only when the owner presses Re-analyze
+(``store.needs_reanalysis`` counts it for that button).
 """
 
 from __future__ import annotations
@@ -257,9 +256,6 @@ async def refresh(data_dir: Path, *, run: Runner | None = None, now_: float | No
                 changed.append(key)
                 if reading["state"] == "merged":
                     merged.append(key)
-                    if not it.get("possibly_resolved"):
-                        n = handoff.pr_number(mine[0])
-                        it["possibly_resolved"] = {"reason": f"fix PR #{n} merged" if n else "fix PR merged", "at": t}
         return changed, merged
 
     try:

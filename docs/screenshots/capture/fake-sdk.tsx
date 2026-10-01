@@ -75,7 +75,10 @@ const need = (it: (typeof ITEMS)[number], reason: string, extra: Record<string, 
   latest_reply: (it as { latest_reply?: string }).latest_reply || '', needs_reanalysis: false,
   key: it.key, channel: it.channel, permalink: it.permalink, summary: it.summary || it.text.slice(0, 200),
   priority: it.priority, category: it.category, age_hours: Math.round((T0 + 7200 - it.ts_float) / 360) / 10,
-  reason, text: it.text, user: it.user, ts_float: it.ts_float,
+  reason, text: it.text, user: it.user, ts_float: it.ts_float, status: it.status,
+  investigation: (it as { investigation?: string }).investigation || '',
+  investigation_at: (it as { investigation_at?: number }).investigation_at || 0,
+  links_count: it.links.length, links: it.links,
   replies: (it as { replies?: unknown[] }).replies || [], last_thread_check_at: T0 + 6000,
   ...(it.reply_draft ? { reply_draft_by: it.reply_draft.by, reply_draft_at: it.reply_draft.at } : {}),
   ...extra,
@@ -130,6 +133,21 @@ const EXTRA_LINKED = item(-1, 'C0DEMO1', 'lee', 'Where do I export the audit log
   links: ['https://github.com/example-org/example-app/issues/377'], investigation: 'spawn s-demo',
 })
 ITEMS.push(REPLY_ITEM, EXTRA_RESOLVED, EXTRA_LINKED)
+// An investigated bug with no draft and no hand-off: its row asks the Lead to decide.
+const INVESTIGATED_BUG = item(-2, 'C0DEMO2', 'max', 'Charts flicker when the window is resized', {
+  category: 'bug-report', summary: 'Charts flicker on window resize', reply_count: 1,
+  links: ['https://github.com/example-org/example-app/issues/366', 'https://github.com/example-org/example-app/pull/371'],
+  investigation: 'spawn s-demo2', investigation_at: T0 + 4000,
+})
+// Two reports of one problem nobody investigated yet: the cluster row offers Investigate.
+const CLUSTER = [
+  item(3, 'C0DEMO1', 'nina', 'Slack notifications arrive twice for every alert', {
+    category: 'bug-report', priority: 'p2', summary: 'Alert notifications arrive twice',
+  }),
+  item(2, 'C0DEMO1', 'otto', 'Every alert notification shows up twice in Slack', {
+    category: 'bug-report', priority: 'p2', summary: 'Duplicate alert notifications in Slack',
+  }),
+]
 ITEMS[0].fix_handoff = HANDOFF
 // The dispatched fix's thread moved after the dispatch: one of the two stale items.
 ;(ITEMS[3] as { latest_reply?: string }).latest_reply = `${T0 + 6900}.000600`
@@ -192,7 +210,7 @@ const NEEDS = {
   reanalyze: { keys: [ITEMS[3].key, REPLY_ITEM.key], total: 2, in_flight: false },
   groups: [
     // Within p3 the stale draft sorts first; otherwise priority, then newest.
-    { id: 'decide', total: 7, entries: [
+    { id: 'decide', total: 8, entries: [
       need(ITEMS[0], 'Fix ready to hand off', { handoff_title: HANDOFF.title }),
       need(ITEMS[3], `Fix in progress · ${IN_PROGRESS.title}`, { handoff_title: IN_PROGRESS.title.slice(5), dispatch: IN_PROGRESS, needs_reanalysis: true }),
       need(REPLY_ITEM, 'Reply ready to send', {
@@ -203,6 +221,7 @@ const NEEDS = {
       need(ITEMS[4], 'Fix ready to hand off', { handoff_title: HANDOFF2.title }),
       need(EXTRA_RESOLVED, 'Looks resolved: reply says “working again”'),
       need(EXTRA_LINKED, 'Matching GitHub work found'),
+      need(INVESTIGATED_BUG, 'Matching GitHub work found'),
     ] },
     { id: 'unanswered', total: 1, entries: [
       need(item(1, 'C0DEMO2', 'gina', 'Is there an SSO option for the free plan?', {
@@ -210,7 +229,7 @@ const NEEDS = {
       }), 'No reply for 3 days', { age_hours: 74 }),
     ] },
     { id: 'clusters', total: 1, entries: [
-      need(ITEMS[0], '3 similar messages', { members: [ITEMS[0].key, 'C0DEMO1:1758701000.000100', 'C0DEMO1:1758701200.000100'], words: ['csv', 'export', 'rows'] }),
+      need(CLUSTER[0], '2 similar messages', { members: CLUSTER.map((it) => it.key), words: ['alert', 'notifications', 'twice'] }),
     ] },
   ],
 }
@@ -349,6 +368,16 @@ const api = {
       const keys = (body as { keys?: string[] })?.keys || []
       return { ok: true, mode: 'server', session_key: 'chat-88-1', title: `Fix batch: ${keys.length} problems (example-org/example-app)`,
         agent: 'kirocrew-conductor', at: T0 + 7000, trusted: false, why: 'unattended mode is off', batch: true, batch_keys: keys }
+    }
+    if (path.endsWith('/investigate')) {
+      // The gateway marks the items and starts the Investigator; the next /needs shows it.
+      const keys = (body as { keys?: string[] })?.keys || []
+      for (const g of NEEDS.groups) {
+        for (const e of g.entries as Record<string, unknown>[]) {
+          if (keys.includes(String(e.key))) Object.assign(e, { investigation: 'spawn s-new', status: 'investigating', investigation_at: NOW_T - 5 })
+        }
+      }
+      return { ok: true, spawn_id: 's-new' }
     }
     if (path.endsWith('/items/reanalyze')) {
       return { ok: true, keys: (body as { keys?: string[] })?.keys || [], requested_at: T0 + 7100, started: true }

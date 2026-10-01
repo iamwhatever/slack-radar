@@ -337,13 +337,45 @@ def test_a_new_dispatch_forgets_the_old_pr_state() -> None:
     assert "pr_state" not in it["fix_handoff"] and "pr_state_seen_at" not in it["fix_handoff"]
 
 
-def test_merge_flags_possibly_resolved_for_the_watcher(tmp_path: Path) -> None:
+def test_merge_records_the_state_and_one_event_and_nothing_else(tmp_path: Path) -> None:
     fresh = _item(1, pr=_url(412))
     flagged = _item(2, pr=_url(413), possibly_resolved={"reason": "poster reacted :white_check_mark:", "at": NOW - 9})
     _seed(tmp_path, fresh, flagged)
-    _refresh(tmp_path, FakeGh({_url(412): {"state": "MERGED"}, _url(413): {"state": "MERGED"}}))
+    out = _refresh(tmp_path, FakeGh({_url(412): {"state": "MERGED"}, _url(413): {"state": "MERGED"}}))
+    assert set(out["merged"]) == {fresh["key"], flagged["key"]}
     items = store.read_ledger(tmp_path)["items"]
-    assert items[fresh["key"]]["possibly_resolved"] == {"reason": "fix PR #412 merged", "at": NOW}
+    assert items[fresh["key"]]["fix_handoff"]["pr_state"]["state"] == "merged"
+    assert not items[fresh["key"]].get("possibly_resolved")
     assert items[flagged["key"]]["possibly_resolved"]["reason"] == "poster reacted :white_check_mark:"
-    assert items[fresh["key"]]["status"] == "triaged"  # a flag, never a verdict
-    assert {it["key"] for it in crew_runtime.flagged_for_watcher(store.read_ledger(tmp_path))} == {fresh["key"], flagged["key"]}
+    assert items[fresh["key"]]["status"] == "triaged"
+    assert [it["key"] for it in crew_runtime.flagged_for_watcher(store.read_ledger(tmp_path))] == [flagged["key"]]
+    events = [e["text"] for e in store.read_events(tmp_path) if e["kind"] == "dispatch"]
+    assert sorted(events) == ["PR #412 merged", "PR #413 merged"]
+    # The same reading again logs nothing new.
+    _refresh(tmp_path, FakeGh({_url(412): {"state": "MERGED"}}), NOW + 10 * 3600)
+    assert len([e for e in store.read_events(tmp_path) if e["kind"] == "dispatch"]) == 2
+
+
+def test_a_merge_is_not_handed_to_the_watcher(tmp_path: Path) -> None:
+    from test_member_runs import _Spawn
+
+    store.update_crew(tmp_path, {"enabled": True})
+    it = _item(1, pr=_url(412))
+    _seed(tmp_path, it)
+    _refresh(tmp_path, FakeGh({_url(412): {"state": "MERGED"}}))
+    spawn = _Spawn()
+    assert asyncio.run(crew_runtime.dispatch_watcher(tmp_path, spawn)) == "" and spawn.calls == []
+
+
+def test_a_merge_alone_does_not_wake_the_lead(env) -> None:
+    state, _handler, data = env
+    from tests.test_wake import _HttpApp
+
+    crew_runtime.bind_http_app(_HttpApp(state=state))
+    it = _item(1, pr=_url(412))
+    _seed(data, it)
+    pr_states = _refresh(data, FakeGh({_url(412): {"state": "MERGED"}}))
+    assert pr_states["merged"] == [it["key"]]
+    woke = asyncio.run(crew_runtime.after_poll(data, {"new": 0, "thread_changed": 0, "possibly_resolved": 0,
+                                                     "pr_states": pr_states}, reason="timer"))
+    assert woke is False and not _slot(state).prompts

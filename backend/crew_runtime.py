@@ -51,7 +51,7 @@ from . import store
 logger = logging.getLogger("kirocrew.app.slack-radar")
 
 APP_NAME = "slack-radar"
-BRIEF_SENTINEL = "<!-- slack-radar-crew-brief v9 -->"
+BRIEF_SENTINEL = "<!-- slack-radar-crew-brief v10 -->"
 _BRIEF_PATH = Path(__file__).with_name("crew_brief.md")
 _brief_cache: str | None = None
 
@@ -936,10 +936,18 @@ REANALYZE_HEADER = "[owner request: re-analyze]"
 
 #: What a fix PR's state means for the Lead; the brief carries the same rule.
 REANALYZE_PR_RULE = (
-    "A merged PR means the fix landed: the gateway already flagged the item `possibly_resolved` "
-    "for the Thread Watcher, so leave that flag to it, or set `status: resolved` when the thread "
-    "also confirms; draft a short 'fixed in ...' reply ONLY if the thread has no maintainer answer "
-    "yet. A closed-unmerged PR means the fix did not land -- say so in `note`."
+    "A merged PR means the fix landed: this request is the only way a merge reaches you. Set "
+    "`status: resolved` when the thread also confirms; draft a short 'fixed in ...' reply ONLY if "
+    "the thread has no maintainer answer yet. A closed-unmerged PR means the fix did not land -- "
+    "say so in `note`."
+)
+
+#: The line an item with no draft and no hand-off carries in a re-analyze request.
+REANALYZE_DECIDE_ASK = "decide: fix hand-off, reply draft, or close"
+REANALYZE_DECIDE_RULE = (
+    "An item marked `ask: " + REANALYZE_DECIDE_ASK + "` has neither yet: write a `fix_handoff` "
+    "(the hand-off rules apply) when its investigation points at a fix, else a `reply_draft` "
+    "when an answer would help the poster, else set `status: noise` or `resolved`."
 )
 
 
@@ -985,15 +993,20 @@ def reanalyze_prompt(rows: list[dict[str, Any]]) -> str:
             ps = pr_state_text(store.fix_pr_state(it)) if pr else ""
             pr_line = f"PR {pr} · {ps}" if pr else "PR none yet"
             lines.append(f"  dispatched fix: {d.get('title') or 'fix session'} · session {d.get('state') or 'unknown'} · {pr_line}")
+        elif not draft and not h.get("prompt"):
+            found = [u for u in it.get("links") or [] if isinstance(u, str)]
+            lines.append("  investigation links: " + (", ".join(found[:8]) if found else "none"))
+            lines.append(f"  ask: {REANALYZE_DECIDE_ASK}")
         blocks.append("\n".join(lines))
     return (
         f"{REANALYZE_HEADER} The owner pressed Re-analyze on the Board for {len(rows)} item(s). "
-        "Their threads moved, or their fix PR was merged or closed, after your last look. Call "
-        "slack_radar_read, then for EACH item below do exactly one of: rewrite `reply_draft` for what "
-        "the thread says now (a draft that still fits is recorded again unchanged, which marks it "
-        "current); set `reply_draft: null` when the thread already answered it; or set `status: "
-        "resolved` (or leave `possibly_resolved` for the Thread Watcher) when the thread shows the fix "
-        "landed. " + REANALYZE_PR_RULE + " Write one `note` line per item saying what you decided and "
+        "Their threads moved, their fix PR was merged or closed, or they wait for your call, after "
+        "your last look. Call slack_radar_read, then for EACH item below do exactly one of: rewrite "
+        "`reply_draft` for what the thread says now (a draft that still fits is recorded again "
+        "unchanged, which marks it current); set `reply_draft: null` when the thread already answered "
+        "it; or set `status: resolved` (or leave `possibly_resolved` for the Thread Watcher) when the "
+        "thread shows the fix landed. " + REANALYZE_PR_RULE + " " + REANALYZE_DECIDE_RULE + " Write one "
+        "`note` line per item saying what you decided and "
         "why. Record them with slack_radar_record in one call. Touch no item that is not in this list. "
         "You never post: the owner sends every reply.\n\nItems:\n" + "\n".join(blocks)
     )
