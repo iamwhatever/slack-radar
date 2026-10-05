@@ -68,6 +68,8 @@ type ThreadReply = { ts: string; user: string; text: string }
 type DraftStale = { since: string; new_replies: number }
 // The Re-analyze button (needs.py `reanalyze_view`): the keys it sends, of how many.
 type Reanalyze = { keys: string[]; total: number; in_flight: boolean }
+// The batch Ask lead button (needs.py `ask_lead_view`): the next items it sends, of how many wait.
+type AskLead = { keys: string[]; total: number; in_flight: boolean }
 type NeedGroup = { id: 'decide' | 'unanswered' | 'clusters'; total: number; entries: NeedEntry[] }
 // A fix task the Lead wrote for a coding session (store.py `fix_handoff`, LOCAL).
 type FixHandoff = { title: string; prompt: string; repo: string; links: string[]; at: number }
@@ -134,6 +136,7 @@ type Needs = {
   replied?: RepliedRow[]
   replied_total?: number
   reanalyze?: Reanalyze
+  ask_lead?: AskLead
 }
 // A reply the owner sent to a thread (store.py `replied`).
 type RepliedRow = { key: string; channel: string; summary: string; text: string; at: number; permalink: string }
@@ -1874,7 +1877,7 @@ function useReanalyze(needs: Needs | null, onChanged: () => void): ReanalyzeCtl 
       setBusy(false)
     }
   }
-  return { run, busy, inFlight: asked || !!needs?.reanalyze?.in_flight, lastFrom, failed }
+  return { run, busy, inFlight: asked || !!needs?.reanalyze?.in_flight || !!needs?.ask_lead?.in_flight, lastFrom, failed }
 }
 
 // Investigate from a row: ONE click starts the read-only Investigator on the row's items,
@@ -1937,6 +1940,10 @@ function NeedsCard({
   const reanalyze = useReanalyze(needs, onChanged)
   const investigate = useInvestigate(needs, onChanged)
   const ra = needs?.reanalyze
+  const al = needs?.ask_lead
+  // One click sends the next batch; it shares Re-analyze's one-request-at-a-time guard.
+  const alLabel = !al ? '' : reanalyze.busy || reanalyze.inFlight ? 'Lead thinking…'
+    : al.total === 0 ? 'Nothing waiting for Lead' : `Ask Lead (${al.keys.length} of ${al.total} waiting)`
   const raLabel = !ra ? '' : ra.total > ra.keys.length ? `Re-analyze ${ra.keys.length} of ${ra.total} stale` : `Re-analyze ${ra.total} stale`
   const fixes = needs?.fixes || []
   const batches = needs?.fix_batches || []
@@ -2013,6 +2020,17 @@ function NeedsCard({
       <div className="flex items-center gap-2">
         <CardTitle>Needs you</CardTitle>
         <div className="flex-1" />
+        {al && (
+          <Btn
+            style={small}
+            data-testid="ask-lead-batch"
+            title="Hand the Radar Lead the oldest waiting items in one turn: it writes a fix hand-off, a reply draft, or closes each. Nothing is sent to Slack."
+            disabled={reanalyze.busy || reanalyze.inFlight || al.keys.length === 0}
+            onClick={() => reanalyze.run(al.keys, 'ask-batch')}
+          >
+            {alLabel}
+          </Btn>
+        )}
         {ra && (ra.total > 0 || reanalyze.inFlight) && (
           <Btn
             primary
@@ -2033,8 +2051,8 @@ function NeedsCard({
           </Btn>
         )}
       </div>
-      {reanalyze.failed && reanalyze.failed.from === 'card' && (
-        <ErrorNotice message={reanalyze.failed.why} onRetry={() => reanalyze.run(reanalyze.failed!.keys, 'card')} />
+      {reanalyze.failed && (reanalyze.failed.from === 'card' || reanalyze.failed.from === 'ask-batch') && (
+        <ErrorNotice message={reanalyze.failed.why} onRetry={() => reanalyze.run(reanalyze.failed!.keys, reanalyze.failed!.from)} />
       )}
       {failed && (
         <ErrorNotice

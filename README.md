@@ -221,6 +221,10 @@ When replies arrive in the thread after the draft was written, the draft is stal
 
 **Re-analyze N stale** at the top of *Needs you* is that ask. It counts the open items the Lead's last look is out of date for: a stale draft, a draft whose thread changed, a dispatched fix whose thread moved after the dispatch, or a dispatched fix whose PR was merged or closed since the Lead last re-analyzed it. One click hands the Lead one turn with those items (up to 20, oldest-checked first; the button then reads *Re-analyze 20 of N stale*), each with its original message, the replies newer than the draft, the draft and the fix's state, including its PR's (`PR <url> · merged 2026-09-30`, `· open`, `· closed, not merged`). The Lead rewrites the draft, withdraws it when the thread already answered it, or marks the item resolved when the thread shows the fix landed, and notes why. For a merged PR it marks the item resolved when the thread also confirms, and drafts a short "fixed in …" reply only when no maintainer has answered yet; for a PR closed without merging it notes that the fix did not land. Once sent, the item leaves the count until its PR state changes again. Nothing is sent to Slack. The button reads *Re-analyzing…* until every item it named moves, or 10 minutes pass; a second click meanwhile is refused. The detail view of a stale item has **Re-analyze this** for one item. A row with a dispatched fix shows *replies · last 16:54*, when its thread last moved.
 
+**Ask Lead (5 of N waiting)**, beside it, sends many **Ask lead** rows at once. It counts the open, investigated bug reports and feature requests with no draft, no hand-off and no dispatch that you have never asked the Lead about. One click hands the Lead one turn with the 5 oldest-posted of them, the same ask as the row's **Ask lead**; click again for the next 5 until it reads *Nothing waiting for Lead*. An item sent once, by row or by batch, never goes in a batch again. While the Lead has not moved on what it was last sent (up to 10 minutes) the button reads *Lead thinking…* and is disabled, and the gateway refuses a second send. The row's own **Ask lead** stays.
+
+![The Needs-you header with Ask Lead (5 of 23 waiting)](docs/screenshots/ask-lead-batch.png)
+
 ![Reply detail view](docs/screenshots/reply-detail.png)
 
  **Replied (N)** under the list shows what you sent, with a link to each reply. The Lead never posts: nothing reaches Slack without your click, one send per item per minute, and sending waits while Slack needs you to sign in again.
@@ -548,6 +552,10 @@ PR 状态变化本身从不启动小组的工作。合并的修复会在这一�
 草稿写好之后线程里又来了新回复，草稿就过时了。这一行会在 "Reply ready" 旁边显示 *N new replies since draft*，并排在同一优先级的其他行前面。详情里每条更新的回复标着 **new**，**Send to thread** 上方写着 *N replies arrived after this draft — read them first*。发送仍然是一次点击。组长不会自己重写草稿：第一次看过之后，只有你开口，草稿才会变。
 
 *Needs you* 顶部的 **Re-analyze N stale** 就是开口的方式。它数的是组长上次看过之后已经过时的未关闭条目：过时的草稿、线程有变化的草稿、派发之后线程又动了的修复，以及组长上次重新分析之后 PR 被合并或关闭的修复。点一次，组长得到一轮，只处理这些条目（最多 20 个，最久没复查的在前；超过时按钮写 *Re-analyze 20 of N stale*），每个都带原消息、草稿之后的回复、草稿和修复状态，包括 PR 的状态（`PR <url> · merged 2026-09-30`、`· open`、`· closed, not merged`）。组长会重写草稿，线程已经回答了就撤回草稿，线程显示修复已上线就标为已解决，并写下理由。PR 已合并时，线程也确认就标为已解决，只有还没有维护者回答时才起草一句简短的“已在……修复”回复；PR 未合并就关闭时，它在 note 里写明修复没有上线。发出之后，这个条目不再计数，直到它的 PR 状态再次变化。什么都不会发到 Slack。在它点名的每个条目都有变化之前（最多 10 分钟），按钮显示 *Re-analyzing…*，这期间再点会被拒绝。过时条目的详情里有 **Re-analyze this**，只处理这一条。有已派发修复的行会显示 *replies · last 16:54*，即线程最近一次变化的时间。
+
+旁边的 **Ask Lead (5 of N waiting)** 一次发出多行 **Ask lead**。它数的是已经查过、没有草稿、没有交接、没有派发、而且你从没问过组长的未关闭 bug 报告和功能请求。点一次，组长得到一轮，处理其中发帖最早的 5 条，问法和行上的 **Ask lead** 一样；再点就发下 5 条，直到按钮显示 *Nothing waiting for Lead*。一条被问过一次（不管是单行还是批量），就不会再进批量。组长对上一次发给它的条目还没有动静时（最多 10 分钟），按钮显示 *Lead thinking…* 并禁用，网关也会拒绝第二次发送。行上原来的 **Ask lead** 保留。
+
+![Needs-you 标题栏上的 Ask Lead (5 of 23 waiting)](docs/screenshots/ask-lead-batch.png)
 
 ![回复详情](docs/screenshots/reply-detail.png)
 
