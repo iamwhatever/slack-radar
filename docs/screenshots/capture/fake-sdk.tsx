@@ -178,6 +178,9 @@ const batchD = (pr: number) => ({
   batch: true, batch_keys: BATCH_ITEMS.map((it) => it.key), pr_urls: [] as string[],
 })
 
+// Investigated reports with no draft and no hand-off, oldest first: the batch Ask lead's queue.
+const ASK_WAITING = Array.from({ length: 23 }, (_, i) => `C0DEMO0002:${T0 - 86400 + i * 900}.000300`)
+
 const NEEDS = {
   ok: true,
   handled_total: HANDLED.length,
@@ -208,6 +211,7 @@ const NEEDS = {
   }],
   // The stale draft and the dispatched fix whose thread moved: oldest-checked first.
   reanalyze: { keys: [ITEMS[3].key, REPLY_ITEM.key], total: 2, in_flight: false },
+  ask_lead: { keys: ASK_WAITING.slice(0, 5), total: ASK_WAITING.length, in_flight: false },
   groups: [
     // Within p3 the stale draft sorts first; otherwise priority, then newest.
     { id: 'decide', total: 8, entries: [
@@ -380,6 +384,11 @@ const api = {
       return { ok: true, spawn_id: 's-new' }
     }
     if (path.endsWith('/items/reanalyze')) {
+      // What the gateway's next /needs would say: the sent items left the queue, and the Lead is busy.
+      const sent = new Set((body as { keys?: string[] })?.keys || [])
+      const left = ASK_WAITING.filter((k) => !sent.has(k))
+      ASK_WAITING.splice(0, ASK_WAITING.length, ...left)
+      NEEDS.ask_lead = { keys: left.slice(0, 5), total: left.length, in_flight: true }
       return { ok: true, keys: (body as { keys?: string[] })?.keys || [], requested_at: T0 + 7100, started: true }
     }
     if (path.endsWith('/items/reply/send')) {

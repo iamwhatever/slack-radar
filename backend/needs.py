@@ -15,7 +15,8 @@ Three groups, in this order:
 
 Within one priority, a row whose reply draft is stale (``reply_draft.stale``) comes
 first; otherwise newest first. ``reanalyze`` names the open items the Board's
-Re-analyze button sends the Lead (``store.needs_reanalysis``).
+Re-analyze button sends the Lead (``store.needs_reanalysis``); ``ask_lead`` names the
+next :data:`ASK_LEAD_BATCH` items its **Ask lead** batch button sends (:func:`awaits_lead`).
 
 An item the owner marked handled (``handled_at > 0``) is in none of them. An item lands
 in at most one of ``decide`` / ``unanswered`` (``decide`` wins); a cluster may name
@@ -65,6 +66,9 @@ REPLIED_CAP = 50
 DISPATCHED_REASON = "Fix in progress"
 #: The ``decide`` reason for a dispatched fix whose PR was merged (``Fix merged · PR #N``).
 MERGED_REASON = "Fix merged"
+
+#: Items one click on the Board's batch **Ask lead** button hands the Lead.
+ASK_LEAD_BATCH = 5
 
 _PRIORITY_RANK = {"p0": 0, "p1": 1, "p2": 2, "p3": 3}
 
@@ -514,6 +518,38 @@ def build_needs(
         "handoffs": [handoff_entry(it) for it in handoffs[:HANDOFF_CAP]],
         "handoffs_total": len(handoffs),
         "reanalyze": reanalyze_view(ledger, stale, t),
+        "ask_lead": ask_lead_view(pool, t),
+    }
+
+
+def awaits_lead(item: dict[str, Any]) -> bool:
+    """An item a row's **Ask lead** is for, never yet sent to the Lead.
+
+    An investigated ``bug-report``/``feature-request`` (it has links, or an
+    investigation that finished) with no reply draft, no hand-off and no dispatch, and
+    no ``reanalyze_requested_at``: once the owner asked about it, by row or by batch,
+    the batch never sends it again. A failed send clears the stamp, so it comes back.
+    """
+    if item.get("category") not in store.HANDOFF_CATEGORIES:
+        return False
+    investigated = bool(_links(item)) or (bool(item.get("investigation")) and item.get("status") != "investigating")
+    if not investigated or store.has_reply_draft(item) or has_handoff(item) or dispatch_of(item):
+        return False
+    return not _float(item.get("reanalyze_requested_at"))
+
+
+def ask_lead_view(pool: list[dict[str, Any]], now: float) -> dict[str, Any]:
+    """The batch **Ask lead** button: ``{keys, total, in_flight}``.
+
+    ``keys`` are the oldest-posted :data:`ASK_LEAD_BATCH` open, unhandled items that
+    :func:`awaits_lead`; ``total`` all of them; ``in_flight`` is the same guard as
+    Re-analyze (any asked item not moved yet), which ``/items/reanalyze`` enforces.
+    """
+    waiting = sorted((it for it in pool if awaits_lead(it)), key=lambda it: (posted_at(it), str(it.get("key") or "")))
+    return {
+        "keys": [str(it.get("key") or "") for it in waiting[:ASK_LEAD_BATCH]],
+        "total": len(waiting),
+        "in_flight": any(store.reanalyze_in_flight(it, now) for it in pool),
     }
 
 

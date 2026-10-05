@@ -58,6 +58,7 @@ const shots = [
   { name: 'now-strip', source: 'ok', tab: null, clip: 'now-strip' },
   { name: 'fix-merged', source: 'ok', q: '&fix=merged', tab: null, clip: 'Needs you', openHandoffs: true },
   { name: 'investigate-row', source: 'ok', tab: null, clip: 'Needs you', investigateRow: true },
+  { name: 'ask-lead-batch', source: 'ok', tab: null, clip: 'Needs you' },
 ]
 const errors = []
 // A row of the "Needs a decision" group, by its summary.
@@ -376,6 +377,30 @@ try {
       && posts[0].body.keys.length === 2 && others === 0 && last === ' · replies · last Sep 24 09:55'
     if (!ok) errors.push(`[reanalyze] label ${label} after ${after} disabled ${disabled} posts ${JSON.stringify(posts)} others ${others} last ${JSON.stringify(last)}`)
     else console.log('check reanalyze: ok', label, JSON.stringify(posts[0].body.keys), last)
+    await ctx.close()
+  }
+  // DOM check: the Needs-you header's batch button reads "Ask Lead (5 of 23 waiting)";
+  // ONE click posts the re-analyze route once with the 5 oldest waiting keys, then it
+  // reads "Lead thinking…", disabled, and a second click sends nothing.
+  {
+    const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, timezoneId: 'UTC', locale: 'en-US' })
+    const page = await ctx.newPage()
+    page.on('pageerror', (e) => errors.push(`[ask-lead-batch] ${e.message}`))
+    await page.goto('http://127.0.0.1:5287/index.html?source=ok')
+    const btn = page.getByTestId('ask-lead-batch')
+    await btn.waitFor({ timeout: 30000 })
+    const label = (await btn.textContent()).trim()
+    await btn.click()
+    await btn.filter({ hasText: 'Lead thinking…' }).waitFor({ timeout: 5000 })
+    await btn.click({ force: true })
+    const after = (await btn.textContent()).trim()
+    const disabled = await btn.isDisabled()
+    const posts = await page.evaluate(() => (window.__posts || []).filter((p) => p.path.endsWith('/items/reanalyze')))
+    const want = Array.from({ length: 5 }, (_, i) => `C0DEMO0002:${1758700800 - 86400 + i * 900}.000300`)
+    const ok = label === 'Ask Lead (5 of 23 waiting)' && after === 'Lead thinking…' && disabled && posts.length === 1
+      && JSON.stringify(posts[0].body.keys) === JSON.stringify(want)
+    if (!ok) errors.push(`[ask-lead-batch] label ${label} after ${after} disabled ${disabled} posts ${JSON.stringify(posts)}`)
+    else console.log('check ask-lead-batch: ok', label, '->', after)
     await ctx.close()
   }
   // DOM check (?fix=merged): a dispatched fix whose PR merged sits in "decide" as
